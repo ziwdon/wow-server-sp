@@ -2482,7 +2482,9 @@ if should_run_phase "2.6"; then
         AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS \
         AC_QUESTS_IGNORE_AUTO_ACCEPT \
         AC_PLAYER_LIMIT \
-        AC_LEAVE_GROUP_ON_LOGOUT_ENABLED
+        AC_LEAVE_GROUP_ON_LOGOUT_ENABLED \
+        AC_UPDATES_ENABLE_DATABASES \
+        AC_ENABLE_PLAYER_SETTINGS
     do
         if ! grep -qF "${var}" "$COMPOSE_EFFECTIVE"; then
             echo "MISSING env var: ${var}"
