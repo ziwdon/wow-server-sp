@@ -1599,10 +1599,12 @@ adopt_existing_install() {
             echo "  ✗ Stack is on wrong remote ($remote) or branch ($branch)"
             fail=1
         fi
-        if [ -d "$STACK_DIR/modules/mod-playerbots" ] && [ -d "$STACK_DIR/modules/mod-ah-bot-plus" ]; then
-            echo "  ✓ Both modules present"
+        if [ -d "$STACK_DIR/modules/mod-playerbots" ] \
+           && [ -d "$STACK_DIR/modules/mod-ah-bot-plus" ] \
+           && [ -d "$STACK_DIR/modules/mod-individual-progression" ]; then
+            echo "  ✓ All three modules present"
         else
-            echo "  ✗ mod-playerbots and/or mod-ah-bot-plus modules missing"
+            echo "  ✗ mod-playerbots and/or mod-ah-bot-plus and/or mod-individual-progression modules missing"
             fail=1
         fi
     else
