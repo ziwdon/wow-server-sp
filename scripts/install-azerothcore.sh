@@ -2066,6 +2066,13 @@ if should_run_phase "1"; then
         "mod-ah-bot-plus" \
         "NathanHandley/mod-ah-bot-plus"
 
+    clone_or_verify_repo \
+        "https://github.com/ZhengPeiRu21/mod-individual-progression.git" \
+        "master" \
+        "${STACK_DIR}/modules/mod-individual-progression" \
+        "mod-individual-progression" \
+        "ZhengPeiRu21/mod-individual-progression"
+
     # VERIFY Phase 1
     echo ""
     echo "VERIFY Phase 1:"
@@ -2074,6 +2081,7 @@ if should_run_phase "1"; then
     git branch
     ls modules/mod-playerbots/ | head -10
     ls modules/mod-ah-bot-plus/ | head -10
+    ls modules/mod-individual-progression/ | head -10
     ls modules/mod-ah-bot-plus/conf/
 
     mark_phase_complete "1" "Repos cloned"
