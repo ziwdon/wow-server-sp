@@ -2591,7 +2591,7 @@ ls -ld /azerothcore/env/dist/logs || true
 '
 
     need_extract=false
-    required_templates=("mod_ahbot.conf.dist")
+    required_templates=("mod_ahbot.conf.dist" "individualProgression.conf.dist")
 
     if [ ! -f configs/modules/playerbots.conf.dist ] && [ ! -f configs/modules/mod_playerbots.conf.dist ]; then
         need_extract=true
@@ -2617,7 +2617,7 @@ ls -ld /azerothcore/env/dist/logs || true
                 echo "Template already present, not overwriting: $dest"
             fi
             found_templates=1
-        done < <(find modules/mod-playerbots modules/mod-ah-bot-plus \
+        done < <(find modules/mod-playerbots modules/mod-ah-bot-plus modules/mod-individual-progression \
             -type f -path '*/conf/*.conf.dist' -print0 2>/dev/null || true)
 
         # Fallback for future image layouts that may install module configs into
@@ -2638,6 +2638,7 @@ ls -ld /azerothcore/env/dist/logs || true
                 echo "Checked:"
                 echo "  modules/mod-playerbots/**/conf/*.conf.dist"
                 echo "  modules/mod-ah-bot-plus/**/conf/*.conf.dist"
+                echo "  modules/mod-individual-progression/**/conf/*.conf.dist"
                 echo "  ${WORLDSERVER_IMAGE}:/azerothcore/env/dist/etc/modules"
                 exit 1
             fi
@@ -2667,6 +2668,8 @@ ls -ld /azerothcore/env/dist/logs || true
     ls configs/modules/mod_ahbot.conf
     ls configs/modules/playerbots.conf.dist 2>/dev/null || ls configs/modules/mod_playerbots.conf.dist
     ls configs/modules/playerbots.conf 2>/dev/null || ls configs/modules/mod_playerbots.conf
+    ls configs/modules/individualProgression.conf.dist
+    ls configs/modules/individualProgression.conf
 
     ensure_playerbots_performance_config
 
