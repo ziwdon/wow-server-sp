@@ -2331,6 +2331,14 @@ services:
       # Flags all auction houses as neutral and applies the neutral AH cut.
       AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"
 
+      # ----- mod-individual-progression -----
+      # Required for the mod-IP world DB updater to pick up its SQL.
+      # AzerothCore default is 7; set explicitly so the dependency is
+      # visible at the override site.
+      AC_UPDATES_ENABLE_DATABASES: "7"
+      # Required: stores per-player progression data.
+      AC_ENABLE_PLAYER_SETTINGS: "1"
+
       # ----- progression rate overrides -----
 
   ac-db-import:
@@ -2372,7 +2380,9 @@ EOF
         '      AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS: "0"' \
         '      AC_QUESTS_IGNORE_AUTO_ACCEPT: "1"' \
         '      AC_PLAYER_LIMIT: "0"' \
-        '      AC_LEAVE_GROUP_ON_LOGOUT_ENABLED: "1"'
+        '      AC_LEAVE_GROUP_ON_LOGOUT_ENABLED: "1"' \
+        '      AC_UPDATES_ENABLE_DATABASES: "7"' \
+        '      AC_ENABLE_PLAYER_SETTINGS: "1"'
     do
         if ! grep -qFx "$expected" docker-compose.override.yml; then
             echo "ERROR: Missing expected worldserver performance override: $expected"
