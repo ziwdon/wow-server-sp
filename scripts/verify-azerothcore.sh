@@ -179,7 +179,21 @@ else
     fi
 fi
 
-# ----- Check 11: backup.sh exists and is executable -----
+# ----- Check 11: mod-individual-progression files present -----
+IP_DIR="${STACK_DIR}/modules/mod-individual-progression"
+IP_CONF="${STACK_DIR}/configs/modules/individualProgression.conf"
+if [ -d "$IP_DIR" ]; then
+    ok "mod-individual-progression module directory present"
+else
+    fail "mod-individual-progression module directory missing at $IP_DIR"
+fi
+if [ -f "$IP_CONF" ]; then
+    ok "individualProgression.conf present at $IP_CONF"
+else
+    fail "individualProgression.conf missing at $IP_CONF"
+fi
+
+# ----- Check 12: backup.sh exists and is executable -----
 BACKUP_SCRIPT="${STACK_DIR}/backup.sh"
 if [ -x "$BACKUP_SCRIPT" ]; then
     ok "backup.sh exists and is executable"
@@ -187,7 +201,7 @@ else
     fail "backup.sh missing or not executable at $BACKUP_SCRIPT"
 fi
 
-# ----- Check 12: a backup exists newer than backup.sh (INFO if backups/ empty) -----
+# ----- Check 13: a backup exists newer than backup.sh (INFO if backups/ empty) -----
 if [ -d "${STACK_DIR}/backups" ] && [ -x "$BACKUP_SCRIPT" ]; then
     if [ -z "$(ls -A "${STACK_DIR}/backups" 2>/dev/null)" ]; then
         info "Backups directory is empty (no backup has run yet)"
@@ -203,7 +217,7 @@ elif [ ! -d "${STACK_DIR}/backups" ]; then
     fail "Backups directory missing at ${STACK_DIR}/backups"
 fi
 
-# ----- Check 13: crontab has the backup entry (uncommented) -----
+# ----- Check 14: crontab has the backup entry (uncommented) -----
 # `grep -qF` alone would match a commented-out cron line, so filter those first.
 if crontab -l 2>/dev/null | grep -vE '^\s*#' | grep -qF "${STACK_DIR}/backup.sh"; then
     ok "Crontab contains active backup entry"
@@ -211,7 +225,7 @@ else
     fail "Crontab is missing an active backup entry (commented entries don't count)"
 fi
 
-# ----- Check 14: systemd unit, only if file exists -----
+# ----- Check 15: systemd unit, only if file exists -----
 if [ -f /etc/systemd/system/azerothcore.service ]; then
     if systemctl is-enabled azerothcore.service >/dev/null 2>&1; then
         ok "Systemd unit azerothcore.service is enabled"
@@ -221,7 +235,7 @@ if [ -f /etc/systemd/system/azerothcore.service ]; then
 fi
 # (No else branch: if the unit file doesn't exist, the user opted out and the check is skipped entirely.)
 
-# ----- Check 15: auctions count (informational, with stale-empty warning) -----
+# ----- Check 16: auctions count (informational, with stale-empty warning) -----
 # Pure-INFO checks can hide a fully-broken AH bot: a bad GUID or a bot character
 # that never connected will silently leave auctions at 0 forever. We don't promote
 # this to FAIL (a fresh server legitimately has 0 for a while), but if the
