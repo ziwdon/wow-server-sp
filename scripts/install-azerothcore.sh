@@ -1599,10 +1599,12 @@ adopt_existing_install() {
             echo "  ✗ Stack is on wrong remote ($remote) or branch ($branch)"
             fail=1
         fi
-        if [ -d "$STACK_DIR/modules/mod-playerbots" ] && [ -d "$STACK_DIR/modules/mod-ah-bot-plus" ]; then
-            echo "  ✓ Both modules present"
+        if [ -d "$STACK_DIR/modules/mod-playerbots" ] \
+           && [ -d "$STACK_DIR/modules/mod-ah-bot-plus" ] \
+           && [ -d "$STACK_DIR/modules/mod-individual-progression" ]; then
+            echo "  ✓ All three modules present"
         else
-            echo "  ✗ mod-playerbots and/or mod-ah-bot-plus modules missing"
+            echo "  ✗ mod-playerbots and/or mod-ah-bot-plus and/or mod-individual-progression modules missing"
             fail=1
         fi
     else
@@ -2066,6 +2068,13 @@ if should_run_phase "1"; then
         "mod-ah-bot-plus" \
         "NathanHandley/mod-ah-bot-plus"
 
+    clone_or_verify_repo \
+        "https://github.com/ZhengPeiRu21/mod-individual-progression.git" \
+        "master" \
+        "${STACK_DIR}/modules/mod-individual-progression" \
+        "mod-individual-progression" \
+        "ZhengPeiRu21/mod-individual-progression"
+
     # VERIFY Phase 1
     echo ""
     echo "VERIFY Phase 1:"
@@ -2074,6 +2083,7 @@ if should_run_phase "1"; then
     git branch
     ls modules/mod-playerbots/ | head -10
     ls modules/mod-ah-bot-plus/ | head -10
+    ls modules/mod-individual-progression/ | head -10
     ls modules/mod-ah-bot-plus/conf/
 
     mark_phase_complete "1" "Repos cloned"
@@ -2321,6 +2331,14 @@ services:
       # Flags all auction houses as neutral and applies the neutral AH cut.
       AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"
 
+      # ----- mod-individual-progression -----
+      # Required for the mod-IP world DB updater to pick up its SQL.
+      # AzerothCore default is 7; set explicitly so the dependency is
+      # visible at the override site.
+      AC_UPDATES_ENABLE_DATABASES: "7"
+      # Required: stores per-player progression data.
+      AC_ENABLE_PLAYER_SETTINGS: "1"
+
       # ----- progression rate overrides -----
 
   ac-db-import:
@@ -2362,7 +2380,9 @@ EOF
         '      AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS: "0"' \
         '      AC_QUESTS_IGNORE_AUTO_ACCEPT: "1"' \
         '      AC_PLAYER_LIMIT: "0"' \
-        '      AC_LEAVE_GROUP_ON_LOGOUT_ENABLED: "1"'
+        '      AC_LEAVE_GROUP_ON_LOGOUT_ENABLED: "1"' \
+        '      AC_UPDATES_ENABLE_DATABASES: "7"' \
+        '      AC_ENABLE_PLAYER_SETTINGS: "1"'
     do
         if ! grep -qFx "$expected" docker-compose.override.yml; then
             echo "ERROR: Missing expected worldserver performance override: $expected"
@@ -2462,7 +2482,9 @@ if should_run_phase "2.6"; then
         AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS \
         AC_QUESTS_IGNORE_AUTO_ACCEPT \
         AC_PLAYER_LIMIT \
-        AC_LEAVE_GROUP_ON_LOGOUT_ENABLED
+        AC_LEAVE_GROUP_ON_LOGOUT_ENABLED \
+        AC_UPDATES_ENABLE_DATABASES \
+        AC_ENABLE_PLAYER_SETTINGS
     do
         if ! grep -qF "${var}" "$COMPOSE_EFFECTIVE"; then
             echo "MISSING env var: ${var}"
@@ -2569,7 +2591,7 @@ ls -ld /azerothcore/env/dist/logs || true
 '
 
     need_extract=false
-    required_templates=("mod_ahbot.conf.dist")
+    required_templates=("mod_ahbot.conf.dist" "individualProgression.conf.dist")
 
     if [ ! -f configs/modules/playerbots.conf.dist ] && [ ! -f configs/modules/mod_playerbots.conf.dist ]; then
         need_extract=true
@@ -2595,7 +2617,7 @@ ls -ld /azerothcore/env/dist/logs || true
                 echo "Template already present, not overwriting: $dest"
             fi
             found_templates=1
-        done < <(find modules/mod-playerbots modules/mod-ah-bot-plus \
+        done < <(find modules/mod-playerbots modules/mod-ah-bot-plus modules/mod-individual-progression \
             -type f -path '*/conf/*.conf.dist' -print0 2>/dev/null || true)
 
         # Fallback for future image layouts that may install module configs into
@@ -2616,6 +2638,7 @@ ls -ld /azerothcore/env/dist/logs || true
                 echo "Checked:"
                 echo "  modules/mod-playerbots/**/conf/*.conf.dist"
                 echo "  modules/mod-ah-bot-plus/**/conf/*.conf.dist"
+                echo "  modules/mod-individual-progression/**/conf/*.conf.dist"
                 echo "  ${WORLDSERVER_IMAGE}:/azerothcore/env/dist/etc/modules"
                 exit 1
             fi
@@ -2645,6 +2668,8 @@ ls -ld /azerothcore/env/dist/logs || true
     ls configs/modules/mod_ahbot.conf
     ls configs/modules/playerbots.conf.dist 2>/dev/null || ls configs/modules/mod_playerbots.conf.dist
     ls configs/modules/playerbots.conf 2>/dev/null || ls configs/modules/mod_playerbots.conf
+    ls configs/modules/individualProgression.conf.dist
+    ls configs/modules/individualProgression.conf
 
     ensure_playerbots_performance_config
 
