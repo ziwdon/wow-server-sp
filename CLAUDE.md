@@ -21,7 +21,7 @@ Suppress directives (`# shellcheck disable=SC1091`) are used only for dynamic `s
 
 A handful of warnings reported by shellcheck are intentional and must not be "fixed":
 
-- **SC2016 on `escape_conf_key_regex`** (around `install-azerothcore.sh:670`): the `sed 's/[.[\*^$()+?{}|]/\\&/g'` MUST use single quotes — `\&` is sed's back-reference for the matched character. Switching to double quotes would let the shell eat the backslash and break escaping for any conf key containing those metacharacters.
+- **SC2016 on `escape_regex_metachars`** (around `install-azerothcore.sh:670`): the `sed 's/[.[\*^$()+?{}|]/\\&/g'` MUST use single quotes — `\&` is sed's back-reference for the matched character. Switching to double quotes would let the shell eat the backslash and break escaping for any input containing those metacharacters.
 - **SC2001 multi-line prefixing via `sed 's/^/    - /'`:** bash parameter expansion cannot cleanly add a per-line prefix to a multi-line string; sed is the right tool here.
 - **SC2012 on the two `ls modules/mod-…/ | head -10` lines:** informational stdout only, against directories with plain alphanumeric filenames.
 
