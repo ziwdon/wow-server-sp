@@ -466,7 +466,9 @@ write_mysql_custom_cnf() {
 # Reduces write pressure significantly under playerbot load.
 skip-log-bin
 
-# Tuned for 16 GB RAM with other services present — raise to 8G if memory allows.
+# Sized via the installer prompt (1G-32G). MySQL only honors
+# innodb_buffer_pool_instances when each instance has >= ~1 GB, so the
+# instance count below is derived as floor(pool size in GB).
 innodb_buffer_pool_size        = ${INNODB_BUFFER_POOL_SIZE}
 # Pool instance count is derived from the pool size in GB so each instance
 # stays at the ~1 GB threshold above which MySQL actually honors instances.
@@ -666,7 +668,7 @@ verify_mysql_tuning_active() {
 # variables so the final playerbot profile remains visible/editable in the
 # mounted module config file.
 # ==========================================================================
-escape_conf_key_regex() {
+escape_regex_metachars() {
     printf '%s' "$1" | sed 's/[.[\*^$()+?{}|]/\\&/g'
 }
 
@@ -675,7 +677,7 @@ set_conf_key() {
     local value="$2"
     local file="$3"
     local escaped_key
-    escaped_key="$(escape_conf_key_regex "$key")"
+    escaped_key="$(escape_regex_metachars "$key")"
 
     # Canonicalize rather than in-place substitute: if earlier runs or manual
     # edits left the same key more than once, replacing every match would keep
@@ -691,7 +693,7 @@ require_conf_key_once() {
     local value="$2"
     local file="$3"
     local escaped_key count expected
-    escaped_key="$(escape_conf_key_regex "$key")"
+    escaped_key="$(escape_regex_metachars "$key")"
     expected="${key} = ${value}"
 
     count="$(grep -Ec "^[[:space:]]*${escaped_key}[[:space:]]*=" "$file" || true)"
@@ -1347,7 +1349,7 @@ verify_xp_rate_overrides_in_compose() {
     do
         key="${expected%%:*}"
         key="${key##* }"
-        escaped="$(escape_conf_key_regex "$key")"
+        escaped="$(escape_regex_metachars "$key")"
         count="$(grep -Ec "^[[:space:]]*${escaped}[[:space:]]*:" "$file" || true)"
         if [ "$count" != "1" ]; then
             echo "ERROR: ${key} appears ${count} time(s) in ${file}; expected exactly 1."
@@ -1368,7 +1370,7 @@ effective_compose_has_env_value() {
     local value="$3"
     local escaped_value
 
-    escaped_value="$(escape_conf_key_regex "$value")"
+    escaped_value="$(escape_regex_metachars "$value")"
 
     grep -Eq "(^|[[:space:]-])${key}:[[:space:]]*\"?${escaped_value}\"?([[:space:]]*$|[[:space:]])|(^|[[:space:]-])${key}=${escaped_value}([[:space:]]*$|[[:space:]])" "$file"
 }
@@ -1948,7 +1950,6 @@ if should_run_phase "0.2"; then
         echo "ERROR: apt-get update failed. Check network/repos and re-run --resume-from=0.2"
         exit 1
     fi
-    sudo apt-get upgrade -y
 
     APT_PKGS="ca-certificates cron curl git gnupg lsb-release openssl wget unzip"
     if [ "$INSTALL_UFW" = "y" ]; then
@@ -2388,7 +2389,9 @@ services:
       # playerbots_custom_strategy and playerbots_item_info_cache are missing.
       AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"
 
-      # Fixed random bot count for this hardware target.
+      # Random bot pool size — the "200" below is a placeholder; the installer
+      # substitutes the user's PLAYERBOT_COUNT prompt value into both MIN and MAX
+      # immediately after this heredoc is written, then greps to verify.
       AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "200"
       AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "200"
 
