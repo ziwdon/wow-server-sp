@@ -58,7 +58,7 @@ chmod +x scripts/*.sh
 
 **`scripts/uninstall-azerothcore.sh`** — uses `docker compose -p azerothcore down` plus explicit named-container cleanup to avoid touching unrelated Docker containers (no `--remove-orphans`).
 
-**`.claude/skills/`** — reserved for future Claude Code skill files. `references/` subdirectory is for reference material (phases, config options, error patterns) that skills will link to.
+**`.claude/skills/`** — currently unused; only `references/` exists as a placeholder for reference material (phases, config options, error patterns) that future skill files could link to. No active skills live here yet.
 
 ## Install phases
 
@@ -93,7 +93,7 @@ Note: there is no `pause-1` phase. The first manual pause (Tailscale auth) runs 
 
 **`clean_exit` vs `exit`:** `clean_exit` disarms the `ERR` trap before exiting. Use it for graceful aborts (e.g., "user must take action and re-run") so no error banner is printed. Plain `exit` or a failing command prints the error banner via `on_error`.
 
-**`xp_rate_values` field order:** The space-delimited string emitted is always `quest kill explore money reputation skill_discovery item_normal item_uncommon`. The `read -r` destructuring in `insert_xp_rate_overrides_into_compose` depends on this order.
+**`xp_rate_values` field order:** The space-delimited string emitted is always `quest kill explore money reputation skill_discovery item_normal item_uncommon skill_crafting skill_gathering skill_weapon skill_defense`. The `read -r` destructuring in `insert_xp_rate_overrides_into_compose` and both verify helpers depends on this order.
 
 **`save_config` GUID preservation:** `save_config` always rewrites `~/.azerothcore-install-config` from scratch, but it appends `AHBOT_GUIDS` at the end if the variable is non-empty. This preserves GUIDs across config rewrites that occur after Pause 3 (e.g., retrying an earlier phase).
 
@@ -102,6 +102,8 @@ Note: there is no `pause-1` phase. The first manual pause (Tailscale auth) runs 
 **`INNODB_BUFFER_POOL_INSTANCES` is derived, never persisted.** Computed unconditionally as `${INNODB_BUFFER_POOL_SIZE%G}` after both prompt branches converge (right after the `SERVER_XP_RATE` backfill). It is deliberately *not* written to `save_config`/`load_config` — recomputation is the canonical source so a stale config file can never produce a mismatched value. The 1-GB-per-instance rule means each pool instance stays above MySQL's threshold for actually honoring the setting.
 
 **`AiPlayerbot.MinRandomBots`/`MaxRandomBots` are intentionally dual-sourced.** They are written both as `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` / `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` in the compose override AND via `set_conf_key` into `playerbots.conf` (`ensure_playerbots_performance_config`), using the same `${PLAYERBOT_COUNT}` value in both places. The compose env-var path is the runtime-authoritative source; the .conf line keeps the chosen value visible from the live module config. Removing either path looks like dead code but is not — leave both in place.
+
+**Phase 2.5 verification array is dual-sourced with the heredoc.** Every static `AC_*` line emitted into `docker-compose.override.yml` from the Phase 2.5 heredoc must also appear in the `for expected in … do grep -qFx` array immediately below the heredoc. Substituted values (`PLAYERBOT_COUNT`, `MAP_UPDATE_THREADS`, XP rates) have their own dedicated grep checks earlier; everything verbatim goes in the array. Skipping the array entry means a missing or corrupted override silently passes install instead of failing the phase loudly. When adding a new `AC_*` override here, also follow the `AC_*` env-var mapping rule above: the AzerothCore entrypoint will silently drop the var if the derived key (strip `AC_`, lowercase, drop non-alphanumerics) doesn't match an existing key in the relevant `docs/configs/*.conf.dist` file, so verify the target key exists before committing.
 
 ## Reference docs
 
@@ -120,6 +122,8 @@ The `docs/` directory contains offline reference material. Consult it whenever y
 | `docs/superpowers/specs/` | Design specs for in-progress work in this repo |
 
 When making changes to config keys, reviewing module behaviour, or writing install logic, read the relevant wiki pages and the `.conf.dist` file rather than guessing defaults.
+
+Check `docs/superpowers/plans/` and `docs/superpowers/specs/` before starting non-trivial architectural work — in-flight designs and partially-executed plans live there and may already cover the task, or constrain how it should be approached.
 
 ## Constraints to preserve
 
