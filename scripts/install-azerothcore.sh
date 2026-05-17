@@ -468,9 +468,13 @@ skip-log-bin
 
 # Tuned for 16 GB RAM with other services present — raise to 8G if memory allows.
 innodb_buffer_pool_size        = ${INNODB_BUFFER_POOL_SIZE}
+# Pool instance count is derived from the pool size in GB so each instance
+# stays at the ~1 GB threshold above which MySQL actually honors instances.
+innodb_buffer_pool_instances   = ${INNODB_BUFFER_POOL_INSTANCES}
 innodb_io_capacity             = 500
 innodb_io_capacity_max         = 2500
 innodb_use_fdatasync           = ON
+innodb_log_buffer_size         = 32M
 transaction_isolation          = READ-COMMITTED
 
 # Reduce disk flush frequency — acceptable for a home server with backups.
@@ -487,9 +491,11 @@ mysql_custom_cnf_is_expected() {
     grep -qE '^\[mysqld\][[:space:]]*$' "$target" || return 1
     grep -qE '^[[:space:]]*skip-log-bin[[:space:]]*$' "$target" || return 1
     grep -qE "^[[:space:]]*innodb_buffer_pool_size[[:space:]]*=[[:space:]]*${INNODB_BUFFER_POOL_SIZE}[[:space:]]*$" "$target" || return 1
+    grep -qE "^[[:space:]]*innodb_buffer_pool_instances[[:space:]]*=[[:space:]]*${INNODB_BUFFER_POOL_INSTANCES}[[:space:]]*$" "$target" || return 1
     grep -qE '^[[:space:]]*innodb_io_capacity[[:space:]]*=[[:space:]]*500[[:space:]]*$' "$target" || return 1
     grep -qE '^[[:space:]]*innodb_io_capacity_max[[:space:]]*=[[:space:]]*2500[[:space:]]*$' "$target" || return 1
     grep -qE '^[[:space:]]*innodb_use_fdatasync[[:space:]]*=[[:space:]]*ON[[:space:]]*$' "$target" || return 1
+    grep -qE '^[[:space:]]*innodb_log_buffer_size[[:space:]]*=[[:space:]]*32M[[:space:]]*$' "$target" || return 1
     grep -qE '^[[:space:]]*transaction_isolation[[:space:]]*=[[:space:]]*READ-COMMITTED[[:space:]]*$' "$target" || return 1
     grep -qE '^[[:space:]]*innodb_flush_log_at_trx_commit[[:space:]]*=[[:space:]]*2[[:space:]]*$' "$target" || return 1
     grep -qE '^[[:space:]]*sync_binlog[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$target" || return 1
@@ -591,6 +597,23 @@ verify_mysql_tuning_active() {
         echo "  ✓ innodb_use_fdatasync=ON"
     else
         echo "  ✗ innodb_use_fdatasync=${actual:-<unset>} expected ON"
+        fail=1
+    fi
+
+    actual="$(get_mysql_variable innodb_buffer_pool_instances)"
+    if [ "$actual" = "$INNODB_BUFFER_POOL_INSTANCES" ]; then
+        echo "  ✓ innodb_buffer_pool_instances=${actual}"
+    else
+        echo "  ✗ innodb_buffer_pool_instances=${actual:-<unset>} expected ${INNODB_BUFFER_POOL_INSTANCES}"
+        fail=1
+    fi
+
+    # MySQL reports innodb_log_buffer_size in bytes; 32M = 32 * 1024 * 1024.
+    actual="$(get_mysql_variable innodb_log_buffer_size)"
+    if [ "$actual" = "33554432" ]; then
+        echo "  ✓ innodb_log_buffer_size=${actual} (32M)"
+    else
+        echo "  ✗ innodb_log_buffer_size=${actual:-<unset>} expected 33554432 (32M)"
         fail=1
     fi
 
@@ -716,9 +739,12 @@ ensure_playerbots_performance_config() {
 
     echo "Applying Playerbots performance profile to: $conf"
 
-    # Keep bots idle unless they are relevant to real players, while preserving
-    # smart latency scaling. This is the wiki's high-bot-count performance profile.
-    set_conf_key "AiPlayerbot.BotActiveAlone" "10" "$conf"
+    # BotActiveAlone = 0 turns off background AI for bots with no nearby real
+    # player; the BotActiveAloneForceWhen* family below brings them back to
+    # life as soon as a player is in radius / zone / friend list. Combined
+    # with DisabledWithoutRealPlayer, this keeps the realm cheap when empty
+    # and lively when someone is online.
+    set_conf_key "AiPlayerbot.BotActiveAlone" "0" "$conf"
     set_conf_key "AiPlayerbot.botActiveAloneSmartScale" "1" "$conf"
     set_conf_key "AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel" "1" "$conf"
     set_conf_key "AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel" "80" "$conf"
@@ -726,16 +752,45 @@ ensure_playerbots_performance_config() {
     # Reduce writes and background activity when the realm is empty.
     set_conf_key "AiPlayerbot.DisabledWithoutRealPlayer" "1" "$conf"
 
+    # Random bot pool size. The compose override also passes the same value
+    # as AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS; keeping it in playerbots.conf
+    # makes the chosen size discoverable from the live config file as well.
+    set_conf_key "AiPlayerbot.MinRandomBots" "${PLAYERBOT_COUNT}" "$conf"
+    set_conf_key "AiPlayerbot.MaxRandomBots" "${PLAYERBOT_COUNT}" "$conf"
+
+    # Rotate which bots are logged in over time so the same characters do
+    # not always appear in the world.
+    set_conf_key "AiPlayerbot.EnablePeriodicOnlineOffline" "1" "$conf"
+    set_conf_key "AiPlayerbot.PeriodicOnlineOfflineRatio" "2.0" "$conf"
+
+    # Activation triggers: a bot becomes fully active when a real player is
+    # within 150 yards, in the same zone, or marked as the bot's friend.
+    # Same map alone or same guild alone do NOT trigger activation here.
+    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInRadius" "150" "$conf"
+    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInZone" "1" "$conf"
+    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInMap" "0" "$conf"
+    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenIsFriend" "1" "$conf"
+    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInGuild" "0" "$conf"
+
     # Keep Playerbots DB threading conservative for a 6-core / 12-thread home box.
     set_conf_key "PlayerbotsDatabase.WorkerThreads" "1" "$conf"
     set_conf_key "PlayerbotsDatabase.SynchThreads" "2" "$conf"
 
     for expected in \
-        "AiPlayerbot.BotActiveAlone = 10" \
+        "AiPlayerbot.BotActiveAlone = 0" \
         "AiPlayerbot.botActiveAloneSmartScale = 1" \
         "AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel = 1" \
         "AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel = 80" \
         "AiPlayerbot.DisabledWithoutRealPlayer = 1" \
+        "AiPlayerbot.MinRandomBots = ${PLAYERBOT_COUNT}" \
+        "AiPlayerbot.MaxRandomBots = ${PLAYERBOT_COUNT}" \
+        "AiPlayerbot.EnablePeriodicOnlineOffline = 1" \
+        "AiPlayerbot.PeriodicOnlineOfflineRatio = 2.0" \
+        "AiPlayerbot.BotActiveAloneForceWhenInRadius = 150" \
+        "AiPlayerbot.BotActiveAloneForceWhenInZone = 1" \
+        "AiPlayerbot.BotActiveAloneForceWhenInMap = 0" \
+        "AiPlayerbot.BotActiveAloneForceWhenIsFriend = 1" \
+        "AiPlayerbot.BotActiveAloneForceWhenInGuild = 0" \
         "PlayerbotsDatabase.WorkerThreads = 1" \
         "PlayerbotsDatabase.SynchThreads = 2"
     do
@@ -745,7 +800,7 @@ ensure_playerbots_performance_config() {
         fi
     done
 
-    grep -E "^(AiPlayerbot\.(BotActiveAlone|botActiveAloneSmartScale|botActiveAloneSmartScaleWhenMinLevel|botActiveAloneSmartScaleWhenMaxLevel|DisabledWithoutRealPlayer)|PlayerbotsDatabase\.(WorkerThreads|SynchThreads))[[:space:]]*=" "$conf"
+    grep -E "^(AiPlayerbot\.(BotActiveAlone|botActiveAloneSmartScale|botActiveAloneSmartScaleWhenMinLevel|botActiveAloneSmartScaleWhenMaxLevel|DisabledWithoutRealPlayer|MinRandomBots|MaxRandomBots|EnablePeriodicOnlineOffline|PeriodicOnlineOfflineRatio|BotActiveAloneForceWhenInRadius|BotActiveAloneForceWhenInZone|BotActiveAloneForceWhenInMap|BotActiveAloneForceWhenIsFriend|BotActiveAloneForceWhenInGuild)|PlayerbotsDatabase\.(WorkerThreads|SynchThreads))[[:space:]]*=" "$conf"
 }
 
 worldserver_playerbots_fatal_pattern() {
@@ -1476,7 +1531,7 @@ elif [ "$ADOPT" = false ] && [ "${RESUME_FROM:-}" = "8" ] && [ -f "${STACK_DIR}/
     GM_USERNAME="UNUSED"
     GM_PASSWORD="UnusedPass123"
     AHBOT_PASSWORD="UnusedPass123"
-    PLAYERBOT_COUNT="${AC_AI_PLAYERBOT_RANDOM_BOT_MIN:-200}"
+    PLAYERBOT_COUNT="${AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1000}"
     SERVER_XP_RATE="x5"
     INNODB_BUFFER_POOL_SIZE="6G"
     MAP_UPDATE_THREADS="4"
@@ -1513,7 +1568,7 @@ else
     prompt_password "AHBOT account password (8+ chars, no spaces/quotes/\\/\$/\`)"
     AHBOT_PASSWORD="$PROMPT_RESULT"
 
-    prompt_integer_range "Random bot count (1-500, applied to both MIN and MAX)" 1 500 200
+    prompt_integer_range "Random bot count (1-2000, applied to both MIN and MAX)" 1 2000 1000
     PLAYERBOT_COUNT="$PROMPT_RESULT"
 
     prompt_xp_rate
@@ -1549,6 +1604,13 @@ fi
 # the default for new prompt runs, then validate before any phase can use it.
 SERVER_XP_RATE="${SERVER_XP_RATE:-x5}"
 validate_xp_rate_choice
+
+# Derive InnoDB buffer pool instance count from the chosen buffer pool size:
+# MySQL only honors innodb_buffer_pool_instances when each instance has at
+# least ~1 GB, so we set instances = floor(pool size in GB). Always recompute
+# from INNODB_BUFFER_POOL_SIZE so a stale value in a saved config can't drift
+# out of sync with the size.
+INNODB_BUFFER_POOL_INSTANCES="${INNODB_BUFFER_POOL_SIZE%G}"
 
 # ============================================================================
 # --adopt: verify existing install and mark phases 0-4 complete
@@ -2312,7 +2374,6 @@ services:
       AC_MAP_UPDATE_INTERVAL: "10"
       AC_MIN_WORLD_UPDATE_TIME: "1"
       AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS: "0"
-      AC_SET_ALL_CREATURES_WITH_WAYPOINT_MOVEMENT_ACTIVE: "0"
       AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS: "0"
       AC_QUESTS_IGNORE_AUTO_ACCEPT: "1"
       AC_PLAYER_LIMIT: "0"
@@ -2327,9 +2388,17 @@ services:
       # during Phase 6.1, after the user creates the AH bot character.
 
       # ----- core worldserver.conf overrides -----
-      # Allow auctions between factions (single neutral AH for Alliance + Horde).
-      # Flags all auction houses as neutral and applies the neutral AH cut.
+      # Allow cross-faction interaction across the board so Alliance + Horde
+      # can play together. Auction flips all houses to neutral and applies
+      # the neutral AH cut; the others enable chat, calendar invites, custom
+      # channels, parties, guilds, and arena teams across factions.
       AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_CHAT: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"
 
       # ----- mod-individual-progression -----
       # Required for the mod-IP world DB updater to pick up its SQL.
@@ -2376,13 +2445,19 @@ EOF
         '      AC_MAP_UPDATE_INTERVAL: "10"' \
         '      AC_MIN_WORLD_UPDATE_TIME: "1"' \
         '      AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS: "0"' \
-        '      AC_SET_ALL_CREATURES_WITH_WAYPOINT_MOVEMENT_ACTIVE: "0"' \
         '      AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS: "0"' \
         '      AC_QUESTS_IGNORE_AUTO_ACCEPT: "1"' \
         '      AC_PLAYER_LIMIT: "0"' \
         '      AC_LEAVE_GROUP_ON_LOGOUT_ENABLED: "1"' \
         '      AC_UPDATES_ENABLE_DATABASES: "7"' \
-        '      AC_ENABLE_PLAYER_SETTINGS: "1"'
+        '      AC_ENABLE_PLAYER_SETTINGS: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CHAT: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"'
     do
         if ! grep -qFx "$expected" docker-compose.override.yml; then
             echo "ERROR: Missing expected worldserver performance override: $expected"
@@ -2474,11 +2549,16 @@ if should_run_phase "2.6"; then
         AC_AUCTION_HOUSE_BOT_ENABLE_SELLER \
         AC_AUCTION_HOUSE_BOT_BUYER_ENABLED \
         AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION \
+        AC_ALLOW_TWO_SIDE_INTERACTION_CHAT \
+        AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR \
+        AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL \
+        AC_ALLOW_TWO_SIDE_INTERACTION_GROUP \
+        AC_ALLOW_TWO_SIDE_INTERACTION_GUILD \
+        AC_ALLOW_TWO_SIDE_INTERACTION_ARENA \
         AC_MAP_UPDATE_THREADS \
         AC_MAP_UPDATE_INTERVAL \
         AC_MIN_WORLD_UPDATE_TIME \
         AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS \
-        AC_SET_ALL_CREATURES_WITH_WAYPOINT_MOVEMENT_ACTIVE \
         AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS \
         AC_QUESTS_IGNORE_AUTO_ACCEPT \
         AC_PLAYER_LIMIT \
