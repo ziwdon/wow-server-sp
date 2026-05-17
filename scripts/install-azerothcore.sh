@@ -1238,10 +1238,11 @@ validate_xp_rate_choice() {
 
 xp_rate_values() {
     # Emits: quest kill explore money reputation skill_discovery item_normal item_uncommon
+    #        skill_crafting skill_gathering skill_weapon skill_defense
     case "$1" in
-        x3) printf '%s\n' "3 3 3 2 2 2 1 1" ;;
-        x5) printf '%s\n' "5 3 3 3 3 3 1 1" ;;
-        x7) printf '%s\n' "7 5 5 3 5 3 1.5 1.5" ;;
+        x3) printf '%s\n' "3 3 3 2 3 2 1 1 2 2 3 3" ;;
+        x5) printf '%s\n' "5 3 3 3 5 3 1 1 3 3 5 5" ;;
+        x7) printf '%s\n' "7 5 5 3 7 3 1.5 1.5 5 5 7 7" ;;
         *)
             echo "ERROR: xp_rate_values called for unsupported rate: $1" >&2
             return 1
@@ -1254,6 +1255,7 @@ insert_xp_rate_overrides_into_compose() {
     local rate="${SERVER_XP_RATE:-x5}"
     local tmp
     local quest kill explore money reputation skill_discovery item_normal item_uncommon
+    local skill_crafting skill_gathering skill_weapon skill_defense
 
     validate_xp_rate_choice
 
@@ -1263,7 +1265,8 @@ insert_xp_rate_overrides_into_compose() {
       # Server XP rate: x1 selected; no Rate.* overrides are set.
 EOF
     else
-        read -r quest kill explore money reputation skill_discovery item_normal item_uncommon < <(xp_rate_values "$rate")
+        read -r quest kill explore money reputation skill_discovery item_normal item_uncommon \
+            skill_crafting skill_gathering skill_weapon skill_defense < <(xp_rate_values "$rate")
         cat > "$tmp" <<EOF
       # Server XP rate: ${rate}
       AC_RATE_XP_QUEST: "${quest}"
@@ -1274,6 +1277,10 @@ EOF
       AC_RATE_SKILL_DISCOVERY: "${skill_discovery}"
       AC_RATE_DROP_ITEM_NORMAL: "${item_normal}"
       AC_RATE_DROP_ITEM_UNCOMMON: "${item_uncommon}"
+      AC_SKILLGAIN_CRAFTING: "${skill_crafting}"
+      AC_SKILLGAIN_GATHERING: "${skill_gathering}"
+      AC_SKILLGAIN_WEAPON: "${skill_weapon}"
+      AC_SKILLGAIN_DEFENSE: "${skill_defense}"
 EOF
     fi
 
@@ -1291,6 +1298,7 @@ verify_xp_rate_overrides_in_compose() {
     local file="$1"
     local rate="${SERVER_XP_RATE:-x5}"
     local quest kill explore money reputation skill_discovery item_normal item_uncommon
+    local skill_crafting skill_gathering skill_weapon skill_defense
     local fail=0
     local key escaped count expected
 
@@ -1305,7 +1313,11 @@ verify_xp_rate_overrides_in_compose() {
             AC_RATE_REPUTATION_GAIN \
             AC_RATE_SKILL_DISCOVERY \
             AC_RATE_DROP_ITEM_NORMAL \
-            AC_RATE_DROP_ITEM_UNCOMMON
+            AC_RATE_DROP_ITEM_UNCOMMON \
+            AC_SKILLGAIN_CRAFTING \
+            AC_SKILLGAIN_GATHERING \
+            AC_SKILLGAIN_WEAPON \
+            AC_SKILLGAIN_DEFENSE
         do
             count="$(grep -Ec "^[[:space:]]*${key}[[:space:]]*:" "$file" || true)"
             if [ "$count" != "0" ]; then
@@ -1316,7 +1328,8 @@ verify_xp_rate_overrides_in_compose() {
         return "$fail"
     fi
 
-    read -r quest kill explore money reputation skill_discovery item_normal item_uncommon < <(xp_rate_values "$rate")
+    read -r quest kill explore money reputation skill_discovery item_normal item_uncommon \
+        skill_crafting skill_gathering skill_weapon skill_defense < <(xp_rate_values "$rate")
 
     for expected in \
         "      AC_RATE_XP_QUEST: \"${quest}\"" \
@@ -1326,7 +1339,11 @@ verify_xp_rate_overrides_in_compose() {
         "      AC_RATE_REPUTATION_GAIN: \"${reputation}\"" \
         "      AC_RATE_SKILL_DISCOVERY: \"${skill_discovery}\"" \
         "      AC_RATE_DROP_ITEM_NORMAL: \"${item_normal}\"" \
-        "      AC_RATE_DROP_ITEM_UNCOMMON: \"${item_uncommon}\""
+        "      AC_RATE_DROP_ITEM_UNCOMMON: \"${item_uncommon}\"" \
+        "      AC_SKILLGAIN_CRAFTING: \"${skill_crafting}\"" \
+        "      AC_SKILLGAIN_GATHERING: \"${skill_gathering}\"" \
+        "      AC_SKILLGAIN_WEAPON: \"${skill_weapon}\"" \
+        "      AC_SKILLGAIN_DEFENSE: \"${skill_defense}\""
     do
         key="${expected%%:*}"
         key="${key##* }"
@@ -1360,6 +1377,7 @@ verify_xp_rate_overrides_in_effective_compose() {
     local file="$1"
     local rate="${SERVER_XP_RATE:-x5}"
     local quest kill explore money reputation skill_discovery item_normal item_uncommon
+    local skill_crafting skill_gathering skill_weapon skill_defense
     local fail=0
     local key
 
@@ -1369,7 +1387,8 @@ verify_xp_rate_overrides_in_effective_compose() {
         return 0
     fi
 
-    read -r quest kill explore money reputation skill_discovery item_normal item_uncommon < <(xp_rate_values "$rate")
+    read -r quest kill explore money reputation skill_discovery item_normal item_uncommon \
+        skill_crafting skill_gathering skill_weapon skill_defense < <(xp_rate_values "$rate")
 
     while IFS='|' read -r key value; do
         [ -n "$key" ] || continue
@@ -1386,6 +1405,10 @@ AC_RATE_REPUTATION_GAIN|${reputation}
 AC_RATE_SKILL_DISCOVERY|${skill_discovery}
 AC_RATE_DROP_ITEM_NORMAL|${item_normal}
 AC_RATE_DROP_ITEM_UNCOMMON|${item_uncommon}
+AC_SKILLGAIN_CRAFTING|${skill_crafting}
+AC_SKILLGAIN_GATHERING|${skill_gathering}
+AC_SKILLGAIN_WEAPON|${skill_weapon}
+AC_SKILLGAIN_DEFENSE|${skill_defense}
 EOF
 
     return "$fail"
@@ -2408,6 +2431,16 @@ services:
       # Required: stores per-player progression data.
       AC_ENABLE_PLAYER_SETTINGS: "1"
 
+      # Mail between characters arrives in 10s instead of the 1h default,
+      # so AH purchases and player-to-player items are usable almost immediately.
+      AC_MAIL_DELIVERY_DELAY: "10"
+
+      # Use the "unlink" character delete method (1) instead of the default
+      # hard-delete (0). Deleted characters are flagged removed but their row
+      # stays in the DB, which keeps AH-bot / playerbot GUID references intact
+      # and lets a GM restore a character without a backup.
+      AC_CHAR_DELETE_METHOD: "1"
+
       # ----- progression rate overrides -----
 
   ac-db-import:
@@ -2457,7 +2490,9 @@ EOF
         '      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "1"' \
         '      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "1"' \
         '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "1"' \
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"'
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"' \
+        '      AC_MAIL_DELIVERY_DELAY: "10"' \
+        '      AC_CHAR_DELETE_METHOD: "1"'
     do
         if ! grep -qFx "$expected" docker-compose.override.yml; then
             echo "ERROR: Missing expected worldserver performance override: $expected"
