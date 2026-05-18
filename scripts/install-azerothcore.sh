@@ -344,23 +344,45 @@ ensure_playerbots_updater_enabled_in_compose_override() {
     fi
 }
 
+playerbots_base_sql_dir() {
+    printf '%s' "${STACK_DIR}/modules/mod-playerbots/data/sql/playerbots/base"
+}
+
+# Expected acore_playerbots tables, derived from base/*.sql filenames.
+# The mod-playerbots convention is filename (without .sql) == table name; this
+# has held for every base file shipped with the Playerbot branch we clone, and
+# auto-derivation means new/removed base files are handled without script edits.
+playerbots_expected_base_tables() {
+    local base_dir
+    base_dir="$(playerbots_base_sql_dir)"
+    if [ ! -d "$base_dir" ]; then
+        return 0
+    fi
+    local f
+    for f in "$base_dir"/*.sql; do
+        [ -f "$f" ] || continue
+        basename "$f" .sql
+    done | sort -u
+}
+
 playerbots_schema_missing_tables() {
-    docker exec ac-database mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" -N -B -e "
-SELECT required.table_name
-FROM (
-  SELECT 'playerbots_custom_strategy' AS table_name UNION ALL
-  SELECT 'playerbots_db_store' UNION ALL
-  SELECT 'playerbots_random_bots' UNION ALL
-  SELECT 'playerbots_equip_cache' UNION ALL
-  SELECT 'playerbots_travelnode' UNION ALL
-  SELECT 'playerbots_travelnode_link' UNION ALL
-  SELECT 'playerbots_travelnode_path' UNION ALL
-  SELECT 'playerbots_item_info_cache'
-) AS required
-LEFT JOIN information_schema.tables t
-  ON t.table_schema='acore_playerbots' AND t.table_name=required.table_name
-WHERE t.table_name IS NULL;
-" 2>/dev/null || true
+    local expected existing
+    expected="$(playerbots_expected_base_tables)"
+    if [ -z "$expected" ]; then
+        # Module SQL dir not present (e.g. pre-Phase 1 adopt verify) — nothing
+        # to compare against. Returning empty is the right "no failure" signal.
+        return 0
+    fi
+
+    # `|| true` keeps `set -o pipefail` from aborting on transient docker/mysql
+    # errors; an empty result here just yields "all expected tables missing",
+    # which is the correct verification outcome anyway.
+    existing="$( { docker exec ac-database mysql \
+        -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" -N -B -e \
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='acore_playerbots';" \
+        2>/dev/null || true; } | sort -u )"
+
+    comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$existing")
 }
 
 playerbots_table_count() {
@@ -425,6 +447,111 @@ wait_for_playerbots_schema() {
     rm -f /tmp/ac-playerbots-schema-check.out
     docker logs --tail 200 ac-worldserver 2>&1 || true
     return 1
+}
+
+apply_playerbots_base_sql_file() {
+    local file="$1"
+    local base
+    base="$(basename "$file")"
+
+    # --max-allowed-packet=1GB matches what worldserver's own DBUpdater passes
+    # (DBUpdater.cpp:563); needed for the 60+ MB playerbots_travelnode_path.sql.
+    # --default-character-set=utf8mb4 matches the DB charset set at CREATE DB.
+    if ! docker exec -i ac-database mysql \
+            -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
+            --default-character-set=utf8mb4 \
+            --max-allowed-packet=1GB \
+            acore_playerbots < "$file"; then
+        echo "ERROR: mysql import failed for ${base}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Pre-import mod-playerbots base/*.sql into acore_playerbots BEFORE worldserver
+# starts. This eliminates the race where worldserver's own Populate() runs the
+# same imports asynchronously, can be interrupted by a docker compose restart,
+# and then short-circuits on the next start (SHOW TABLES > 0) — leaving
+# weightscales/weightscale_data/version_db_playerbots missing and triggering a
+# SIGSEGV restart loop. Idempotent on resume: only missing tables are imported,
+# so existing runtime data in tables like playerbots_random_bots is preserved.
+import_playerbots_base_schema() {
+    local base_dir
+    base_dir="$(playerbots_base_sql_dir)"
+
+    if [ ! -d "$base_dir" ]; then
+        echo "ERROR: Playerbots base SQL directory not found: $base_dir" >&2
+        echo "Was mod-playerbots cloned in Phase 1?" >&2
+        exit 1
+    fi
+    if ! compgen -G "${base_dir}/*.sql" > /dev/null; then
+        echo "ERROR: No Playerbots base SQL files in $base_dir" >&2
+        exit 1
+    fi
+
+    local existing_count
+    existing_count="$(playerbots_table_count | tail -1)"
+    if ! [[ "$existing_count" =~ ^[0-9]+$ ]]; then
+        existing_count=0
+    fi
+
+    local files_to_import=()
+    local f base
+    if [ "$existing_count" -eq 0 ]; then
+        echo "Pre-importing Playerbots base schema into empty acore_playerbots..."
+        while IFS= read -r f; do
+            files_to_import+=("$f")
+        done < <(find "$base_dir" -maxdepth 1 -type f -name '*.sql' | sort)
+    else
+        # Resume / partial state: only fill in missing tables. DROP TABLE IF
+        # EXISTS in base files would wipe operational data otherwise.
+        local missing
+        missing="$(playerbots_schema_missing_tables)"
+        if [ -z "$missing" ]; then
+            echo "acore_playerbots already has all expected base tables (${existing_count} table(s)); skipping pre-import."
+            return 0
+        fi
+        echo "acore_playerbots has ${existing_count} table(s) but is missing $(printf '%s\n' "$missing" | wc -l) base table(s):"
+        printf '%s\n' "$missing" | sed 's/^/  - /'
+        echo "Importing only the missing tables' SQL files (existing tables preserved)..."
+        while IFS= read -r base; do
+            f="${base_dir}/${base}.sql"
+            if [ -f "$f" ]; then
+                files_to_import+=("$f")
+            else
+                echo "WARNING: no base SQL file for missing table '${base}' at ${f}" >&2
+            fi
+        done < <(printf '%s\n' "$missing")
+    fi
+
+    if [ "${#files_to_import[@]}" -eq 0 ]; then
+        echo "Nothing to import."
+        return 0
+    fi
+
+    local imported=0
+    for f in "${files_to_import[@]}"; do
+        base="$(basename "$f")"
+        if apply_playerbots_base_sql_file "$f"; then
+            imported=$((imported + 1))
+            printf "  ✓ %s\n" "$base"
+        else
+            echo "ERROR: aborting after failure on ${base}" >&2
+            exit 1
+        fi
+    done
+
+    local final_count
+    final_count="$(playerbots_table_count | tail -1)"
+    echo "Imported ${imported} Playerbots base SQL file(s); acore_playerbots now has ${final_count} table(s)."
+
+    local still_missing
+    still_missing="$(playerbots_schema_missing_tables)"
+    if [ -n "$still_missing" ]; then
+        echo "ERROR: pre-import completed but expected tables are still missing:" >&2
+        printf '%s\n' "$still_missing" | sed 's/^/  - /' >&2
+        exit 1
+    fi
 }
 
 wait_for_running_container() {
@@ -2313,9 +2440,10 @@ if should_run_phase "2.3"; then
     echo "Note: Phase 2.3 does not stage Playerbots SQL."
     echo "Playerbots SQL is left in modules/mod-playerbots so db-import/updater sees only one copy."
     echo "Any non-Playerbots custom SQL left under data/sql/custom is preserved."
-    echo "acore_playerbots is created in Phase 4. Its tables are initialized by the"
-    echo "mod-playerbots updater on worldserver startup, so AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES"
-    echo "must remain set to 1."
+    echo "acore_playerbots is created in Phase 4. Phase 4 also pre-imports the base/*.sql"
+    echo "schema synchronously (via mysql client) before worldserver starts; the updates/"
+    echo "folder migrations are then applied by the mod-playerbots updater on worldserver"
+    echo "startup, so AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES must remain set to 1."
 
     mark_phase_complete "2.3" "Playerbots custom SQL duplicates cleaned"
 fi
@@ -2830,10 +2958,17 @@ if should_run_phase "4"; then
     done
 
     # Create the separate Playerbots database before worldserver starts.
-    # The mod-playerbots updater creates/updates the tables inside it.
     docker exec ac-database mysql \
         -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
         -e "CREATE DATABASE IF NOT EXISTS acore_playerbots DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+    # Pre-import mod-playerbots base schema synchronously, BEFORE worldserver
+    # comes up. Without this, the worldserver's own DBUpdater::Populate() runs
+    # the same imports in-process; if the install script's later compose-restart
+    # interrupts it mid-file, the next start short-circuits Populate (SHOW
+    # TABLES > 0) and weightscales / weightscale_data / version_db_playerbots
+    # never get created — which crashes prepared-statement init at startup.
+    import_playerbots_base_schema
 
     # Start the rest of the stack. Scale phpmyadmin and ac-eluna-ts-dev to 0:
     # they're inherited from the upstream compose file but we don't need them,
