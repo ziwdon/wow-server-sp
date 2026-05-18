@@ -2586,6 +2586,18 @@ services:
       # and lets a GM restore a character without a backup.
       AC_CHAR_DELETE_METHOD: "1"
 
+      # Dynamic respawn-rate threshold for creatures / gameobjects.
+      # Per worldserver.conf.dist: respawn time is unchanged up to N players
+      # in the zone; above N, respawn time shortens proportionally
+      # (adjustFactor = rate / playerCount). Default 1 = disabled.
+      # With hundreds of playerbots, leaving the upstream default-on behavior
+      # would shorten respawns to near-zero in busy zones; setting higher
+      # thresholds preserves normal pacing until a zone is genuinely crowded.
+      # Creatures kick in at 10+ players, gameobjects (gathering nodes) at
+      # 20+ so gathering doesn't trivialize before combat does.
+      AC_RESPAWN_DYNAMIC_RATE_CREATURE: "10"
+      AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT: "20"
+
       # ----- progression rate overrides -----
 
   ac-db-import:
@@ -2644,7 +2656,9 @@ EOF
         '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "0"' \
         '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "0"' \
         '      AC_MAIL_DELIVERY_DELAY: "10"' \
-        '      AC_CHAR_DELETE_METHOD: "1"'
+        '      AC_CHAR_DELETE_METHOD: "1"' \
+        '      AC_RESPAWN_DYNAMIC_RATE_CREATURE: "10"' \
+        '      AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT: "20"'
     do
         if ! grep -qFx "$expected" docker-compose.override.yml; then
             echo "ERROR: Missing expected worldserver performance override: $expected"

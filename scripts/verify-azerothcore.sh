@@ -331,15 +331,17 @@ else
         '      AC_AUCTION_HOUSE_BOT_BUYER_ENABLED: "true"'
         '      AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"'
         '      AC_ALLOW_TWO_SIDE_INTERACTION_CHAT: "1"'
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "1"'
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "1"'
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "1"'
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "1"'
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"'
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "0"'
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "0"'
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "0"'
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "0"'
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "0"'
         '      AC_UPDATES_ENABLE_DATABASES: "7"'
         '      AC_ENABLE_PLAYER_SETTINGS: "1"'
         '      AC_MAIL_DELIVERY_DELAY: "10"'
         '      AC_CHAR_DELETE_METHOD: "1"'
+        '      AC_RESPAWN_DYNAMIC_RATE_CREATURE: "10"'
+        '      AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT: "20"'
     )
     missing_override=0
     for expected in "${OVERRIDE_EXPECTED[@]}"; do
@@ -375,6 +377,15 @@ else
         ok "docker-compose.override.yml AC_MAP_UPDATE_THREADS is numeric"
     else
         fail "docker-compose.override.yml AC_MAP_UPDATE_THREADS missing or non-numeric"
+    fi
+
+    # AC_GAME_TYPE is substituted at install time from the SERVER_PVP prompt
+    # (0 = PvE, 1 = PvP). Verify has no access to SERVER_PVP (not persisted in
+    # .env), so check shape only — catches accidental deletion of the line.
+    if grep -qE '^      AC_GAME_TYPE: "[01]"$' "$OVERRIDE"; then
+        ok "docker-compose.override.yml AC_GAME_TYPE has expected shape (0 or 1)"
+    else
+        fail "docker-compose.override.yml AC_GAME_TYPE missing or not 0/1"
     fi
 
     # AC_PLAYERBOTS_DATABASE_INFO carries the DB password (substituted at install),
