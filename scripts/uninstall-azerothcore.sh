@@ -4,14 +4,16 @@
 #
 # Scope:
 #   - Stops/disables/removes the optional azerothcore.service systemd unit
-#   - Runs project-scoped docker compose down for /opt/stacks/azerothcore when possible
-#   - Removes known AzerothCore containers if compose metadata/files are missing
+#   - Runs project-scoped docker compose down -v for /opt/stacks/azerothcore when possible
+#   - Removes known AzerothCore containers, networks, and named volumes
+#   - Removes locally-built AzerothCore Docker images (acore/ac-wotlk-*:playerbot-local)
 #   - Removes the matching backup cron entry from the current user's crontab
 #   - Removes installer state/config files from the current user's home directory
 #   - Removes the stack directory and known temporary installer files
 #
 # It intentionally does NOT uninstall Docker, Tailscale, UFW, cron, git, curl,
-# packages, or system-wide user/group changes.
+# packages, system-wide user/group changes, the Docker apt repo, or upstream
+# Docker images pulled (but not built) by the installer.
 
 set -euo pipefail
 
@@ -19,6 +21,7 @@ STACK_DIR="/opt/stacks/azerothcore"
 STATE_FILE="${HOME}/.azerothcore-install-state"
 CONFIG_FILE="${HOME}/.azerothcore-install-config"
 SYSTEMD_UNIT="/etc/systemd/system/azerothcore.service"
+COMPOSE_PROJECT="azerothcore"
 CRON_BACKUP_PATH="/opt/stacks/azerothcore/backup.sh"
 KNOWN_CONTAINERS=(
   ac-database
@@ -30,6 +33,15 @@ KNOWN_CONTAINERS=(
 )
 KNOWN_NETWORKS=(
   azerothcore_default
+)
+# Locally-built images. Install script tags them with DOCKER_IMAGE_TAG=playerbot-local
+# (set in /opt/stacks/azerothcore/.env). If the user overrode the tag we honor it
+# by sourcing .env before this list is materialized at runtime.
+LOCAL_IMAGE_REPOS=(
+  acore/ac-wotlk-worldserver
+  acore/ac-wotlk-authserver
+  acore/ac-wotlk-db-import
+  acore/ac-wotlk-client-data
 )
 
 YES=false
@@ -100,8 +112,13 @@ safe_remove_literal() {
 
 safe_remove_glob() {
   local pattern="$1"
+  local use_sudo="${2:-no}"
   case "$pattern" in
-    /tmp/azerothcore-install-\*.log|/tmp/ac-compose-effective.\*.yml)
+    /tmp/azerothcore-install-\*.log \
+    |/tmp/ac-compose-effective.\*.yml \
+    |/tmp/ac-xp-rate-overrides.\* \
+    |/tmp/ac-playerbots-schema-check.out \
+    |/opt/stacks/.azerothcore-clone-\*)
       ;;
     *)
       echo "Refusing to remove unexpected glob: $pattern" >&2
@@ -117,7 +134,11 @@ safe_remove_glob() {
     echo "No files matched: $pattern"
     return 0
   fi
-  run rm -f -- "${matches[@]}"
+  if [ "$use_sudo" = "sudo" ]; then
+    run sudo rm -rf -- "${matches[@]}"
+  else
+    run rm -rf -- "${matches[@]}"
+  fi
 }
 
 echo "════════════════════════════════════════════════════════════════"
@@ -125,14 +146,19 @@ echo "AzerothCore stack uninstaller"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 echo "This will remove only this AzerothCore stack's local artifacts:"
-echo "  - $STACK_DIR"
+echo "  - $STACK_DIR (includes data/mysql, configs, logs, backups, modules)"
 echo "  - $STATE_FILE"
 echo "  - $CONFIG_FILE"
 echo "  - backup cron lines containing: $CRON_BACKUP_PATH"
 echo "  - optional systemd unit: $SYSTEMD_UNIT"
 echo "  - known containers: ${KNOWN_CONTAINERS[*]}"
+echo "  - docker volumes/networks labelled com.docker.compose.project=${COMPOSE_PROJECT}"
+echo "  - locally-built images: ${LOCAL_IMAGE_REPOS[*]/%/:<tag>}"
+echo "  - stale installer temp files in /tmp and /opt/stacks/.azerothcore-clone-*"
 echo ""
-echo "It will NOT uninstall Docker, Tailscale, UFW, cron, git, curl, or packages."
+echo "It will NOT uninstall Docker, Tailscale, UFW, cron, git, curl, packages,"
+echo "the Docker apt repo/keyring, docker group membership, or upstream Docker"
+echo "images pulled (but not built) by the installer."
 echo ""
 
 if [ "$YES" != true ] && [ "$DRY_RUN" != true ]; then
@@ -152,7 +178,7 @@ fi
 
 # 1) Stop/disable/remove optional systemd unit first, so it cannot restart the stack.
 echo ""
-echo "[1/6] Removing optional systemd unit if present..."
+echo "[1/7] Removing optional systemd unit if present..."
 if [ -f "$SYSTEMD_UNIT" ]; then
   run sudo systemctl disable --now azerothcore.service || true
   run sudo rm -f "$SYSTEMD_UNIT"
@@ -162,15 +188,17 @@ else
   echo "No azerothcore.service unit found."
 fi
 
-# 2) Bring down compose stack when possible.
+# 2) Bring down compose stack when possible, including named volumes.
+#    Use -v to drop project-scoped named volumes; bind mounts under STACK_DIR
+#    are untouched by -v and are removed with the stack directory in step 6.
 echo ""
-echo "[2/6] Bringing down Docker compose stack if possible..."
+echo "[2/7] Bringing down Docker compose stack if possible..."
 if [ -d "$STACK_DIR" ] && { [ -f "$STACK_DIR/docker-compose.yml" ] || [ -f "$STACK_DIR/compose.yml" ]; }; then
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     if [ "$DRY_RUN" = true ]; then
-      echo "[dry-run] cd '$STACK_DIR' && docker compose -p azerothcore down"
+      echo "[dry-run] cd '$STACK_DIR' && docker compose -p ${COMPOSE_PROJECT} down -v"
     else
-      (cd "$STACK_DIR" && docker compose -p azerothcore down) || true
+      (cd "$STACK_DIR" && docker compose -p "${COMPOSE_PROJECT}" down -v) || true
     fi
   else
     echo "Docker compose not available; skipping compose down."
@@ -179,27 +207,69 @@ else
   echo "No compose file found under $STACK_DIR."
 fi
 
-# 3) Fallback cleanup for known named containers and default project network.
+# 3) Fallback cleanup: known named containers, project-labelled networks/volumes.
+#    The label-based filter catches anything the upstream compose declared that
+#    isn't in our hard-coded KNOWN_NETWORKS list, without using --remove-orphans
+#    (which could touch unrelated containers sharing the project name).
 echo ""
-echo "[3/6] Removing known containers/networks if they still exist..."
+echo "[3/7] Removing leftover containers, networks, and named volumes..."
 if command -v docker >/dev/null 2>&1; then
   for c in "${KNOWN_CONTAINERS[@]}"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       run docker rm -f "$c" || true
     fi
   done
+
+  # Project-labelled networks (covers azerothcore_default and any others).
+  while IFS= read -r n; do
+    [ -z "$n" ] && continue
+    run docker network rm "$n" >/dev/null || true
+  done < <(docker network ls --quiet \
+            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" 2>/dev/null)
+  # Also try the hard-coded names in case the label was stripped.
   for n in "${KNOWN_NETWORKS[@]}"; do
     if docker network inspect "$n" >/dev/null 2>&1; then
-      run docker network rm "$n" || true
+      run docker network rm "$n" >/dev/null || true
     fi
   done
+
+  # Project-labelled named volumes (host bind mounts are not affected here).
+  while IFS= read -r v; do
+    [ -z "$v" ] && continue
+    run docker volume rm -f "$v" >/dev/null || true
+  done < <(docker volume ls --quiet \
+            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" 2>/dev/null)
 else
   echo "Docker command not found; skipping Docker fallback cleanup."
 fi
 
-# 4) Remove backup cron lines for current user.
+# 4) Remove locally-built AzerothCore images. Honors a custom DOCKER_IMAGE_TAG
+#    from the stack's .env when present; otherwise falls back to the install
+#    script's default tag (playerbot-local).
 echo ""
-echo "[4/6] Removing matching backup cron entries from current user's crontab..."
+echo "[4/7] Removing locally-built AzerothCore Docker images..."
+if command -v docker >/dev/null 2>&1; then
+  IMAGE_TAG="playerbot-local"
+  if [ -r "${STACK_DIR}/.env" ]; then
+    env_tag="$(grep -E '^DOCKER_IMAGE_TAG=' "${STACK_DIR}/.env" 2>/dev/null \
+                 | tail -n1 | cut -d= -f2- | tr -d '"'"'")"
+    if [ -n "${env_tag:-}" ]; then
+      IMAGE_TAG="$env_tag"
+    fi
+  fi
+  for repo in "${LOCAL_IMAGE_REPOS[@]}"; do
+    img="${repo}:${IMAGE_TAG}"
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      run docker image rm "$img" >/dev/null || true
+    fi
+  done
+else
+  echo "Docker command not found; skipping image cleanup."
+fi
+
+# 5) Remove backup cron lines for current user.
+echo ""
+echo "[5/7] Removing matching backup cron entries from current user's crontab..."
 if crontab -l >/tmp/azerothcore-cron-before.$$ 2>/dev/null; then
   if grep -Fq "$CRON_BACKUP_PATH" /tmp/azerothcore-cron-before.$$; then
     grep -Fv "$CRON_BACKUP_PATH" /tmp/azerothcore-cron-before.$$ > /tmp/azerothcore-cron-after.$$ || true
@@ -222,9 +292,9 @@ else
   echo "No crontab found for current user."
 fi
 
-# 5) Remove stack directory and installer state files.
+# 6) Remove stack directory and installer state files.
 echo ""
-echo "[5/6] Removing stack directory and installer state files..."
+echo "[6/7] Removing stack directory and installer state files..."
 if [ -d "$STACK_DIR" ]; then
   run sudo rm -rf "$STACK_DIR"
 else
@@ -233,11 +303,16 @@ fi
 safe_remove_literal "$STATE_FILE"
 safe_remove_literal "$CONFIG_FILE"
 
-# 6) Remove known temporary files created by installer validation/build logging.
+# 7) Remove known temporary files created by installer validation/build logging,
+#    plus any stale temp clone left behind by an interrupted Phase 1.
+#    The clone dir sits under /opt/stacks/ and is owned by root, so use sudo.
 echo ""
-echo "[6/6] Removing known temporary installer files..."
+echo "[7/7] Removing known temporary installer files..."
 safe_remove_glob "/tmp/azerothcore-install-*.log"
 safe_remove_glob "/tmp/ac-compose-effective.*.yml"
+safe_remove_glob "/tmp/ac-xp-rate-overrides.*"
+safe_remove_glob "/tmp/ac-playerbots-schema-check.out"
+safe_remove_glob "/opt/stacks/.azerothcore-clone-*" sudo
 safe_remove_literal /tmp/ac-build.log
 
 cat <<DONE
@@ -245,11 +320,13 @@ cat <<DONE
 Done.
 
 Remaining things intentionally left installed/configured:
-  - Docker and Docker images/cache
+  - Docker engine, the Docker apt repo, and GPG keyring under /usr/share/keyrings/
+  - Upstream Docker images that were pulled (not built) by the installer
   - Tailscale and Tailscale login/auth state
-  - UFW and any non-AzerothCore firewall configuration
-  - apt packages installed by the installer
+  - UFW and any firewall rules added by the installer (allow ssh, allow in on tailscale0)
+  - apt packages installed by the installer (cron, git, curl, gnupg, openssl, unzip, ufw)
   - docker group membership for your user
+  - cron service (still enabled; only the AzerothCore backup line was removed)
 
 To reinstall from scratch, run the installer again as your normal user.
 DONE
