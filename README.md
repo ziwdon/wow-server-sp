@@ -209,6 +209,7 @@ docker attach ac-worldserver
 
 At the worldserver prompt:
 ```text
+notify Server going down for maintenance — please log out.
 saveall
 ```
 
