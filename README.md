@@ -41,6 +41,7 @@ Answers are persisted to `~/.azerothcore-install-config` (mode `600`) so the ins
 - AHBOT account password
 - Random playerbot count (applied to both MIN and MAX)
 - Server XP/progression rate (`x1`, `x3`, `x5`, `x7`)
+- Realm type — PvP (default) or PvE/Normal
 - InnoDB buffer pool size (`1G`–`32G`)
 - Map update threads (1–16)
 - AH bot character count (1 or 2)
@@ -144,6 +145,18 @@ Does **not** remove Docker, Tailscale, UFW, apt packages it installed, unrelated
 
 All edits happen on the host; the containers see them via bind mounts.
 
+**Worldserver** — `worldserver.conf` is baked into the image and is **not** bind-mounted, so you don't edit it on the host. Override its values via environment variables in `docker-compose.override.yml` under `ac-worldserver.environment:` — this is exactly the mechanism the installer already uses for every worldserver setting it touches.
+
+Env vars beat `.conf` values at startup ([upstream docs](docs/wikis/azerothcore-wiki/docs/config-overrides-with-env-var.md)). The entrypoint matches `AC_*` vars to conf keys by stripping `AC_`, lowercasing, and dropping non-alphanumerics — so `AC_GAME_TYPE` writes to `GameType`, `AC_RATE_XP_QUEST` writes to `Rate.XP.Quest`, etc. **Unknown vars are silently ignored**, so verify the target key exists in `docs/configs/worldserver.conf.dist` (the upstream defaults reference) before adding a new one.
+
+```bash
+cd /opt/stacks/azerothcore
+# edit docker-compose.override.yml — add or change an AC_* line under ac-worldserver
+docker compose restart ac-worldserver
+```
+
+For ad-hoc in-game testing without a restart, log in as GM and run `.reload config`. Not all settings honor reload (some are read once at startup, some apply only to new objects/maps), and an `AC_*` override in compose will always win on next restart — use the override file for anything you want to keep.
+
 **AH bot** — edit `configs/modules/mod_ahbot.conf`, then in-game as GM: `.ahbot reload`. No worldserver restart needed for simple tweaks.
 
 **Playerbots** — edit `configs/modules/playerbots.conf`, then:
@@ -162,18 +175,53 @@ cd /opt/stacks/azerothcore && docker compose restart ac-database
 
 `innodb_buffer_pool_size` only takes effect after a database restart.
 
-## Don't publish these files
+## Restart and shutdown safely
 
-Generated runtime files can contain credentials or private network info:
+The worldserver should always be told to save state before it goes down. The canonical pattern (from the AzerothCore [exit-codes docs](docs/wikis/azerothcore-wiki/docs/exitcodes.md) and [GM command reference](docs/wikis/azerothcore-wiki/docs/gm-commands.md)) is to drive shutdown from the worldserver console, not from `docker compose restart`:
 
-```text
-/opt/stacks/azerothcore/.env
-/opt/stacks/azerothcore/backups/
-/opt/stacks/azerothcore/logs/
-~/.azerothcore-install-config
-/tmp/azerothcore-install-*.log
-/tmp/ac-build.log
-/tmp/ac-compose-effective.*.yml
+```bash
+docker attach ac-worldserver
 ```
 
-The installer redacts the most obvious password output, but review before sharing.
+Then at the worldserver prompt:
+
+```text
+saveall              # write all character data to the DB
+server restart 30    # warn players, kick gracefully after 30s, exit code 2
+```
+
+Detach with `Ctrl+P` then `Ctrl+Q` — **never `Ctrl+C`**, which kills the container.
+
+The upstream `docker-compose.yml` sets `restart: unless-stopped` on `ac-worldserver`, so when worldserver exits cleanly Docker brings it back automatically. No `docker` command needed for a restart.
+
+Variants of the in-game restart command:
+
+- `server idlerestart 30` — same kick, but only fires if no players are connected. Useful for scheduled maintenance.
+- `server restart cancel` — abort an in-flight countdown.
+
+### Shut down and keep it down
+
+Don't use `server shutdown` for this — it exits cleanly, but `unless-stopped` will bring the container right back up. Instead, save first and let Docker drive the stop:
+
+```bash
+docker attach ac-worldserver
+```
+
+At the worldserver prompt:
+```text
+saveall
+```
+
+Detach with `Ctrl+P` then `Ctrl+Q`, then:
+```bash
+cd /opt/stacks/azerothcore && docker compose stop ac-worldserver
+```
+
+`docker compose stop` marks the container as user-stopped (which `unless-stopped` honors), sends `SIGTERM`, and the worldserver's signal handler flushes a save before exiting. Connected players are simply disconnected — there's no in-game countdown — so this is the right tool for "no humans online" maintenance.
+
+To bring it back later:
+```bash
+cd /opt/stacks/azerothcore && docker compose start ac-worldserver
+```
+
+If you really need to bypass the in-game flow entirely (worldserver unresponsive, can't attach, etc.), `docker compose restart ac-worldserver` sends `SIGTERM` and the same signal handler flushes a save — but in-game players get no warning. Prefer the `saveall` + `server restart` path whenever the console is reachable.
