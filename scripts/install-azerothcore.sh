@@ -1560,6 +1560,7 @@ GM_PASSWORD=${GM_PASSWORD}
 AHBOT_PASSWORD=${AHBOT_PASSWORD}
 PLAYERBOT_COUNT=${PLAYERBOT_COUNT}
 SERVER_XP_RATE=${SERVER_XP_RATE}
+SERVER_PVP=${SERVER_PVP}
 INNODB_BUFFER_POOL_SIZE=${INNODB_BUFFER_POOL_SIZE}
 MAP_UPDATE_THREADS=${MAP_UPDATE_THREADS}
 AHBOT_CHARACTER_COUNT=${AHBOT_CHARACTER_COUNT}
@@ -1685,6 +1686,7 @@ elif [ "$ADOPT" = false ] && [ "${RESUME_FROM:-}" = "8" ] && [ -f "${STACK_DIR}/
     AHBOT_PASSWORD="UnusedPass123"
     PLAYERBOT_COUNT="${AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1000}"
     SERVER_XP_RATE="x5"
+    SERVER_PVP="y"
     INNODB_BUFFER_POOL_SIZE="6G"
     MAP_UPDATE_THREADS="4"
     AHBOT_CHARACTER_COUNT="1"
@@ -1726,6 +1728,9 @@ else
     prompt_xp_rate
     SERVER_XP_RATE="$PROMPT_RESULT"
 
+    prompt_yn "PvP realm? (No = PvE/Normal)" y
+    SERVER_PVP="$PROMPT_RESULT"
+
     prompt_string \
         "InnoDB buffer pool size (1G-32G; format <N>G)" \
         '^([1-9]|[12][0-9]|3[0-2])G$' \
@@ -1756,6 +1761,10 @@ fi
 # the default for new prompt runs, then validate before any phase can use it.
 SERVER_XP_RATE="${SERVER_XP_RATE:-x5}"
 validate_xp_rate_choice
+
+# Older saved prompt files do not contain SERVER_PVP. Default to y (PvP), which
+# is the default for new prompt runs.
+SERVER_PVP="${SERVER_PVP:-y}"
 
 # Derive InnoDB buffer pool instance count from the chosen buffer pool size:
 # MySQL only honors innodb_buffer_pool_instances when each instance has at
@@ -2542,17 +2551,22 @@ services:
       # during Phase 6.1, after the user creates the AH bot character.
 
       # ----- core worldserver.conf overrides -----
-      # Allow cross-faction interaction across the board so Alliance + Horde
-      # can play together. Auction flips all houses to neutral and applies
-      # the neutral AH cut; the others enable chat, calendar invites, custom
-      # channels, parties, guilds, and arena teams across factions.
+      # Realm type: 0 = Normal (PvE), 1 = PvP. The "0" below is a placeholder;
+      # the installer substitutes the user's SERVER_PVP prompt answer immediately
+      # after this heredoc is written, then greps to verify.
+      AC_GAME_TYPE: "0"
+
+      # Cross-faction interaction: Auction flips all AHs to neutral with the
+      # neutral cut, and Chat enables cross-faction chat. The rest (calendar
+      # invites, custom channels, parties, guilds, arena teams) stay faction-
+      # locked to preserve PvP separation.
       AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"
       AC_ALLOW_TWO_SIDE_INTERACTION_CHAT: "1"
-      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "1"
-      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "1"
-      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "1"
-      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "1"
-      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"
+      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "0"
+      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "0"
+      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "0"
+      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "0"
+      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "0"
 
       # ----- mod-individual-progression -----
       # Required for the mod-IP world DB updater to pick up its SQL.
@@ -2588,6 +2602,9 @@ EOF
     sed -i -E "s|^(      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: \")200(\")$|\1${PLAYERBOT_COUNT}\2|" docker-compose.override.yml
     sed -i -E "s|^(      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: \")200(\")$|\1${PLAYERBOT_COUNT}\2|" docker-compose.override.yml
     sed -i -E "s|^(      AC_MAP_UPDATE_THREADS: \")4(\")$|\1${MAP_UPDATE_THREADS}\2|" docker-compose.override.yml
+    GAME_TYPE_VALUE=0
+    [ "${SERVER_PVP}" = "y" ] && GAME_TYPE_VALUE=1
+    sed -i -E "s|^(      AC_GAME_TYPE: \")0(\")$|\1${GAME_TYPE_VALUE}\2|" docker-compose.override.yml
     insert_xp_rate_overrides_into_compose docker-compose.override.yml
 
     # Verification greps (per spec refinement #1 — disambiguated messages)
@@ -2601,6 +2618,10 @@ EOF
     fi
     if ! grep -qE "^      AC_MAP_UPDATE_THREADS: \"${MAP_UPDATE_THREADS}\"$" docker-compose.override.yml; then
         echo "ERROR: MAP_UPDATE_THREADS substitution did not match (expected ${MAP_UPDATE_THREADS})"
+        exit 1
+    fi
+    if ! grep -qE "^      AC_GAME_TYPE: \"${GAME_TYPE_VALUE}\"$" docker-compose.override.yml; then
+        echo "ERROR: AC_GAME_TYPE substitution did not match (expected ${GAME_TYPE_VALUE} for SERVER_PVP=${SERVER_PVP})"
         exit 1
     fi
     verify_xp_rate_overrides_in_compose docker-compose.override.yml
@@ -2617,11 +2638,11 @@ EOF
         '      AC_ENABLE_PLAYER_SETTINGS: "1"' \
         '      AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION: "1"' \
         '      AC_ALLOW_TWO_SIDE_INTERACTION_CHAT: "1"' \
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "1"' \
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "1"' \
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "1"' \
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "1"' \
-        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "1"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR: "0"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL: "0"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_GROUP: "0"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_GUILD: "0"' \
+        '      AC_ALLOW_TWO_SIDE_INTERACTION_ARENA: "0"' \
         '      AC_MAIL_DELIVERY_DELAY: "10"' \
         '      AC_CHAR_DELETE_METHOD: "1"'
     do
