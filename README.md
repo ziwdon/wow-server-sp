@@ -141,13 +141,125 @@ Does **not** remove Docker, Tailscale, UFW, apt packages it installed, unrelated
 | `/opt/stacks/azerothcore/logs/backup.log` | Backup history |
 | `/tmp/ac-build.log` | Docker build log (safe to delete after install) |
 
+## Installer-applied configuration
+
+Every setting the installer writes is listed below. **Prompted** entries show the prompt default; the user can change them during an interactive install. **Fixed** entries are always written with the value shown. **Derived** means computed from a prompted value, not settable independently.
+
+Post-install changes: worldserver settings live in `docker-compose.override.yml`; module configs live in `configs/modules/`; MySQL tuning lives in `configs/mysql/custom.cnf`. See [Post-install tuning](#post-install-tuning) below.
+
+### Worldserver (`docker-compose.override.yml`)
+
+| `AC_*` variable | Value | Source |
+|---|---|---|
+| `AC_GAME_TYPE` | `1` (PvP) / `0` (PvE) | Prompted — default PvP |
+| `AC_AI_PLAYERBOT_ENABLED` | `1` | Fixed |
+| `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` | `1` | Fixed |
+| `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` | `1000` | Prompted |
+| `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | `1000` | Prompted |
+| `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES` | `1` | Fixed |
+| `AC_MAP_UPDATE_THREADS` | `4` | Prompted |
+| `AC_MAP_UPDATE_INTERVAL` | `10` | Fixed |
+| `AC_MIN_WORLD_UPDATE_TIME` | `1` | Fixed |
+| `AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS` | `0` | Fixed |
+| `AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS` | `0` | Fixed |
+| `AC_QUESTS_IGNORE_AUTO_ACCEPT` | `1` | Fixed |
+| `AC_PLAYER_LIMIT` | `0` (unlimited) | Fixed |
+| `AC_LEAVE_GROUP_ON_LOGOUT_ENABLED` | `1` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION` | `1` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_CHAT` | `1` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR` | `0` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL` | `0` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_GROUP` | `0` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_GUILD` | `0` | Fixed |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_ARENA` | `0` | Fixed |
+| `AC_MAIL_DELIVERY_DELAY` | `10` (seconds) | Fixed |
+| `AC_CHAR_DELETE_METHOD` | `1` (soft-delete) | Fixed |
+| `AC_RESPAWN_DYNAMIC_RATE_CREATURE` | `10` | Fixed |
+| `AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT` | `20` | Fixed |
+| `AC_UPDATES_ENABLE_DATABASES` | `7` | Fixed |
+| `AC_ENABLE_PLAYER_SETTINGS` | `1` | Fixed |
+| `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` | `true` | Fixed |
+| `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED` | `true` | Fixed |
+
+XP/progression rate overrides are written by the rate prompt — see the table below.
+
+### XP rates
+
+Prompted during install (default: `x5`). Choosing `x1` writes no rate overrides; all others set the following keys in `docker-compose.override.yml`:
+
+| `AC_*` variable | x1 | x3 | x5 | x7 |
+|---|---|---|---|---|
+| `AC_RATE_XP_QUEST` | 1 | 3 | 5 | 7 |
+| `AC_RATE_XP_KILL` | 1 | 3 | 3 | 5 |
+| `AC_RATE_XP_EXPLORE` | 1 | 3 | 3 | 5 |
+| `AC_RATE_DROP_MONEY` | 1 | 2 | 3 | 3 |
+| `AC_RATE_REPUTATION_GAIN` | 1 | 3 | 5 | 7 |
+| `AC_RATE_SKILL_DISCOVERY` | 1 | 2 | 3 | 3 |
+| `AC_RATE_DROP_ITEM_NORMAL` | 1 | 1 | 1 | 1.5 |
+| `AC_RATE_DROP_ITEM_UNCOMMON` | 1 | 1 | 1 | 1.5 |
+| `AC_SKILLGAIN_CRAFTING` | 1 | 2 | 3 | 5 |
+| `AC_SKILLGAIN_GATHERING` | 1 | 2 | 3 | 5 |
+| `AC_SKILLGAIN_WEAPON` | 1 | 3 | 5 | 7 |
+| `AC_SKILLGAIN_DEFENSE` | 1 | 3 | 5 | 7 |
+
+### mod-playerbots (`configs/modules/playerbots.conf`)
+
+| Key | Value | Source |
+|---|---|---|
+| `AiPlayerbot.MinRandomBots` | `1000` | Prompted (mirrors worldserver) |
+| `AiPlayerbot.MaxRandomBots` | `1000` | Prompted (mirrors worldserver) |
+| `AiPlayerbot.BotActiveAlone` | `0` | Fixed |
+| `AiPlayerbot.botActiveAloneSmartScale` | `1` | Fixed |
+| `AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel` | `1` | Fixed |
+| `AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel` | `80` | Fixed |
+| `AiPlayerbot.DisabledWithoutRealPlayer` | `1` | Fixed |
+| `AiPlayerbot.EnablePeriodicOnlineOffline` | `1` | Fixed |
+| `AiPlayerbot.PeriodicOnlineOfflineRatio` | `2.0` | Fixed |
+| `AiPlayerbot.BotActiveAloneForceWhenInRadius` | `150` | Fixed |
+| `AiPlayerbot.BotActiveAloneForceWhenInZone` | `1` | Fixed |
+| `AiPlayerbot.BotActiveAloneForceWhenInMap` | `0` | Fixed |
+| `AiPlayerbot.BotActiveAloneForceWhenIsFriend` | `1` | Fixed |
+| `AiPlayerbot.BotActiveAloneForceWhenInGuild` | `0` | Fixed |
+| `PlayerbotsDatabase.WorkerThreads` | `1` | Fixed |
+| `PlayerbotsDatabase.SynchThreads` | `2` | Fixed |
+
+### mod-ah-bot-plus (`configs/modules/mod_ahbot.conf`)
+
+| Key | Value | Source |
+|---|---|---|
+| `AuctionHouseBot.GUIDs` | characters created at Pause 3 | Manual (in-game step) |
+| `AuctionHouseBot.EnableSeller` | `true` | Fixed |
+| `AuctionHouseBot.Buyer.Enabled` | `true` | Fixed |
+
+The installer prompts for how many AH bot characters to create (1 or 2, default 1); the actual GUID values come from the in-game character creation step at Pause 3.
+
+### mod-individual-progression (`configs/modules/individualProgression.conf`)
+
+The installer copies `individualProgression.conf.dist` to `individualProgression.conf` but writes no key overrides — all settings remain at upstream defaults. The module is activated by `AC_UPDATES_ENABLE_DATABASES = 7` and `AC_ENABLE_PLAYER_SETTINGS = 1` in `docker-compose.override.yml` (both fixed — see the Worldserver table above).
+
+See `docs/configs/individualProgression.conf.dist` and `docs/wikis/mod-individual-progression-wiki/` for available settings.
+
+### MySQL (`configs/mysql/custom.cnf`)
+
+| Key | Value | Source |
+|---|---|---|
+| `innodb_buffer_pool_size` | `6G` | Prompted |
+| `innodb_buffer_pool_instances` | `= size in GB` | Derived |
+| `innodb_io_capacity` | `500` | Fixed |
+| `innodb_io_capacity_max` | `2500` | Fixed |
+| `innodb_use_fdatasync` | `ON` | Fixed |
+| `innodb_log_buffer_size` | `32M` | Fixed |
+| `innodb_flush_log_at_trx_commit` | `2` | Fixed |
+
+`innodb_buffer_pool_instances` is computed as `buffer_pool_size / 1G` (e.g., `6G` → `6`). Changing `innodb_buffer_pool_size` requires a database restart to take effect.
+
 ## Post-install tuning
 
 All edits happen on the host; the containers see them via bind mounts.
 
 **Worldserver** — `worldserver.conf` is baked into the image and is **not** bind-mounted, so you don't edit it on the host. Override its values via environment variables in `docker-compose.override.yml` under `ac-worldserver.environment:` — this is exactly the mechanism the installer already uses for every worldserver setting it touches.
 
-Env vars beat `.conf` values at startup ([upstream docs](docs/wikis/azerothcore-wiki/docs/config-overrides-with-env-var.md)). The entrypoint matches `AC_*` vars to conf keys by stripping `AC_`, lowercasing, and dropping non-alphanumerics — so `AC_GAME_TYPE` writes to `GameType`, `AC_RATE_XP_QUEST` writes to `Rate.XP.Quest`, etc. **Unknown vars are silently ignored**, so verify the target key exists in `docs/configs/worldserver.conf.dist` (the upstream defaults reference) before adding a new one.
+Env vars beat `.conf` values at startup (see `docs/wikis/azerothcore-wiki/docs/config-overrides-with-env-var.md`). The entrypoint matches `AC_*` vars to conf keys by stripping `AC_`, lowercasing, and dropping non-alphanumerics — so `AC_GAME_TYPE` writes to `GameType`, `AC_RATE_XP_QUEST` writes to `Rate.XP.Quest`, etc. **Unknown vars are silently ignored**, so verify the target key exists in `docs/configs/worldserver.conf.dist` (the upstream defaults reference) before adding a new one.
 
 ```bash
 cd /opt/stacks/azerothcore
@@ -177,7 +289,7 @@ cd /opt/stacks/azerothcore && docker compose restart ac-database
 
 ## Restart and shutdown safely
 
-The worldserver should always be told to save state before it goes down. The canonical pattern (from the AzerothCore [exit-codes docs](docs/wikis/azerothcore-wiki/docs/exitcodes.md) and [GM command reference](docs/wikis/azerothcore-wiki/docs/gm-commands.md)) is to drive shutdown from the worldserver console, not from `docker compose restart`:
+The worldserver should always be told to save state before it goes down. The canonical pattern (see `docs/wikis/azerothcore-wiki/docs/exitcodes.md` and `docs/wikis/azerothcore-wiki/docs/gm-commands.md`) is to drive shutdown from the worldserver console, not from `docker compose restart`:
 
 ```bash
 docker attach ac-worldserver
