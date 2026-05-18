@@ -76,6 +76,11 @@ Note: there is no `pause-1` phase. The first manual pause (Tailscale auth) runs 
 | `/opt/stacks/azerothcore/.env` | DB credentials, image tags (do not publish) |
 | `/opt/stacks/azerothcore/configs/modules/` | `mod_ahbot.conf`, `playerbots.conf` |
 | `/opt/stacks/azerothcore/configs/mysql/custom.cnf` | MySQL tuning (`innodb_buffer_pool_size` needs db restart) |
+| `/opt/stacks/azerothcore/logs/install-<unix-ts>.log` | Full install transcript (relocated from `/tmp/` once `logs/` exists) |
+| `/opt/stacks/azerothcore/logs/Errors.log` | AzerothCore's dedicated error channel — **authoritative for runtime errors**; 0 bytes = clean |
+| `/opt/stacks/azerothcore/logs/Server.log` | Worldserver stdout/general log (chatty; contains benign warnings — see below) |
+| `/opt/stacks/azerothcore/logs/Playerbots.log` | mod-playerbots verbose action log (chatty; contains benign action-retry "FAILED" lines — see below) |
+| `/opt/stacks/azerothcore/backups/` | Nightly `mysqldump`s + config tarball + git-revisions snapshot |
 | `~/.azerothcore-install-state` | Phase checkpoint file |
 | `~/.azerothcore-install-config` | Persisted prompt answers (shredded on success) |
 
@@ -104,6 +109,22 @@ Note: there is no `pause-1` phase. The first manual pause (Tailscale auth) runs 
 **`AiPlayerbot.MinRandomBots`/`MaxRandomBots` are intentionally dual-sourced.** They are written both as `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` / `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` in the compose override AND via `set_conf_key` into `playerbots.conf` (`ensure_playerbots_performance_config`), using the same `${PLAYERBOT_COUNT}` value in both places. The compose env-var path is the runtime-authoritative source; the .conf line keeps the chosen value visible from the live module config. Removing either path looks like dead code but is not — leave both in place.
 
 **Phase 2.5 verification array is dual-sourced with the heredoc.** Every static `AC_*` line emitted into `docker-compose.override.yml` from the Phase 2.5 heredoc must also appear in the `for expected in … do grep -qFx` array immediately below the heredoc. Substituted values (`PLAYERBOT_COUNT`, `MAP_UPDATE_THREADS`, XP rates) have their own dedicated grep checks earlier; everything verbatim goes in the array. Skipping the array entry means a missing or corrupted override silently passes install instead of failing the phase loudly. When adding a new `AC_*` override here, also follow the `AC_*` env-var mapping rule above: the AzerothCore entrypoint will silently drop the var if the derived key (strip `AC_`, lowercase, drop non-alphanumerics) doesn't match an existing key in the relevant `docs/configs/*.conf.dist` file, so verify the target key exists before committing.
+
+## Known-benign log noise
+
+These patterns appear in a healthy install and should not be chased as bugs. When auditing logs after an install/verify, filter them out before drawing conclusions. The canonical signal for "is anything actually broken?" is `Errors.log` size — if it's 0 bytes, no real runtime errors.
+
+**Install log (`install-<ts>.log`), Phase 3 build only:**
+- Hundreds of clang `-Wsign-compare`, `-Wdeprecated-copy-with-user-provided-copy`, `-Wimplicit-const-int-float-conversion`, and `"N warnings generated"` lines from `modules/mod-playerbots/**/*.cpp` and core AzerothCore sources. These come from upstream code compiled with `-DWITH_WARNINGS=ON`. The build still succeeds; do not "fix" them in this repo.
+
+**`Server.log` (worldserver):**
+- `mysql: [Warning] Using a password on the command line interface can be insecure.` — emitted every time the install/backup/verify scripts shell out to `mysql` with `-p`. Expected; the scripts deliberately pass passwords this way for non-interactive use.
+- `Can't set process priority class, error: Permission denied` — worldserver tries to raise its scheduling priority inside the container without `CAP_SYS_NICE`. Cosmetic; do not add the capability just to silence it.
+- `MoveSplineInitArgs::Validate: expression 'velocity > 0.01f' failed for GUID … Type: Creature Entry: …` — upstream world-DB data quirk where a handful of creatures have zero-velocity spline data. Cosmetic.
+
+**`Playerbots.log` (mod-playerbots):**
+- `<BotName> A:<action> - FAILED` (e.g., `A:follow - FAILED`, `A:add gathering loot - FAILED`, `A:reset botAI - FAILED`) and `Can cast spell failed. No spellid. - spellid: 0, bot name: <BotName>` — this module logs every action-tick that wasn't applicable in the bot's current state. High volume is normal; these are retry/inapplicability traces, not errors.
+- `Random teleporting bot <Name> (level N) to Map: … (i/k locations)` — normal `RandomBot` relocation, not an error despite the verbose tone.
 
 ## Reference docs
 
