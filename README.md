@@ -186,7 +186,7 @@ Post-install AC tuning lives in `docker-compose.override.yml` under `ac-worldser
 | `AC_MAIL_DELIVERY_DELAY` | `10` | Fixed | Mail arrives after 10 seconds instead of 1 hour |
 | `AC_CHAR_DELETE_METHOD` | `1` | Fixed | Soft-delete characters so GUID references remain restorable |
 | `AC_RESPAWN_DYNAMIC_RATE_CREATURE` | `10` | Fixed | Prevents near-zero creature respawns in bot-heavy zones |
-| `AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT` | `20` | Fixed | Prevents near-zero gathering node respawns |
+| `AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT` | `20` | Fixed | Prevents near-zero gathering node respawns |
 | `AC_RATE_XP_QUEST` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
 | `AC_RATE_XP_KILL` | `x3: 3`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
 | `AC_RATE_XP_EXPLORE` | `x3: 3`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
@@ -195,14 +195,14 @@ Post-install AC tuning lives in `docker-compose.override.yml` under `ac-worldser
 | `AC_RATE_SKILL_DISCOVERY` | `x3: 2`, `x5: 3`, `x7: 3` | Prompted | Omitted for `x1` |
 | `AC_RATE_DROP_ITEM_NORMAL` | `x3: 1`, `x5: 1`, `x7: 1.5` | Prompted | Omitted for `x1` |
 | `AC_RATE_DROP_ITEM_UNCOMMON` | `x3: 1`, `x5: 1`, `x7: 1.5` | Prompted | Omitted for `x1` |
-| `AC_SKILLGAIN_CRAFTING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
-| `AC_SKILLGAIN_GATHERING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
-| `AC_SKILLGAIN_WEAPON` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
-| `AC_SKILLGAIN_DEFENSE` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
+| `AC_SKILL_GAIN_CRAFTING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
+| `AC_SKILL_GAIN_GATHERING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
+| `AC_SKILL_GAIN_WEAPON` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
+| `AC_SKILL_GAIN_DEFENSE` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
 
 `AuctionHouseBot.GUIDs` is the only `.conf`-side value the installer writes: Phase 6.1.4 stores the runtime-discovered AH bot character GUIDs in `configs/modules/mod_ahbot.conf`.
 
-To translate dotted config keys to env vars, prefix with `AC_`, replace periods with underscores, insert underscores at lowercase-to-uppercase boundaries, then uppercase the result. Examples: `AiPlayerbot.BotActiveAlone` -> `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE`; `AllowTwoSide.Interaction.Calendar` -> `AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR`. At runtime AzerothCore strips `AC_`, lowercases, removes non-alphanumerics, and matches against loaded `.conf` keys, so unknown or misspelled vars are silently ignored.
+To translate dotted config keys to env vars, prefix with `AC_`, replace periods with underscores, insert underscores at lowercase-to-uppercase boundaries, then uppercase the result. Examples: `AiPlayerbot.BotActiveAlone` -> `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE`; `Respawn.DynamicRateGameObject` -> `AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT`; `SkillGain.Crafting` -> `AC_SKILL_GAIN_CRAFTING`. Unknown or misspelled vars are silently ignored, so verify the target key exists in the relevant `.conf.dist` before adding a new one.
 
 ### MySQL (`configs/mysql/custom.cnf`)
 
@@ -224,7 +224,7 @@ All edits happen on the host; the containers see them via bind mounts.
 
 **Worldserver** — `worldserver.conf` is baked into the image and is **not** bind-mounted, so you don't edit it on the host. Override its values via environment variables in `docker-compose.override.yml` under `ac-worldserver.environment:` — this is exactly the mechanism the installer already uses for every worldserver setting it touches.
 
-Env vars beat `.conf` values at startup (see `docs/wikis/azerothcore-wiki/docs/config-overrides-with-env-var.md`). The entrypoint matches `AC_*` vars to conf keys by stripping `AC_`, lowercasing, and dropping non-alphanumerics — so `AC_GAME_TYPE` writes to `GameType`, `AC_RATE_XP_QUEST` writes to `Rate.XP.Quest`, etc. **Unknown vars are silently ignored**, so verify the target key exists in `docs/configs/worldserver.conf.dist` (the upstream defaults reference) before adding a new one.
+Env vars beat `.conf` values at startup (see `docs/wikis/azerothcore-wiki/docs/config-overrides-with-env-var.md`). Convert config keys with the same rule shown above: `GameType` -> `AC_GAME_TYPE`, `Rate.XP.Quest` -> `AC_RATE_XP_QUEST`, `SkillGain.Crafting` -> `AC_SKILL_GAIN_CRAFTING`. **Unknown vars are silently ignored**, so verify the target key exists in `docs/configs/worldserver.conf.dist` (the upstream defaults reference) before adding a new one.
 
 ```bash
 cd /opt/stacks/azerothcore
