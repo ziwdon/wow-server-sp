@@ -307,10 +307,9 @@ done
 
 # ============================================================================
 # Check 8 — docker-compose.override.yml has every expected static AC_* line
-# Mirrors the install's Phase 2.5 assertion block verbatim. The dual sourcing
-# with install is intentional and documented in CLAUDE.md — a silent loss of
-# any of these (manual edit, partial restore, override regenerated from an
-# older template) changes server behavior without any other warning.
+# Mirrors the install's Phase 2.5 assertion block verbatim. A silent loss of
+# any of these lines (manual edit, partial restore, override regenerated from
+# an older template) changes server behavior without any other warning.
 # ============================================================================
 OVERRIDE="${STACK_DIR}/docker-compose.override.yml"
 if [ ! -f "$OVERRIDE" ]; then
@@ -320,6 +319,12 @@ else
         '      AC_AI_PLAYERBOT_ENABLED: "1"'
         '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"'
         '      AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"'
+        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"'
+        '      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"'
+        '      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"'
+        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"'
+        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"'
+        '      AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"'
         '      AC_MAP_UPDATE_INTERVAL: "10"'
         '      AC_MIN_WORLD_UPDATE_TIME: "1"'
         '      AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS: "0"'
@@ -446,23 +451,21 @@ if [ -f "$OVERRIDE" ]; then
 fi
 
 # ============================================================================
-# Check 10 — mod_ahbot.conf has canonical AH bot settings AND the GUIDs
-# refer to real characters on the AHBOT account.
+# Check 10 — mod_ahbot.conf has canonical AH bot GUIDs, and they refer to real
+# characters on the AHBOT account.
 # ============================================================================
 AHBOT_CONF="${STACK_DIR}/configs/modules/mod_ahbot.conf"
 if [ ! -f "$AHBOT_CONF" ]; then
     fail "mod_ahbot.conf missing at $AHBOT_CONF"
 else
-    # Each managed key must appear exactly once (install canonicalizes via
-    # set_conf_key + require_conf_key_once). A duplicate after install means
-    # somebody hand-edited it back.
-    for key in AuctionHouseBot.GUIDs AuctionHouseBot.EnableSeller AuctionHouseBot.Buyer.Enabled; do
-        esc="$(conf_escape_key "$key")"
-        count="$(grep -cE "^[[:space:]]*${esc}[[:space:]]*=" "$AHBOT_CONF" 2>/dev/null || true)"
-        if [ "$count" != "1" ]; then
-            fail "mod_ahbot.conf has ${key} appearing ${count} time(s) (expected exactly 1)"
-        fi
-    done
+    # The only .conf-managed AH bot key is AuctionHouseBot.GUIDs. EnableSeller
+    # and Buyer.Enabled are sourced from AC_* env vars in docker-compose.override.yml.
+    key="AuctionHouseBot.GUIDs"
+    esc="$(conf_escape_key "$key")"
+    count="$(grep -cE "^[[:space:]]*${esc}[[:space:]]*=" "$AHBOT_CONF" 2>/dev/null || true)"
+    if [ "$count" != "1" ]; then
+        fail "mod_ahbot.conf has ${key} appearing ${count} time(s) (expected exactly 1)"
+    fi
 
     guids_val="$(grep -E '^[[:space:]]*AuctionHouseBot\.GUIDs[[:space:]]*=' "$AHBOT_CONF" \
                  | sed -E 's/^[[:space:]]*[^=]+=[[:space:]]*//;s/[[:space:]]+$//')"
@@ -487,27 +490,12 @@ else
             fail "Only '${matched:-0}' of $guid_count AH bot GUID(s) belong to AHBOT account characters"
         fi
     fi
-
-    seller="$(grep -E '^[[:space:]]*AuctionHouseBot\.EnableSeller[[:space:]]*=' "$AHBOT_CONF" \
-              | sed -E 's/^[[:space:]]*[^=]+=[[:space:]]*//;s/[[:space:]]+$//')"
-    if [ "$seller" = "true" ]; then
-        ok "mod_ahbot.conf AuctionHouseBot.EnableSeller = true"
-    else
-        fail "mod_ahbot.conf AuctionHouseBot.EnableSeller = '$seller' (expected true)"
-    fi
-
-    buyer="$(grep -E '^[[:space:]]*AuctionHouseBot\.Buyer\.Enabled[[:space:]]*=' "$AHBOT_CONF" \
-             | sed -E 's/^[[:space:]]*[^=]+=[[:space:]]*//;s/[[:space:]]+$//')"
-    if [ "$buyer" = "true" ]; then
-        ok "mod_ahbot.conf AuctionHouseBot.Buyer.Enabled = true"
-    else
-        fail "mod_ahbot.conf AuctionHouseBot.Buyer.Enabled = '$buyer' (expected true)"
-    fi
 fi
 
 # ============================================================================
-# Check 11 — playerbots conf present and master switch on
-# (Schema health is covered in Check 4.)
+# Check 11 — playerbots.conf exists on the host (seeded by install Phase 3.1).
+# Content is no longer asserted; AiPlayerbot.Enabled and friends are sourced
+# from AC_* env vars (verified by Check 8 and Check 12).
 # ============================================================================
 PB_CONF=""
 for candidate in playerbots.conf mod_playerbots.conf; do
@@ -517,73 +505,81 @@ for candidate in playerbots.conf mod_playerbots.conf; do
     fi
 done
 
-if [ -z "$PB_CONF" ]; then
-    fail "Neither playerbots.conf nor mod_playerbots.conf found"
+if [ -n "$PB_CONF" ]; then
+    ok "playerbots.conf present on host ($PB_CONF)"
 else
-    pb_enabled="$(grep -E '^[[:space:]]*AiPlayerbot\.Enabled[[:space:]]*=' "$PB_CONF" \
-                  | head -1 | sed -E 's/^[[:space:]]*[^=]+=[[:space:]]*//;s/[[:space:]]+$//')"
-    if [ "$pb_enabled" = "1" ]; then
-        ok "Playerbots conf present; AiPlayerbot.Enabled = 1 ($PB_CONF)"
-    else
-        fail "Playerbots conf at $PB_CONF has AiPlayerbot.Enabled = '$pb_enabled' (expected 1)"
-    fi
+    fail "no playerbots.conf or mod_playerbots.conf under ${STACK_DIR}/configs/modules"
 fi
 
 # ============================================================================
-# Check 12 — playerbots performance profile keys (16 mandatory)
-# Install's ensure_playerbots_performance_config writes these via set_conf_key.
-# Per CLAUDE.md the dual-source with compose env-vars is intentional: the .conf
-# is the visible/editable face of the runtime tuning, so drift here is silent
-# at runtime but breaks anyone reading the live config to understand the box.
-# Each key gets its own OK/FAIL so the drifted key is pinpointable.
-#
-# MIN/MAX bot counts are user-driven, so we re-use pb_min/pb_max captured by
-# Check 8 from the compose override. If those are unset (Check 8 failed),
-# we still validate the .conf line is numeric.
+# Check 12 — managed AC_* env vars bound by worldserver
 # ============================================================================
-if [ -n "$PB_CONF" ]; then
-    pb_count="${pb_min:-${pb_max:-}}"
-    PB_PROFILE_KEYS=(
-        "AiPlayerbot.BotActiveAlone|0"
-        "AiPlayerbot.botActiveAloneSmartScale|1"
-        "AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel|1"
-        "AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel|80"
-        "AiPlayerbot.DisabledWithoutRealPlayer|1"
-        "AiPlayerbot.MinRandomBots|__PB_COUNT__"
-        "AiPlayerbot.MaxRandomBots|__PB_COUNT__"
-        "AiPlayerbot.EnablePeriodicOnlineOffline|1"
-        "AiPlayerbot.PeriodicOnlineOfflineRatio|2.0"
-        "AiPlayerbot.BotActiveAloneForceWhenInRadius|150"
-        "AiPlayerbot.BotActiveAloneForceWhenInZone|1"
-        "AiPlayerbot.BotActiveAloneForceWhenInMap|0"
-        "AiPlayerbot.BotActiveAloneForceWhenIsFriend|1"
-        "AiPlayerbot.BotActiveAloneForceWhenInGuild|0"
-        "PlayerbotsDatabase.WorkerThreads|1"
-        "PlayerbotsDatabase.SynchThreads|2"
+managed_vars=(
+    AC_AI_PLAYERBOT_ENABLED
+    AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN
+    AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES
+    AC_AI_PLAYERBOT_MIN_RANDOM_BOTS
+    AC_AI_PLAYERBOT_MAX_RANDOM_BOTS
+    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE
+    AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER
+    AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE
+    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
+    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
+    AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
+    AC_AUCTION_HOUSE_BOT_ENABLE_SELLER
+    AC_AUCTION_HOUSE_BOT_BUYER_ENABLED
+    AC_MAP_UPDATE_THREADS
+    AC_MAP_UPDATE_INTERVAL
+    AC_MIN_WORLD_UPDATE_TIME
+    AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS
+    AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS
+    AC_QUESTS_IGNORE_AUTO_ACCEPT
+    AC_PLAYER_LIMIT
+    AC_LEAVE_GROUP_ON_LOGOUT_ENABLED
+    AC_GAME_TYPE
+    AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION
+    AC_ALLOW_TWO_SIDE_INTERACTION_CHAT
+    AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR
+    AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL
+    AC_ALLOW_TWO_SIDE_INTERACTION_GROUP
+    AC_ALLOW_TWO_SIDE_INTERACTION_GUILD
+    AC_ALLOW_TWO_SIDE_INTERACTION_ARENA
+    AC_UPDATES_ENABLE_DATABASES
+    AC_ENABLE_PLAYER_SETTINGS
+    AC_MAIL_DELIVERY_DELAY
+    AC_CHAR_DELETE_METHOD
+    AC_RESPAWN_DYNAMIC_RATE_CREATURE
+    AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT
+)
+
+# AC_PLAYERBOTS_DATABASE_INFO is intentionally excluded: on some builds it is
+# consumed before the standard "Found config value" line is emitted. Its shape
+# is verified in Check 8, and real connectivity is covered by playerbots DB checks.
+if [ "${xp_present:-0}" -eq 12 ]; then
+    managed_vars+=(
+        AC_RATE_XP_QUEST
+        AC_RATE_XP_KILL
+        AC_RATE_XP_EXPLORE
+        AC_RATE_DROP_MONEY
+        AC_RATE_REPUTATION_GAIN
+        AC_RATE_SKILL_DISCOVERY
+        AC_RATE_DROP_ITEM_NORMAL
+        AC_RATE_DROP_ITEM_UNCOMMON
+        AC_SKILLGAIN_CRAFTING
+        AC_SKILLGAIN_GATHERING
+        AC_SKILLGAIN_WEAPON
+        AC_SKILLGAIN_DEFENSE
     )
-    for entry in "${PB_PROFILE_KEYS[@]}"; do
-        pb_key="${entry%%|*}"
-        pb_expected="${entry##*|}"
-        pb_esc="$(conf_escape_key "$pb_key")"
-        pb_kcount="$(grep -cE "^[[:space:]]*${pb_esc}[[:space:]]*=" "$PB_CONF" 2>/dev/null || true)"
-        pb_actual="$(grep -E "^[[:space:]]*${pb_esc}[[:space:]]*=" "$PB_CONF" \
-                     | head -1 | sed -E 's/^[[:space:]]*[^=]+=[[:space:]]*//;s/[[:space:]]+$//')"
-        if [ "$pb_kcount" != "1" ]; then
-            fail "playerbots conf: ${pb_key} appears ${pb_kcount} time(s) (expected exactly 1)"
-            continue
-        fi
-        if [ "$pb_expected" = "__PB_COUNT__" ]; then
-            if ! [[ "$pb_actual" =~ ^[0-9]+$ ]]; then
-                fail "playerbots conf: ${pb_key} = '${pb_actual}' (expected positive integer)"
-            elif [ -n "$pb_count" ] && [ "$pb_actual" != "$pb_count" ]; then
-                fail "playerbots conf: ${pb_key} = ${pb_actual} (does not match compose override MIN/MAX value ${pb_count})"
-            else
-                ok "playerbots conf: ${pb_key} = ${pb_actual}"
-            fi
-        elif [ "$pb_actual" = "$pb_expected" ]; then
-            ok "playerbots conf: ${pb_key} = ${pb_expected}"
+fi
+
+if ! log_content="$(docker exec -i ac-worldserver cat /azerothcore/env/dist/logs/Server.log 2>/dev/null)"; then
+    fail "Could not read Server.log inside ac-worldserver"
+else
+    for var in "${managed_vars[@]}"; do
+        if printf '%s\n' "$log_content" | grep -qE "from environment variable '${var}'"; then
+            ok "AC env var bound: ${var}"
         else
-            fail "playerbots conf: ${pb_key} = '${pb_actual}' (expected '${pb_expected}')"
+            fail "AC env var NOT bound by worldserver: ${var} (likely cause: upstream key rename)"
         fi
     done
 fi

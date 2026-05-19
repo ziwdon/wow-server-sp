@@ -321,29 +321,6 @@ assert_no_playerbots_sql_duplicates_in_custom() {
     fi
 }
 
-ensure_playerbots_updater_enabled_in_compose_override() {
-    local file="${STACK_DIR}/docker-compose.override.yml"
-
-    if [ ! -f "$file" ]; then
-        echo "ERROR: $file is missing; cannot verify Playerbots updater setting."
-        exit 1
-    fi
-
-    if grep -qE '^[[:space:]]*AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES:[[:space:]]*"?0"?[[:space:]]*$' "$file"; then
-        echo "Updating AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES from 0 to 1 in docker-compose.override.yml."
-        sed -i -E 's/^([[:space:]]*AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES:[[:space:]]*)"?0"?[[:space:]]*$/\1"1"/' "$file"
-    elif ! grep -qE '^[[:space:]]*AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES:' "$file"; then
-        echo "Adding AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES=1 to docker-compose.override.yml."
-        sed -i '/AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN:/a\      AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' "$file"
-    fi
-
-    if ! grep -qE '^[[:space:]]*AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES:[[:space:]]*"?1"?[[:space:]]*$' "$file"; then
-        echo "ERROR: AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES must be set to 1."
-        echo "If it is 0, acore_playerbots may exist but its tables will not be initialized."
-        exit 1
-    fi
-}
-
 playerbots_base_sql_dir() {
     printf '%s' "${STACK_DIR}/modules/mod-playerbots/data/sql/playerbots/base"
 }
@@ -790,10 +767,9 @@ verify_mysql_tuning_active() {
 }
 
 # ==========================================================================
-# Helper: patch live module .conf values used by the playerbot performance
-# profile. This is intentionally separate from docker-compose environment
-# variables so the final playerbot profile remains visible/editable in the
-# mounted module config file.
+# Helper: patch live module .conf values that cannot be known until runtime.
+# Most AC tuning is sourced from docker-compose.override.yml AC_* env vars;
+# set_conf_key remains for values like AuctionHouseBot.GUIDs discovered later.
 # ==========================================================================
 escape_regex_metachars() {
     printf '%s' "$1" | sed 's/[.[\*^$()+?{}|]/\\&/g'
@@ -838,100 +814,6 @@ require_conf_key_once() {
     fi
 }
 
-playerbots_conf_path() {
-    local conf dist
-
-    for conf in configs/modules/playerbots.conf configs/modules/mod_playerbots.conf; do
-        if [ -f "$conf" ]; then
-            printf '%s\n' "$conf"
-            return 0
-        fi
-    done
-
-    for dist in configs/modules/playerbots.conf.dist configs/modules/mod_playerbots.conf.dist; do
-        if [ -f "$dist" ]; then
-            conf="${dist%.dist}"
-            cp "$dist" "$conf"
-            echo "Created live Playerbots config: $conf" >&2
-            printf '%s\n' "$conf"
-            return 0
-        fi
-    done
-
-    echo "ERROR: Could not find playerbots.conf(.dist) or mod_playerbots.conf(.dist) in configs/modules." >&2
-    return 1
-}
-
-ensure_playerbots_performance_config() {
-    local conf
-    conf="$(playerbots_conf_path)"
-
-    echo "Applying Playerbots performance profile to: $conf"
-
-    # BotActiveAlone = 0 turns off background AI for bots with no nearby real
-    # player; the BotActiveAloneForceWhen* family below brings them back to
-    # life as soon as a player is in radius / zone / friend list. Combined
-    # with DisabledWithoutRealPlayer, this keeps the realm cheap when empty
-    # and lively when someone is online.
-    set_conf_key "AiPlayerbot.BotActiveAlone" "0" "$conf"
-    set_conf_key "AiPlayerbot.botActiveAloneSmartScale" "1" "$conf"
-    set_conf_key "AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel" "1" "$conf"
-    set_conf_key "AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel" "80" "$conf"
-
-    # Reduce writes and background activity when the realm is empty.
-    set_conf_key "AiPlayerbot.DisabledWithoutRealPlayer" "1" "$conf"
-
-    # Random bot pool size. The compose override also passes the same value
-    # as AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS; keeping it in playerbots.conf
-    # makes the chosen size discoverable from the live config file as well.
-    set_conf_key "AiPlayerbot.MinRandomBots" "${PLAYERBOT_COUNT}" "$conf"
-    set_conf_key "AiPlayerbot.MaxRandomBots" "${PLAYERBOT_COUNT}" "$conf"
-
-    # Rotate which bots are logged in over time so the same characters do
-    # not always appear in the world.
-    set_conf_key "AiPlayerbot.EnablePeriodicOnlineOffline" "1" "$conf"
-    set_conf_key "AiPlayerbot.PeriodicOnlineOfflineRatio" "2.0" "$conf"
-
-    # Activation triggers: a bot becomes fully active when a real player is
-    # within 150 yards, in the same zone, or marked as the bot's friend.
-    # Same map alone or same guild alone do NOT trigger activation here.
-    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInRadius" "150" "$conf"
-    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInZone" "1" "$conf"
-    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInMap" "0" "$conf"
-    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenIsFriend" "1" "$conf"
-    set_conf_key "AiPlayerbot.BotActiveAloneForceWhenInGuild" "0" "$conf"
-
-    # Keep Playerbots DB threading conservative for a 6-core / 12-thread home box.
-    set_conf_key "PlayerbotsDatabase.WorkerThreads" "1" "$conf"
-    set_conf_key "PlayerbotsDatabase.SynchThreads" "2" "$conf"
-
-    for expected in \
-        "AiPlayerbot.BotActiveAlone = 0" \
-        "AiPlayerbot.botActiveAloneSmartScale = 1" \
-        "AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel = 1" \
-        "AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel = 80" \
-        "AiPlayerbot.DisabledWithoutRealPlayer = 1" \
-        "AiPlayerbot.MinRandomBots = ${PLAYERBOT_COUNT}" \
-        "AiPlayerbot.MaxRandomBots = ${PLAYERBOT_COUNT}" \
-        "AiPlayerbot.EnablePeriodicOnlineOffline = 1" \
-        "AiPlayerbot.PeriodicOnlineOfflineRatio = 2.0" \
-        "AiPlayerbot.BotActiveAloneForceWhenInRadius = 150" \
-        "AiPlayerbot.BotActiveAloneForceWhenInZone = 1" \
-        "AiPlayerbot.BotActiveAloneForceWhenInMap = 0" \
-        "AiPlayerbot.BotActiveAloneForceWhenIsFriend = 1" \
-        "AiPlayerbot.BotActiveAloneForceWhenInGuild = 0" \
-        "PlayerbotsDatabase.WorkerThreads = 1" \
-        "PlayerbotsDatabase.SynchThreads = 2"
-    do
-        if ! grep -qFx "$expected" "$conf"; then
-            echo "ERROR: Failed to set expected Playerbots config line: $expected"
-            exit 1
-        fi
-    done
-
-    grep -E "^(AiPlayerbot\.(BotActiveAlone|botActiveAloneSmartScale|botActiveAloneSmartScaleWhenMinLevel|botActiveAloneSmartScaleWhenMaxLevel|DisabledWithoutRealPlayer|MinRandomBots|MaxRandomBots|EnablePeriodicOnlineOffline|PeriodicOnlineOfflineRatio|BotActiveAloneForceWhenInRadius|BotActiveAloneForceWhenInZone|BotActiveAloneForceWhenInMap|BotActiveAloneForceWhenIsFriend|BotActiveAloneForceWhenInGuild)|PlayerbotsDatabase\.(WorkerThreads|SynchThreads))[[:space:]]*=" "$conf"
-}
-
 worldserver_playerbots_fatal_pattern() {
     printf '%s' "Could not prepare statements of the Playerbots database|Table 'acore_playerbots\.|Unknown database 'acore_playerbots'"
 }
@@ -945,6 +827,110 @@ worldserver_has_playerbots_fatal_logs() {
     fi
 
     docker logs "${logs_args[@]}" ac-worldserver 2>&1 | grep -qiE "$(worldserver_playerbots_fatal_pattern)"
+}
+
+# Verify that every managed AC_* env var was successfully bound to a real
+# config key by the worldserver binary. The worldserver prints one
+#     > Config: Found config value 'X' from environment variable 'AC_X'
+# line per successful binding at startup. If a derived key doesn't match
+# any key in any loaded .conf (most likely cause: upstream renamed the key),
+# the env var is silently dropped. This check catches that.
+#
+# Reads Server.log inside the running ac-worldserver container.
+verify_managed_env_vars_bound_in_worldserver() {
+    local log="/azerothcore/env/dist/logs/Server.log"
+    local missing=0
+    local managed_vars=(
+        AC_AI_PLAYERBOT_ENABLED
+        AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN
+        AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES
+        AC_AI_PLAYERBOT_MIN_RANDOM_BOTS
+        AC_AI_PLAYERBOT_MAX_RANDOM_BOTS
+        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE
+        AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER
+        AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE
+        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
+        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
+        AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
+        AC_AUCTION_HOUSE_BOT_ENABLE_SELLER
+        AC_AUCTION_HOUSE_BOT_BUYER_ENABLED
+        AC_MAP_UPDATE_THREADS
+        AC_MAP_UPDATE_INTERVAL
+        AC_MIN_WORLD_UPDATE_TIME
+        AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS
+        AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS
+        AC_QUESTS_IGNORE_AUTO_ACCEPT
+        AC_PLAYER_LIMIT
+        AC_LEAVE_GROUP_ON_LOGOUT_ENABLED
+        AC_GAME_TYPE
+        AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION
+        AC_ALLOW_TWO_SIDE_INTERACTION_CHAT
+        AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR
+        AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL
+        AC_ALLOW_TWO_SIDE_INTERACTION_GROUP
+        AC_ALLOW_TWO_SIDE_INTERACTION_GUILD
+        AC_ALLOW_TWO_SIDE_INTERACTION_ARENA
+        AC_UPDATES_ENABLE_DATABASES
+        AC_ENABLE_PLAYER_SETTINGS
+        AC_MAIL_DELIVERY_DELAY
+        AC_CHAR_DELETE_METHOD
+        AC_RESPAWN_DYNAMIC_RATE_CREATURE
+        AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT
+    )
+
+    # AC_PLAYERBOTS_DATABASE_INFO is excluded: it sets a connection-string
+    # config that is consumed before the "Found config value" log line is
+    # emitted on some builds. Its presence is verified independently by
+    # ac-worldserver's ability to talk to acore_playerbots at all.
+
+    if [ "${SERVER_XP_RATE:-x5}" != "x1" ]; then
+        managed_vars+=(
+            AC_RATE_XP_QUEST
+            AC_RATE_XP_KILL
+            AC_RATE_XP_EXPLORE
+            AC_RATE_DROP_MONEY
+            AC_RATE_REPUTATION_GAIN
+            AC_RATE_SKILL_DISCOVERY
+            AC_RATE_DROP_ITEM_NORMAL
+            AC_RATE_DROP_ITEM_UNCOMMON
+            AC_SKILLGAIN_CRAFTING
+            AC_SKILLGAIN_GATHERING
+            AC_SKILLGAIN_WEAPON
+            AC_SKILLGAIN_DEFENSE
+        )
+    fi
+
+    echo "Verifying every managed AC_* env var bound to a real config key in worldserver..."
+
+    local log_content
+    if ! log_content="$(docker exec -i ac-worldserver cat "$log" 2>/dev/null)"; then
+        echo "ERROR: Could not read $log inside ac-worldserver. Is the container running?"
+        return 1
+    fi
+
+    local var
+    for var in "${managed_vars[@]}"; do
+        # The worldserver log line format:
+        #     > Config: Found config value '<DottedKey>' from environment variable 'AC_<KEY>'
+        if ! printf '%s\n' "$log_content" | grep -qE "from environment variable '${var}'"; then
+            echo "FAIL: ${var} was set in docker-compose.override.yml but not bound by worldserver."
+            echo "      Likely cause: the derived dotted key no longer exists in any loaded .conf"
+            echo "      (upstream rename, typo in env-var name, or removed feature)."
+            echo "      Translation rule: strip AC_, lowercase, drop non-alphanumerics, then match"
+            echo "      against keys in worldserver.conf.dist / playerbots.conf.dist / mod_ahbot.conf.dist."
+            missing=$((missing + 1))
+        fi
+    done
+
+    if [ "$missing" -ne 0 ]; then
+        echo "ERROR: $missing managed env var(s) did not bind to a real config key."
+        echo "Hint: inspect the most recent Server.log lines that start with '> Config:' inside"
+        echo "      ac-worldserver, and check the corresponding .conf.dist file for the expected key."
+        return 1
+    fi
+
+    echo "All managed AC_* env vars bound successfully."
+    return 0
 }
 
 print_worldserver_playerbots_fatal_logs() {
@@ -1852,8 +1838,13 @@ adopt_existing_install() {
     fi
 
     if [ -f "$STACK_DIR/docker-compose.override.yml" ]; then
-        (cd "$STACK_DIR" && ensure_playerbots_updater_enabled_in_compose_override)
-        echo "  ✓ Playerbots updater is enabled in docker-compose.override.yml"
+        if grep -qE '^[[:space:]]*AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES:[[:space:]]*"?1"?[[:space:]]*$' "$STACK_DIR/docker-compose.override.yml"; then
+            echo "  ✓ docker-compose.override.yml has AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES = 1"
+        else
+            echo "  ✗ docker-compose.override.yml does not have AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES set to 1."
+            echo "    Hint: re-run 'install-azerothcore.sh --resume-from=2.5' to regenerate the override file."
+            fail=1
+        fi
     else
         echo "  ✗ $STACK_DIR/docker-compose.override.yml missing"
         fail=1
@@ -1886,11 +1877,34 @@ adopt_existing_install() {
     if [ -f "$STACK_DIR/configs/modules/playerbots.conf.dist" ] \
        || [ -f "$STACK_DIR/configs/modules/mod_playerbots.conf.dist" ]; then
         echo "  ✓ playerbots conf.dist present"
-        (cd "$STACK_DIR" && ensure_playerbots_performance_config)
     else
         echo "  ✗ playerbots(.|_)conf.dist missing"
         fail=1
     fi
+
+    # VERIFY managed playerbot env vars in docker-compose.override.yml.
+    # These are the six divergent keys migrated out of playerbots.conf in
+    # plan 2026-05-19-install-script-option-a-env-vars.md.
+    if [ -f "$STACK_DIR/docker-compose.override.yml" ]; then
+        for var in \
+            AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE \
+            AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER \
+            AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE \
+            AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND \
+            AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD \
+            AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
+        do
+            if grep -qE "^[[:space:]]*${var}:" "$STACK_DIR/docker-compose.override.yml"; then
+                echo "  ✓ docker-compose.override.yml has ${var}"
+            else
+                echo "  ✗ docker-compose.override.yml is missing managed env var ${var}."
+                echo "    Hint: re-run 'install-azerothcore.sh --resume-from=2.5' to regenerate the override file."
+                fail=1
+            fi
+        done
+    fi
+    # The missing-file case is already reported by the override-existence
+    # check above; no need to duplicate it.
 
     # VERIFY Phase 4 — containers + databases + MySQL vars
     echo ""
@@ -2532,6 +2546,18 @@ services:
       AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "200"
       AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "200"
 
+      # Playerbot activation profile (formerly written into playerbots.conf):
+      # BotActiveAlone = 0 turns off background AI when no real player is nearby;
+      # ForceWhenIsFriend = 1 activates a bot when a real player is on its friend list;
+      # DisabledWithoutRealPlayer = 1 keeps the realm cheap when nobody is online;
+      # EnablePeriodicOnlineOffline = 1 rotates which bots are logged in over time.
+      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"
+      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"
+      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"
+      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"
+      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"
+      AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"
+
       # Conservative worldserver/playerbots performance settings for 6 physical cores / 12 threads.
       AC_MAP_UPDATE_THREADS: "4"
       AC_MAP_UPDATE_INTERVAL: "10"
@@ -2639,6 +2665,18 @@ EOF
     verify_xp_rate_overrides_in_compose docker-compose.override.yml
 
     for expected in \
+        "      AC_PLAYERBOTS_DATABASE_INFO: \"ac-database;3306;root;\${DOCKER_DB_ROOT_PASSWORD:-password};acore_playerbots\"" \
+        '      AC_AI_PLAYERBOT_ENABLED: "1"' \
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"' \
+        '      AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' \
+        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"' \
+        '      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"' \
+        '      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"' \
+        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"' \
+        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"' \
+        '      AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"' \
+        '      AC_AUCTION_HOUSE_BOT_ENABLE_SELLER: "true"' \
+        '      AC_AUCTION_HOUSE_BOT_BUYER_ENABLED: "true"' \
         '      AC_MAP_UPDATE_INTERVAL: "10"' \
         '      AC_MIN_WORLD_UPDATE_TIME: "1"' \
         '      AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS: "0"' \
@@ -2685,7 +2723,6 @@ if should_run_phase "2.6"; then
     source .env
 
     ensure_mysql_custom_cnf_file
-    ensure_playerbots_updater_enabled_in_compose_override
 
     COMPOSE_EFFECTIVE="$(mktemp /tmp/ac-compose-effective.XXXXXX.yml)"
     chmod 600 "$COMPOSE_EFFECTIVE"
@@ -2747,6 +2784,12 @@ if should_run_phase "2.6"; then
         AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES \
         AC_AI_PLAYERBOT_MIN_RANDOM_BOTS \
         AC_AI_PLAYERBOT_MAX_RANDOM_BOTS \
+        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE \
+        AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER \
+        AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE \
+        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND \
+        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD \
+        AC_PLAYERBOTS_DATABASE_SYNCH_THREADS \
         AC_AUCTION_HOUSE_BOT_ENABLE_SELLER \
         AC_AUCTION_HOUSE_BOT_BUYER_ENABLED \
         AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION \
@@ -2952,9 +2995,7 @@ ls -ld /azerothcore/env/dist/logs || true
     ls configs/modules/individualProgression.conf.dist
     ls configs/modules/individualProgression.conf
 
-    ensure_playerbots_performance_config
-
-    mark_phase_complete "3.1" "Conf templates installed; live configs created; Playerbots performance profile applied"
+    mark_phase_complete "3.1" "Conf templates installed; live configs created"
 fi
 
 # ============================================================================
@@ -2969,8 +3010,6 @@ if should_run_phase "4"; then
     VERIFY4_FAIL=0
 
     ensure_mysql_custom_cnf_file
-    ensure_playerbots_updater_enabled_in_compose_override
-    ensure_playerbots_performance_config
     cleanup_playerbots_custom_sql_files
     assert_no_playerbots_sql_duplicates_in_custom
 
@@ -3101,6 +3140,7 @@ SHOW VARIABLES WHERE Variable_name IN (
 );
 "
     verify_mysql_tuning_active || VERIFY4_FAIL=1
+    verify_managed_env_vars_bound_in_worldserver || VERIFY4_FAIL=1
 
     if [ "$VERIFY4_FAIL" -ne 0 ]; then
         echo ""
@@ -3431,16 +3471,12 @@ if should_run_phase "6.1.4"; then
         exit 1
     fi
 
-    echo "Canonicalizing AH bot settings in $AHBOT_CONF ..."
-    echo "This removes duplicate active/commented instances of the managed keys and appends one clean value each."
+    echo "Canonicalizing AH bot GUIDs in $AHBOT_CONF ..."
+    echo "This removes duplicate active/commented instances of the managed key and appends one clean value."
 
     set_conf_key "AuctionHouseBot.GUIDs" "$YOUR_GUIDS" "$AHBOT_CONF"
-    set_conf_key "AuctionHouseBot.EnableSeller" "true" "$AHBOT_CONF"
-    set_conf_key "AuctionHouseBot.Buyer.Enabled" "true" "$AHBOT_CONF"
 
     require_conf_key_once "AuctionHouseBot.GUIDs" "$YOUR_GUIDS" "$AHBOT_CONF"
-    require_conf_key_once "AuctionHouseBot.EnableSeller" "true" "$AHBOT_CONF"
-    require_conf_key_once "AuctionHouseBot.Buyer.Enabled" "true" "$AHBOT_CONF"
 
     echo "Relevant settings after cleanup:"
     grep -nE "^[[:space:]]*AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)[[:space:]]*=" "$AHBOT_CONF"
@@ -3455,14 +3491,15 @@ set -e
 conf=/azerothcore/env/dist/etc/modules/mod_ahbot.conf
 test -f "$conf"
 grep -nE '^[[:space:]]*AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)[[:space:]]*=' "$conf"
-for key in AuctionHouseBot.GUIDs AuctionHouseBot.EnableSeller AuctionHouseBot.Buyer.Enabled; do
-    escaped=$(printf '%s' "$key" | sed 's/[.[\*^$()+?{}|]/\\&/g')
-    count=$(grep -Ec "^[[:space:]]*${escaped}[[:space:]]*=" "$conf" || true)
-    if [ "$count" != "1" ]; then
-        echo "ERROR: ${key} appears ${count} time(s) in ${conf}; expected exactly 1."
-        exit 1
-    fi
-done
+# Only AuctionHouseBot.GUIDs is .conf-managed; EnableSeller and Buyer.Enabled
+# are sourced from AC_* env vars in docker-compose.override.yml. Their presence
+# in mod_ahbot.conf is incidental and not asserted here.
+escaped=$(printf '%s' "AuctionHouseBot.GUIDs" | sed 's/[.[\*^$()+?{}|]/\\&/g')
+count=$(grep -Ec "^[[:space:]]*${escaped}[[:space:]]*=" "$conf" || true)
+if [ "$count" != "1" ]; then
+    echo "ERROR: AuctionHouseBot.GUIDs appears ${count} time(s) in ${conf}; expected exactly 1."
+    exit 1
+fi
 SH
     fi
 
@@ -3493,14 +3530,15 @@ set -e
 conf=/azerothcore/env/dist/etc/modules/mod_ahbot.conf
 test -f "$conf"
 grep -nE '^[[:space:]]*AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)[[:space:]]*=' "$conf"
-for key in AuctionHouseBot.GUIDs AuctionHouseBot.EnableSeller AuctionHouseBot.Buyer.Enabled; do
-    escaped=$(printf '%s' "$key" | sed 's/[.[\*^$()+?{}|]/\\&/g')
-    count=$(grep -Ec "^[[:space:]]*${escaped}[[:space:]]*=" "$conf" || true)
-    if [ "$count" != "1" ]; then
-        echo "ERROR: ${key} appears ${count} time(s) in ${conf}; expected exactly 1."
-        exit 1
-    fi
-done
+# Only AuctionHouseBot.GUIDs is .conf-managed; EnableSeller and Buyer.Enabled
+# are sourced from AC_* env vars in docker-compose.override.yml. Their presence
+# in mod_ahbot.conf is incidental and not asserted here.
+escaped=$(printf '%s' "AuctionHouseBot.GUIDs" | sed 's/[.[\*^$()+?{}|]/\\&/g')
+count=$(grep -Ec "^[[:space:]]*${escaped}[[:space:]]*=" "$conf" || true)
+if [ "$count" != "1" ]; then
+    echo "ERROR: AuctionHouseBot.GUIDs appears ${count} time(s) in ${conf}; expected exactly 1."
+    exit 1
+fi
 SH
 
     if docker logs --since "$RESTART_TS" ac-worldserver 2>&1 | grep -qE "Duplicate key name 'AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)'"; then
@@ -3742,12 +3780,12 @@ echo "Log:             ${LOG_FILE}"
 echo "State file:      ${STATE_FILE}"
 echo ""
 echo "Post-install tuning:"
-echo "  - AH bot:       edit ${STACK_DIR}/configs/modules/mod_ahbot.conf, then run"
-echo "                  '.ahbot reload' in the WoW client as your GM character"
-echo "                  to apply without restarting the worldserver."
-echo "  - Playerbots:   edit ${STACK_DIR}/configs/modules/playerbots.conf (or"
-echo "                  mod_playerbots.conf), then 'docker compose restart"
-echo "                  ac-worldserver'."
+echo "  - AC tuning:    edit ${STACK_DIR}/docker-compose.override.yml, then"
+echo "                  'docker compose restart ac-worldserver'."
+echo "  - AH bot GUIDs: stored in ${STACK_DIR}/configs/modules/mod_ahbot.conf."
+echo "                  Other non-env AH bot tweaks can use '.ahbot reload'."
+echo "  - Playerbots:   installer-managed tuning is in docker-compose.override.yml;"
+echo "                  only edit playerbots.conf for options not overridden by env."
 echo "  - MySQL tuning: edit ${STACK_DIR}/configs/mysql/custom.cnf, then"
 echo "                  'docker compose restart ac-database'."
 echo ""

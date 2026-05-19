@@ -145,99 +145,64 @@ Does **not** remove Docker, Tailscale, UFW, apt packages it installed, unrelated
 
 Every setting the installer writes is listed below. **Prompted** entries show the prompt default; the user can change them during an interactive install. **Fixed** entries are always written with the value shown. **Derived** means computed from a prompted value, not settable independently.
 
-Post-install changes: worldserver settings live in `docker-compose.override.yml`; module configs live in `configs/modules/`; MySQL tuning lives in `configs/mysql/custom.cnf`. See [Post-install tuning](#post-install-tuning) below.
+Post-install AC tuning lives in `docker-compose.override.yml` under `ac-worldserver.environment:`. MySQL tuning lives in `configs/mysql/custom.cnf`. See [Post-install tuning](#post-install-tuning) below.
 
-### Worldserver (`docker-compose.override.yml`)
+### AC env vars (`docker-compose.override.yml`)
 
-| `AC_*` variable | Value | Source |
-|---|---|---|
-| `AC_GAME_TYPE` | `1` (PvP) / `0` (PvE) | Prompted — default PvP |
-| `AC_AI_PLAYERBOT_ENABLED` | `1` | Fixed |
-| `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` | `1` | Fixed |
-| `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` | `1000` | Prompted |
-| `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | `1000` | Prompted |
-| `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES` | `1` | Fixed |
-| `AC_MAP_UPDATE_THREADS` | `4` | Prompted |
-| `AC_MAP_UPDATE_INTERVAL` | `10` | Fixed |
-| `AC_MIN_WORLD_UPDATE_TIME` | `1` | Fixed |
-| `AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS` | `0` | Fixed |
-| `AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS` | `0` | Fixed |
-| `AC_QUESTS_IGNORE_AUTO_ACCEPT` | `1` | Fixed |
-| `AC_PLAYER_LIMIT` | `0` (unlimited) | Fixed |
-| `AC_LEAVE_GROUP_ON_LOGOUT_ENABLED` | `1` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION` | `1` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_CHAT` | `1` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR` | `0` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL` | `0` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_GROUP` | `0` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_GUILD` | `0` | Fixed |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_ARENA` | `0` | Fixed |
-| `AC_MAIL_DELIVERY_DELAY` | `10` (seconds) | Fixed |
-| `AC_CHAR_DELETE_METHOD` | `1` (soft-delete) | Fixed |
-| `AC_RESPAWN_DYNAMIC_RATE_CREATURE` | `10` | Fixed |
-| `AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT` | `20` | Fixed |
-| `AC_UPDATES_ENABLE_DATABASES` | `7` | Fixed |
-| `AC_ENABLE_PLAYER_SETTINGS` | `1` | Fixed |
-| `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` | `true` | Fixed |
-| `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED` | `true` | Fixed |
+| `AC_*` env var | Value | Source | Notes |
+|---|---|---|---|
+| `AC_PLAYERBOTS_DATABASE_INFO` | `ac-database;3306;root;<password>;acore_playerbots` | Derived | Playerbots DB connection string; password comes from `.env` |
+| `AC_AI_PLAYERBOT_ENABLED` | `1` | Fixed | Enables mod-playerbots |
+| `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` | `1` | Fixed | Starts random bot login management |
+| `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES` | `1` | Fixed | Lets mod-playerbots initialize/update `acore_playerbots` |
+| `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` | `1000` | Prompted | Default bot count; installer writes the chosen value |
+| `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | `1000` | Prompted | Same chosen value as min |
+| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE` | `0` | Fixed | Turns off background AI when no real player is nearby |
+| `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER` | `1` | Fixed | Keeps the realm cheap when nobody is online |
+| `AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE` | `1` | Fixed | Rotates which bots are logged in |
+| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND` | `1` | Fixed | Activates a bot when a real player is on its friend list |
+| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD` | `0` | Fixed | Same-guild alone does not force activation |
+| `AC_PLAYERBOTS_DATABASE_SYNCH_THREADS` | `2` | Fixed | Conservative Playerbots DB synchronization |
+| `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` | `true` | Fixed | Enables AH bot auction population |
+| `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED` | `true` | Fixed | Enables AH bot buying from players |
+| `AC_MAP_UPDATE_THREADS` | `4` | Prompted | Default for 6 physical cores / 12 threads |
+| `AC_MAP_UPDATE_INTERVAL` | `10` | Fixed | Worldserver update pacing |
+| `AC_MIN_WORLD_UPDATE_TIME` | `1` | Fixed | Keeps update timing diagnostics active |
+| `AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS` | `0` | Fixed | Avoids preloading all world grids |
+| `AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS` | `0` | Fixed | Keeps default path caching behavior |
+| `AC_QUESTS_IGNORE_AUTO_ACCEPT` | `1` | Fixed | Avoids automatic quest acceptance |
+| `AC_PLAYER_LIMIT` | `0` | Fixed | Unlimited player limit |
+| `AC_LEAVE_GROUP_ON_LOGOUT_ENABLED` | `1` | Fixed | Cleans up groups on logout |
+| `AC_GAME_TYPE` | `1` (PvP) / `0` (PvE) | Prompted | Default PvP |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION` | `1` | Fixed | Shared auction behavior |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_CHAT` | `1` | Fixed | Cross-faction chat |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR` | `0` | Fixed | Faction-locked calendar invites |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL` | `0` | Fixed | Faction-locked custom channels |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_GROUP` | `0` | Fixed | Faction-locked groups |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_GUILD` | `0` | Fixed | Faction-locked guilds |
+| `AC_ALLOW_TWO_SIDE_INTERACTION_ARENA` | `0` | Fixed | Faction-locked arena teams |
+| `AC_UPDATES_ENABLE_DATABASES` | `7` | Fixed | Lets module DB updaters run |
+| `AC_ENABLE_PLAYER_SETTINGS` | `1` | Fixed | Required by mod-individual-progression |
+| `AC_MAIL_DELIVERY_DELAY` | `10` | Fixed | Mail arrives after 10 seconds instead of 1 hour |
+| `AC_CHAR_DELETE_METHOD` | `1` | Fixed | Soft-delete characters so GUID references remain restorable |
+| `AC_RESPAWN_DYNAMIC_RATE_CREATURE` | `10` | Fixed | Prevents near-zero creature respawns in bot-heavy zones |
+| `AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT` | `20` | Fixed | Prevents near-zero gathering node respawns |
+| `AC_RATE_XP_QUEST` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
+| `AC_RATE_XP_KILL` | `x3: 3`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
+| `AC_RATE_XP_EXPLORE` | `x3: 3`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
+| `AC_RATE_DROP_MONEY` | `x3: 2`, `x5: 3`, `x7: 3` | Prompted | Omitted for `x1` |
+| `AC_RATE_REPUTATION_GAIN` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
+| `AC_RATE_SKILL_DISCOVERY` | `x3: 2`, `x5: 3`, `x7: 3` | Prompted | Omitted for `x1` |
+| `AC_RATE_DROP_ITEM_NORMAL` | `x3: 1`, `x5: 1`, `x7: 1.5` | Prompted | Omitted for `x1` |
+| `AC_RATE_DROP_ITEM_UNCOMMON` | `x3: 1`, `x5: 1`, `x7: 1.5` | Prompted | Omitted for `x1` |
+| `AC_SKILLGAIN_CRAFTING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
+| `AC_SKILLGAIN_GATHERING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
+| `AC_SKILLGAIN_WEAPON` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
+| `AC_SKILLGAIN_DEFENSE` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
 
-XP/progression rate overrides are written by the rate prompt — see the table below.
+`AuctionHouseBot.GUIDs` is the only `.conf`-side value the installer writes: Phase 6.1.4 stores the runtime-discovered AH bot character GUIDs in `configs/modules/mod_ahbot.conf`.
 
-### XP rates
-
-Prompted during install (default: `x5`). Choosing `x1` writes no rate overrides; all others set the following keys in `docker-compose.override.yml`:
-
-| `AC_*` variable | x1 | x3 | x5 | x7 |
-|---|---|---|---|---|
-| `AC_RATE_XP_QUEST` | 1 | 3 | 5 | 7 |
-| `AC_RATE_XP_KILL` | 1 | 3 | 3 | 5 |
-| `AC_RATE_XP_EXPLORE` | 1 | 3 | 3 | 5 |
-| `AC_RATE_DROP_MONEY` | 1 | 2 | 3 | 3 |
-| `AC_RATE_REPUTATION_GAIN` | 1 | 3 | 5 | 7 |
-| `AC_RATE_SKILL_DISCOVERY` | 1 | 2 | 3 | 3 |
-| `AC_RATE_DROP_ITEM_NORMAL` | 1 | 1 | 1 | 1.5 |
-| `AC_RATE_DROP_ITEM_UNCOMMON` | 1 | 1 | 1 | 1.5 |
-| `AC_SKILLGAIN_CRAFTING` | 1 | 2 | 3 | 5 |
-| `AC_SKILLGAIN_GATHERING` | 1 | 2 | 3 | 5 |
-| `AC_SKILLGAIN_WEAPON` | 1 | 3 | 5 | 7 |
-| `AC_SKILLGAIN_DEFENSE` | 1 | 3 | 5 | 7 |
-
-### mod-playerbots (`configs/modules/playerbots.conf`)
-
-| Key | Value | Source |
-|---|---|---|
-| `AiPlayerbot.MinRandomBots` | `1000` | Prompted (mirrors worldserver) |
-| `AiPlayerbot.MaxRandomBots` | `1000` | Prompted (mirrors worldserver) |
-| `AiPlayerbot.BotActiveAlone` | `0` | Fixed |
-| `AiPlayerbot.botActiveAloneSmartScale` | `1` | Fixed |
-| `AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel` | `1` | Fixed |
-| `AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel` | `80` | Fixed |
-| `AiPlayerbot.DisabledWithoutRealPlayer` | `1` | Fixed |
-| `AiPlayerbot.EnablePeriodicOnlineOffline` | `1` | Fixed |
-| `AiPlayerbot.PeriodicOnlineOfflineRatio` | `2.0` | Fixed |
-| `AiPlayerbot.BotActiveAloneForceWhenInRadius` | `150` | Fixed |
-| `AiPlayerbot.BotActiveAloneForceWhenInZone` | `1` | Fixed |
-| `AiPlayerbot.BotActiveAloneForceWhenInMap` | `0` | Fixed |
-| `AiPlayerbot.BotActiveAloneForceWhenIsFriend` | `1` | Fixed |
-| `AiPlayerbot.BotActiveAloneForceWhenInGuild` | `0` | Fixed |
-| `PlayerbotsDatabase.WorkerThreads` | `1` | Fixed |
-| `PlayerbotsDatabase.SynchThreads` | `2` | Fixed |
-
-### mod-ah-bot-plus (`configs/modules/mod_ahbot.conf`)
-
-| Key | Value | Source |
-|---|---|---|
-| `AuctionHouseBot.GUIDs` | characters created at Pause 3 | Manual (in-game step) |
-| `AuctionHouseBot.EnableSeller` | `true` | Fixed |
-| `AuctionHouseBot.Buyer.Enabled` | `true` | Fixed |
-
-The installer prompts for how many AH bot characters to create (1 or 2, default 1); the actual GUID values come from the in-game character creation step at Pause 3.
-
-### mod-individual-progression (`configs/modules/individualProgression.conf`)
-
-The installer copies `individualProgression.conf.dist` to `individualProgression.conf` but writes no key overrides — all settings remain at upstream defaults. The module is activated by `AC_UPDATES_ENABLE_DATABASES = 7` and `AC_ENABLE_PLAYER_SETTINGS = 1` in `docker-compose.override.yml` (both fixed — see the Worldserver table above).
-
-See `docs/configs/individualProgression.conf.dist` and `docs/wikis/mod-individual-progression-wiki/` for available settings.
+To translate dotted config keys to env vars, prefix with `AC_`, replace periods with underscores, insert underscores at lowercase-to-uppercase boundaries, then uppercase the result. Examples: `AiPlayerbot.BotActiveAlone` -> `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE`; `AllowTwoSide.Interaction.Calendar` -> `AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR`. At runtime AzerothCore strips `AC_`, lowercases, removes non-alphanumerics, and matches against loaded `.conf` keys, so unknown or misspelled vars are silently ignored.
 
 ### MySQL (`configs/mysql/custom.cnf`)
 
@@ -269,9 +234,9 @@ docker compose restart ac-worldserver
 
 For ad-hoc in-game testing without a restart, log in as GM and run `.reload config`. Not all settings honor reload (some are read once at startup, some apply only to new objects/maps), and an `AC_*` override in compose will always win on next restart — use the override file for anything you want to keep.
 
-**AH bot** — edit `configs/modules/mod_ahbot.conf`, then in-game as GM: `.ahbot reload`. No worldserver restart needed for simple tweaks.
+**AH bot** — `AuctionHouseBot.GUIDs` lives in `configs/modules/mod_ahbot.conf`; simple non-env AH bot tweaks can also be edited there, then reloaded in-game as GM with `.ahbot reload`. Installer-managed seller/buyer switches live in `docker-compose.override.yml` as `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` and `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED`.
 
-**Playerbots** — edit `configs/modules/playerbots.conf`, then:
+**Playerbots** — installer-managed playerbot tuning lives in `docker-compose.override.yml` as `AC_*` env vars. For module options that are not overridden by env vars, edit `configs/modules/playerbots.conf`, then:
 
 ```bash
 cd /opt/stacks/azerothcore && docker compose restart ac-worldserver
