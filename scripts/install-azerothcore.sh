@@ -829,14 +829,58 @@ worldserver_has_playerbots_fatal_logs() {
     docker logs "${logs_args[@]}" ac-worldserver 2>&1 | grep -qiE "$(worldserver_playerbots_fatal_pattern)"
 }
 
-# Verify that every managed AC_* env var was successfully bound to a real
-# config key by the worldserver binary. The worldserver prints one
-#     > Config: Found config value 'X' from environment variable 'AC_X'
-# line per successful binding at startup. If a derived key doesn't match
-# any key in any loaded .conf (most likely cause: upstream renamed the key),
-# the env var is silently dropped. This check catches that.
-#
-# Reads Server.log inside the running ac-worldserver container.
+is_upper_char() {
+    [[ "$1" =~ ^[[:upper:]]$ ]]
+}
+
+is_digit_char() {
+    [[ "$1" =~ ^[[:digit:]]$ ]]
+}
+
+# Match AzerothCore's Config.cpp::IniKeyToEnvVarKey:
+# prefix AC_, convert dots/spaces/hyphens to underscores, split lowercase->uppercase
+# and letter<->digit boundaries, then uppercase.
+config_key_to_ac_env_var() {
+    local key="$1"
+    local result="AC_"
+    local i curr next
+
+    for ((i = 0; i < ${#key}; i++)); do
+        curr="${key:i:1}"
+        case "$curr" in
+            " "|.|-)
+                result+="_"
+                continue
+                ;;
+        esac
+
+        if [ "$i" -lt "$((${#key} - 1))" ]; then
+            next="${key:i+1:1}"
+            if ! is_upper_char "$curr" && is_upper_char "$next"; then
+                result+="${curr^^}_"
+                continue
+            fi
+            if ! is_digit_char "$curr" && is_digit_char "$next"; then
+                result+="${curr^^}_"
+                continue
+            fi
+            if is_digit_char "$curr" && ! is_digit_char "$next"; then
+                result+="${curr^^}_"
+                continue
+            fi
+        fi
+
+        result+="${curr^^}"
+    done
+
+    printf '%s\n' "$result"
+}
+
+# Verify every managed AC_* env var is present in the running container and maps
+# to a real key in the config files loaded by worldserver. Server.log is still
+# used as helpful evidence when it emits a binding line, but absence of that line
+# is not a failure: AzerothCore only logs env bindings when the env value differs
+# from the loaded .conf value.
 verify_managed_env_vars_bound_in_worldserver() {
     local log="/azerothcore/env/dist/logs/Server.log"
     local missing=0
@@ -875,7 +919,7 @@ verify_managed_env_vars_bound_in_worldserver() {
         AC_MAIL_DELIVERY_DELAY
         AC_CHAR_DELETE_METHOD
         AC_RESPAWN_DYNAMIC_RATE_CREATURE
-        AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT
+        AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT
     )
 
     # AC_PLAYERBOTS_DATABASE_INFO is excluded: it sets a connection-string
@@ -893,43 +937,93 @@ verify_managed_env_vars_bound_in_worldserver() {
             AC_RATE_SKILL_DISCOVERY
             AC_RATE_DROP_ITEM_NORMAL
             AC_RATE_DROP_ITEM_UNCOMMON
-            AC_SKILLGAIN_CRAFTING
-            AC_SKILLGAIN_GATHERING
-            AC_SKILLGAIN_WEAPON
-            AC_SKILLGAIN_DEFENSE
+            AC_SKILL_GAIN_CRAFTING
+            AC_SKILL_GAIN_GATHERING
+            AC_SKILL_GAIN_WEAPON
+            AC_SKILL_GAIN_DEFENSE
         )
     fi
 
-    echo "Verifying every managed AC_* env var bound to a real config key in worldserver..."
+    echo "Verifying every managed AC_* env var is present and maps to a loaded config key..."
 
-    local log_content
-    if ! log_content="$(docker exec -i ac-worldserver cat "$log" 2>/dev/null)"; then
-        echo "ERROR: Could not read $log inside ac-worldserver. Is the container running?"
+    local config_content
+    if ! config_content="$(docker exec -i ac-worldserver sh -c '
+        cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null
+        for f in /azerothcore/env/dist/etc/modules/*.conf; do
+            [ -f "$f" ] && cat "$f"
+        done
+    ' 2>/dev/null)"; then
+        echo "ERROR: Could not read loaded worldserver/module config files inside ac-worldserver."
         return 1
     fi
 
-    local var
+    local env_content
+    if ! env_content="$(docker exec -i ac-worldserver env 2>/dev/null)"; then
+        echo "ERROR: Could not read environment from ac-worldserver. Is the container running?"
+        return 1
+    fi
+
+    local log_content
+    if ! log_content="$(docker exec -i ac-worldserver cat "$log" 2>/dev/null)"; then
+        echo "WARNING: Could not read $log inside ac-worldserver; config-key mapping checks will still run."
+        log_content=""
+    fi
+
+    declare -A env_to_key=()
+    declare -A container_env=()
+
+    local line key env_key
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*([A-Za-z0-9_.-]+)[[:space:]]*= ]]; then
+            key="${BASH_REMATCH[1]}"
+            env_key="$(config_key_to_ac_env_var "$key")"
+            if [ -z "${env_to_key[$env_key]+x}" ]; then
+                env_to_key["$env_key"]="$key"
+            fi
+        fi
+    done <<< "$config_content"
+
+    local name value
+    while IFS='=' read -r name value; do
+        if [[ "$name" == AC_* ]]; then
+            container_env["$name"]="$value"
+        fi
+    done <<< "$env_content"
+
+    local var mapped_key
     for var in "${managed_vars[@]}"; do
-        # The worldserver log line format:
-        #     > Config: Found config value '<DottedKey>' from environment variable 'AC_<KEY>'
-        if ! printf '%s\n' "$log_content" | grep -qE "from environment variable '${var}'"; then
-            echo "FAIL: ${var} was set in docker-compose.override.yml but not bound by worldserver."
-            echo "      Likely cause: the derived dotted key no longer exists in any loaded .conf"
-            echo "      (upstream rename, typo in env-var name, or removed feature)."
-            echo "      Translation rule: strip AC_, lowercase, drop non-alphanumerics, then match"
-            echo "      against keys in worldserver.conf.dist / playerbots.conf.dist / mod_ahbot.conf.dist."
+        if [ -z "${container_env[$var]+x}" ]; then
+            echo "FAIL: ${var} is managed by docker-compose.override.yml but is missing from ac-worldserver's environment."
+            echo "      Likely cause: the override was not regenerated/applied, or docker compose is using stale service config."
             missing=$((missing + 1))
+            continue
+        fi
+
+        if [ -z "${env_to_key[$var]+x}" ]; then
+            echo "FAIL: ${var} is present in ac-worldserver but does not map to any loaded .conf key."
+            echo "      Likely cause: upstream config rename or an env-var spelling error."
+            echo "      Translation rule: prefix AC_, convert dots to underscores, split CamelCase"
+            echo "      boundaries with underscores, then uppercase the result."
+            missing=$((missing + 1))
+            continue
+        fi
+
+        mapped_key="${env_to_key[$var]}"
+        if printf '%s\n' "$log_content" | grep -qF "from environment variable '${var}'"; then
+            echo "  ✓ ${var} -> ${mapped_key} (startup binding log observed)"
+        else
+            echo "  ✓ ${var} -> ${mapped_key} (present; no startup binding log required)"
         fi
     done
 
     if [ "$missing" -ne 0 ]; then
-        echo "ERROR: $missing managed env var(s) did not bind to a real config key."
-        echo "Hint: inspect the most recent Server.log lines that start with '> Config:' inside"
-        echo "      ac-worldserver, and check the corresponding .conf.dist file for the expected key."
+        echo "ERROR: $missing managed env var(s) were missing from ac-worldserver or did not map to loaded config keys."
+        echo "Hint: compare docker-compose.override.yml against the corresponding .conf.dist key names"
+        echo "      using AzerothCore's documented AC_* conversion rule."
         return 1
     fi
 
-    echo "All managed AC_* env vars bound successfully."
+    echo "All managed AC_* env vars are present and map to loaded config keys."
     return 0
 }
 
@@ -1392,10 +1486,10 @@ EOF
       AC_RATE_SKILL_DISCOVERY: "${skill_discovery}"
       AC_RATE_DROP_ITEM_NORMAL: "${item_normal}"
       AC_RATE_DROP_ITEM_UNCOMMON: "${item_uncommon}"
-      AC_SKILLGAIN_CRAFTING: "${skill_crafting}"
-      AC_SKILLGAIN_GATHERING: "${skill_gathering}"
-      AC_SKILLGAIN_WEAPON: "${skill_weapon}"
-      AC_SKILLGAIN_DEFENSE: "${skill_defense}"
+      AC_SKILL_GAIN_CRAFTING: "${skill_crafting}"
+      AC_SKILL_GAIN_GATHERING: "${skill_gathering}"
+      AC_SKILL_GAIN_WEAPON: "${skill_weapon}"
+      AC_SKILL_GAIN_DEFENSE: "${skill_defense}"
 EOF
     fi
 
@@ -1429,10 +1523,10 @@ verify_xp_rate_overrides_in_compose() {
             AC_RATE_SKILL_DISCOVERY \
             AC_RATE_DROP_ITEM_NORMAL \
             AC_RATE_DROP_ITEM_UNCOMMON \
-            AC_SKILLGAIN_CRAFTING \
-            AC_SKILLGAIN_GATHERING \
-            AC_SKILLGAIN_WEAPON \
-            AC_SKILLGAIN_DEFENSE
+            AC_SKILL_GAIN_CRAFTING \
+            AC_SKILL_GAIN_GATHERING \
+            AC_SKILL_GAIN_WEAPON \
+            AC_SKILL_GAIN_DEFENSE
         do
             count="$(grep -Ec "^[[:space:]]*${key}[[:space:]]*:" "$file" || true)"
             if [ "$count" != "0" ]; then
@@ -1455,10 +1549,10 @@ verify_xp_rate_overrides_in_compose() {
         "      AC_RATE_SKILL_DISCOVERY: \"${skill_discovery}\"" \
         "      AC_RATE_DROP_ITEM_NORMAL: \"${item_normal}\"" \
         "      AC_RATE_DROP_ITEM_UNCOMMON: \"${item_uncommon}\"" \
-        "      AC_SKILLGAIN_CRAFTING: \"${skill_crafting}\"" \
-        "      AC_SKILLGAIN_GATHERING: \"${skill_gathering}\"" \
-        "      AC_SKILLGAIN_WEAPON: \"${skill_weapon}\"" \
-        "      AC_SKILLGAIN_DEFENSE: \"${skill_defense}\""
+        "      AC_SKILL_GAIN_CRAFTING: \"${skill_crafting}\"" \
+        "      AC_SKILL_GAIN_GATHERING: \"${skill_gathering}\"" \
+        "      AC_SKILL_GAIN_WEAPON: \"${skill_weapon}\"" \
+        "      AC_SKILL_GAIN_DEFENSE: \"${skill_defense}\""
     do
         key="${expected%%:*}"
         key="${key##* }"
@@ -1520,10 +1614,10 @@ AC_RATE_REPUTATION_GAIN|${reputation}
 AC_RATE_SKILL_DISCOVERY|${skill_discovery}
 AC_RATE_DROP_ITEM_NORMAL|${item_normal}
 AC_RATE_DROP_ITEM_UNCOMMON|${item_uncommon}
-AC_SKILLGAIN_CRAFTING|${skill_crafting}
-AC_SKILLGAIN_GATHERING|${skill_gathering}
-AC_SKILLGAIN_WEAPON|${skill_weapon}
-AC_SKILLGAIN_DEFENSE|${skill_defense}
+AC_SKILL_GAIN_CRAFTING|${skill_crafting}
+AC_SKILL_GAIN_GATHERING|${skill_gathering}
+AC_SKILL_GAIN_WEAPON|${skill_weapon}
+AC_SKILL_GAIN_DEFENSE|${skill_defense}
 EOF
 
     return "$fail"
@@ -2622,7 +2716,7 @@ services:
       # Creatures kick in at 10+ players, gameobjects (gathering nodes) at
       # 20+ so gathering doesn't trivialize before combat does.
       AC_RESPAWN_DYNAMIC_RATE_CREATURE: "10"
-      AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT: "20"
+      AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT: "20"
 
       # ----- progression rate overrides -----
 
@@ -2696,7 +2790,7 @@ EOF
         '      AC_MAIL_DELIVERY_DELAY: "10"' \
         '      AC_CHAR_DELETE_METHOD: "1"' \
         '      AC_RESPAWN_DYNAMIC_RATE_CREATURE: "10"' \
-        '      AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT: "20"'
+        '      AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT: "20"'
     do
         if ! grep -qFx "$expected" docker-compose.override.yml; then
             echo "ERROR: Missing expected worldserver performance override: $expected"
@@ -2808,7 +2902,11 @@ if should_run_phase "2.6"; then
         AC_PLAYER_LIMIT \
         AC_LEAVE_GROUP_ON_LOGOUT_ENABLED \
         AC_UPDATES_ENABLE_DATABASES \
-        AC_ENABLE_PLAYER_SETTINGS
+        AC_ENABLE_PLAYER_SETTINGS \
+        AC_MAIL_DELIVERY_DELAY \
+        AC_CHAR_DELETE_METHOD \
+        AC_RESPAWN_DYNAMIC_RATE_CREATURE \
+        AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT
     do
         if ! grep -qF "${var}" "$COMPOSE_EFFECTIVE"; then
             echo "MISSING env var: ${var}"
@@ -3685,7 +3783,7 @@ SCRIPT
     echo "Installed AzerothCore backup cron entry:"
     crontab -l | grep -F "/opt/stacks/azerothcore/backup.sh"
 
-    # Run a test backup so verify-azerothcore.sh check #12 has something to find
+    # Run a test backup so verify-azerothcore.sh can confirm backup freshness.
     echo ""
     echo "Running initial backup as a smoke test..."
     /opt/stacks/azerothcore/backup.sh

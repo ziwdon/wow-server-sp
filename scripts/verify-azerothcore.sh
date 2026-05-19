@@ -132,6 +132,50 @@ conf_escape_key() {
     printf '%s' "$1" | sed 's/[.[\*^$()+?{}|]/\\&/g'
 }
 
+is_upper_char() {
+    [[ "$1" =~ ^[[:upper:]]$ ]]
+}
+
+is_digit_char() {
+    [[ "$1" =~ ^[[:digit:]]$ ]]
+}
+
+config_key_to_ac_env_var() {
+    local key="$1"
+    local result="AC_"
+    local i curr next
+
+    for ((i = 0; i < ${#key}; i++)); do
+        curr="${key:i:1}"
+        case "$curr" in
+            " "|.|-)
+                result+="_"
+                continue
+                ;;
+        esac
+
+        if [ "$i" -lt "$((${#key} - 1))" ]; then
+            next="${key:i+1:1}"
+            if ! is_upper_char "$curr" && is_upper_char "$next"; then
+                result+="${curr^^}_"
+                continue
+            fi
+            if ! is_digit_char "$curr" && is_digit_char "$next"; then
+                result+="${curr^^}_"
+                continue
+            fi
+            if is_digit_char "$curr" && ! is_digit_char "$next"; then
+                result+="${curr^^}_"
+                continue
+            fi
+        fi
+
+        result+="${curr^^}"
+    done
+
+    printf '%s\n' "$result"
+}
+
 # ============================================================================
 # Check 1 — long-running containers are running
 # ============================================================================
@@ -346,7 +390,7 @@ else
         '      AC_MAIL_DELIVERY_DELAY: "10"'
         '      AC_CHAR_DELETE_METHOD: "1"'
         '      AC_RESPAWN_DYNAMIC_RATE_CREATURE: "10"'
-        '      AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT: "20"'
+        '      AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT: "20"'
     )
     missing_override=0
     for expected in "${OVERRIDE_EXPECTED[@]}"; do
@@ -423,10 +467,10 @@ if [ -f "$OVERRIDE" ]; then
         AC_RATE_SKILL_DISCOVERY
         AC_RATE_DROP_ITEM_NORMAL
         AC_RATE_DROP_ITEM_UNCOMMON
-        AC_SKILLGAIN_CRAFTING
-        AC_SKILLGAIN_GATHERING
-        AC_SKILLGAIN_WEAPON
-        AC_SKILLGAIN_DEFENSE
+        AC_SKILL_GAIN_CRAFTING
+        AC_SKILL_GAIN_GATHERING
+        AC_SKILL_GAIN_WEAPON
+        AC_SKILL_GAIN_DEFENSE
     )
     xp_present=0
     xp_absent=0
@@ -512,7 +556,7 @@ else
 fi
 
 # ============================================================================
-# Check 12 — managed AC_* env vars bound by worldserver
+# Check 12 — managed AC_* env vars map to loaded worldserver config keys
 # ============================================================================
 managed_vars=(
     AC_AI_PLAYERBOT_ENABLED
@@ -549,7 +593,7 @@ managed_vars=(
     AC_MAIL_DELIVERY_DELAY
     AC_CHAR_DELETE_METHOD
     AC_RESPAWN_DYNAMIC_RATE_CREATURE
-    AC_RESPAWN_DYNAMIC_RATE_GAMEOBJECT
+    AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT
 )
 
 # AC_PLAYERBOTS_DATABASE_INFO is intentionally excluded: on some builds it is
@@ -565,21 +609,63 @@ if [ "${xp_present:-0}" -eq 12 ]; then
         AC_RATE_SKILL_DISCOVERY
         AC_RATE_DROP_ITEM_NORMAL
         AC_RATE_DROP_ITEM_UNCOMMON
-        AC_SKILLGAIN_CRAFTING
-        AC_SKILLGAIN_GATHERING
-        AC_SKILLGAIN_WEAPON
-        AC_SKILLGAIN_DEFENSE
+        AC_SKILL_GAIN_CRAFTING
+        AC_SKILL_GAIN_GATHERING
+        AC_SKILL_GAIN_WEAPON
+        AC_SKILL_GAIN_DEFENSE
     )
 fi
 
-if ! log_content="$(docker exec -i ac-worldserver cat /azerothcore/env/dist/logs/Server.log 2>/dev/null)"; then
-    fail "Could not read Server.log inside ac-worldserver"
+if ! config_content="$(docker exec -i ac-worldserver sh -c '
+    cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null
+    for f in /azerothcore/env/dist/etc/modules/*.conf; do
+        [ -f "$f" ] && cat "$f"
+    done
+' 2>/dev/null)"; then
+    fail "Could not read loaded worldserver/module config files inside ac-worldserver"
+elif ! env_content="$(docker exec -i ac-worldserver env 2>/dev/null)"; then
+    fail "Could not read environment from ac-worldserver"
 else
+    if ! log_content="$(docker exec -i ac-worldserver cat /azerothcore/env/dist/logs/Server.log 2>/dev/null)"; then
+        info "Could not read Server.log inside ac-worldserver; config-key mapping checks still run"
+        log_content=""
+    fi
+
+    declare -A env_to_key=()
+    declare -A container_env=()
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*([A-Za-z0-9_.-]+)[[:space:]]*= ]]; then
+            key="${BASH_REMATCH[1]}"
+            env_key="$(config_key_to_ac_env_var "$key")"
+            if [ -z "${env_to_key[$env_key]+x}" ]; then
+                env_to_key["$env_key"]="$key"
+            fi
+        fi
+    done <<< "$config_content"
+
+    while IFS='=' read -r name value; do
+        if [[ "$name" == AC_* ]]; then
+            container_env["$name"]="$value"
+        fi
+    done <<< "$env_content"
+
     for var in "${managed_vars[@]}"; do
-        if printf '%s\n' "$log_content" | grep -qE "from environment variable '${var}'"; then
-            ok "AC env var bound: ${var}"
+        if [ -z "${container_env[$var]+x}" ]; then
+            fail "AC env var missing from ac-worldserver environment: ${var}"
+            continue
+        fi
+
+        if [ -z "${env_to_key[$var]+x}" ]; then
+            fail "AC env var does not map to a loaded config key: ${var}"
+            continue
+        fi
+
+        mapped_key="${env_to_key[$var]}"
+        if printf '%s\n' "$log_content" | grep -qF "from environment variable '${var}'"; then
+            ok "AC env var maps to ${mapped_key}: ${var} (startup binding log observed)"
         else
-            fail "AC env var NOT bound by worldserver: ${var} (likely cause: upstream key rename)"
+            ok "AC env var maps to ${mapped_key}: ${var} (no startup binding log required)"
         fi
     done
 fi
