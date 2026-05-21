@@ -164,3 +164,109 @@ async def api_backups(request: Request) -> HTMLResponse:
             "last_error": s.last_error,
         },
     )
+
+
+from sse_starlette.sse import EventSourceResponse
+
+from app.services.actions import run_force_stop, run_restart, run_start, run_stop
+from app.services.runner import ActionRecord, runner
+
+
+def _render_progress(step: str, msg: str) -> str:
+    safe_step = (step or "").replace("<", "&lt;").replace(">", "&gt;")
+    safe_msg = (msg or "").replace("<", "&lt;").replace(">", "&gt;")
+    return f'<li class="step step-{safe_step}"><b>{safe_step}</b>: {safe_msg}</li>'
+
+
+def _esc(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _render_done(record: ActionRecord) -> str:
+    css = "ok" if record.status == "ok" else "error"
+    verify_html = ""
+    if record.verify_failed:
+        items = []
+        for vf in record.verify_failed:
+            key_html = (
+                f' <span class="vf-key">({_esc(vf.config_key)})</span>'
+                if vf.config_key else ""
+            )
+            items.append(
+                f'<li data-key="{_esc(vf.config_key or "")}">'
+                f'<code>{_esc(vf.env_var)}</code>{key_html}'
+                f' — {_esc(vf.reason)}</li>'
+            )
+        verify_html = f'<ul class="verify-failed">{"".join(items)}</ul>'
+    return (
+        f'<div class="action-done action-{css}">'
+        f"action <b>{_esc(record.name)}</b> finished: <b>{_esc(record.status)}</b>"
+        f"{verify_html}"
+        f"</div>"
+    )
+
+
+async def _sse_stream(record: ActionRecord):
+    q = record.subscribe()
+    try:
+        while True:
+            kind, a, b = await q.get()
+            if kind == "progress":
+                yield {"event": "progress", "data": _render_progress(a, b)}
+            elif kind == "done":
+                yield {"event": "done", "data": _render_done(record)}
+                return
+    finally:
+        record.unsubscribe(q)
+
+
+def _kick(name: str, fn) -> ActionRecord:
+    try:
+        return runner.start(name, fn)
+    except RuntimeError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/action/stop")
+async def post_stop():
+    record = _kick("stop", lambda cb: run_stop(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.post("/api/action/start")
+async def post_start():
+    record = _kick("start", lambda cb: run_start(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.post("/api/action/restart")
+async def post_restart():
+    record = _kick("restart", lambda cb: run_restart(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.post("/api/action/force-stop")
+async def post_force_stop():
+    record = _kick("force_stop", lambda cb: run_force_stop(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.get("/api/action/stream")
+async def stream_action(id: str | None = None):
+    """Subscribe to progress for an action.
+
+    With no `id`, streams the currently-running or most-recently-finished
+    action. With an `id`, returns the matching record (or idle if unknown).
+    """
+    record: ActionRecord | None
+    if id is not None:
+        record = runner.get(id)
+    else:
+        record = runner.current() or runner.last()
+
+    if record is None:
+        async def _empty():
+            yield {"event": "idle", "data": '<p class="idle">No action in progress.</p>'}
+        return EventSourceResponse(_empty())
+    return EventSourceResponse(_sse_stream(record))
