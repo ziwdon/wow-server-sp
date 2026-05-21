@@ -195,3 +195,35 @@ def run_start(*, on_progress: ProgressCb) -> ActionResult:
 
     on_progress("done", "running")
     return ActionResult.OK
+
+
+def run_restart(
+    *,
+    on_progress: ProgressCb,
+    grace_seconds: int = 30,
+) -> ActionResult:
+    stop_result = run_stop(
+        on_progress=on_progress,
+        grace_seconds=grace_seconds,
+        run_backup=True,
+    )
+    if stop_result not in (ActionResult.OK, ActionResult.ALREADY):
+        return stop_result
+    return run_start(on_progress=on_progress)
+
+
+def run_force_stop(*, on_progress: ProgressCb) -> ActionResult:
+    on_progress("force_stop", "docker stop --time 60 ac-worldserver")
+    result = subprocess.run(
+        ["docker", "stop", "--time", "60", WORLDSERVER],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        on_progress("force_stop", f"docker stop failed: {result.stderr}; escalating to kill")
+        subprocess.run(["docker", "kill", WORLDSERVER], check=False)
+
+    if not _wait_for_status("exited", timeout=120, on_progress=on_progress):
+        return ActionResult.TIMEOUT
+
+    on_progress("done", "force-stopped (no backup taken)")
+    return ActionResult.OK
