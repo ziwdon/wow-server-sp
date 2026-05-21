@@ -13,10 +13,12 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.services.console import WorldserverConsole
 from app.services.docker_client import WORLDSERVER, inspect_worldserver
+from app.services.env_var import config_key_to_ac_env_var
 
 ProgressCb = Callable[[str, str], None]
 log = logging.getLogger(__name__)
@@ -227,3 +229,122 @@ def run_force_stop(*, on_progress: ProgressCb) -> ActionResult:
 
     on_progress("done", "force-stopped (no backup taken)")
     return ActionResult.OK
+
+
+# Matches a `Key = Value` line in a loaded .conf file. Same shape as
+# the parser in services/config_index.py — both must agree on what
+# counts as a key, otherwise the verifier reports false negatives for
+# legitimately-loaded keys.
+_CONF_KV_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_.]*)\s*=")
+
+
+@dataclass(frozen=True)
+class VerifyFailure:
+    env_var: str
+    config_key: str | None  # None when the failure is "not present in env"
+    reason: str  # short human-readable cause
+
+
+def _read_loaded_config(on_progress: ProgressCb) -> set[str] | None:
+    """Read every .conf actually loaded by the running worldserver and
+    return the set of derived AC_* env-var names. Returns None on read
+    error so callers can fail loudly."""
+    result = subprocess.run(
+        [
+            "docker", "exec", WORLDSERVER, "sh", "-c",
+            'cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null; '
+            'for f in /azerothcore/env/dist/etc/modules/*.conf; do '
+            '[ -f "$f" ] && cat "$f"; '
+            'done',
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        on_progress("verify", f"could not read loaded configs: {result.stderr.strip()}")
+        return None
+    derived: set[str] = set()
+    for line in result.stdout.splitlines():
+        m = _CONF_KV_RE.match(line)
+        if m:
+            derived.add(config_key_to_ac_env_var(m.group(1)))
+    return derived
+
+
+def _read_live_env(on_progress: ProgressCb) -> dict[str, str] | None:
+    result = subprocess.run(
+        ["docker", "exec", WORLDSERVER, "env"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        on_progress("verify", f"docker exec env failed: {result.stderr.strip()}")
+        return None
+    out: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            out[k] = v
+    return out
+
+
+def verify_env_vars_bound(
+    expected: dict[str, str],
+    *,
+    env_var_to_key: dict[str, str],
+    on_progress: ProgressCb,
+) -> list[VerifyFailure]:
+    """Two-part check (mirrors the install script):
+
+    (a) Presence — every expected env var is in the container's
+        environment with the expected value.
+    (b) Reverse-mapping — the env var name resolves back to a key in
+        the .conf files actually loaded by worldserver. This is the
+        only way to catch AC's silent-drop trap (env vars whose names
+        don't match any loaded key are silently ignored).
+
+    `env_var_to_key` is `{AC_FOO_BAR: "Foo.Bar"}` for every admin-set
+    env var, supplied by the caller so the failure list can name the
+    user-facing key alongside the env var.
+    """
+    on_progress("verify", f"checking {len(expected)} env vars in ac-worldserver")
+
+    live = _read_live_env(on_progress)
+    if live is None:
+        return [
+            VerifyFailure(v, env_var_to_key.get(v), "could not read container env")
+            for v in expected
+        ]
+
+    loaded_envs = _read_loaded_config(on_progress)
+    if loaded_envs is None:
+        return [
+            VerifyFailure(
+                v, env_var_to_key.get(v),
+                "could not read loaded .conf files (silent-drop check skipped)",
+            )
+            for v in expected
+        ]
+
+    failures: list[VerifyFailure] = []
+    for var, want in expected.items():
+        key = env_var_to_key.get(var)
+        # (a) Presence.
+        got = live.get(var)
+        if got != str(want):
+            on_progress("verify", f"{var}: expected {want!r}, got {got!r}")
+            failures.append(VerifyFailure(var, key, f"value mismatch: got {got!r}"))
+            continue
+        # (b) Reverse-mapping — silent-drop trap.
+        if var not in loaded_envs:
+            on_progress(
+                "verify",
+                f"{var}: present in env but no loaded .conf key derives this "
+                f"name — AzerothCore is silently dropping it",
+            )
+            failures.append(VerifyFailure(
+                var, key,
+                "silently dropped by AC (no loaded .conf key maps to this env var)",
+            ))
+
+    if not failures:
+        on_progress("verify", "all env vars bound correctly")
+    return failures
