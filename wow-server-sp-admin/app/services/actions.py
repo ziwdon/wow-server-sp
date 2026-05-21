@@ -9,6 +9,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -141,4 +142,56 @@ def run_stop(
         return ActionResult.ERROR
 
     on_progress("done", "stopped + backup OK")
+    return ActionResult.OK
+
+
+WORLD_INIT_RE = re.compile(r"World\s+Initialized\s+In", re.IGNORECASE)
+
+
+def _wait_for_world_init(timeout: int, on_progress: ProgressCb) -> bool:
+    """Tail /ac/logs/Server.log for the world-init line. Emitted exactly
+    once at end of boot, then Server.log goes quiet (per CLAUDE.md)."""
+    log_path = Path(os.environ.get("AC_STACK_DIR", "/ac")) / "logs" / "Server.log"
+    deadline = time.monotonic() + timeout
+    last_size = 0
+    while time.monotonic() < deadline:
+        if log_path.exists():
+            size = log_path.stat().st_size
+            if size > last_size:
+                with log_path.open("r", errors="replace") as f:
+                    f.seek(last_size)
+                    chunk = f.read()
+                last_size = size
+                if WORLD_INIT_RE.search(chunk):
+                    return True
+        time.sleep(2)
+    on_progress("wait_init", "timeout waiting for World Initialized")
+    return False
+
+
+def run_start(*, on_progress: ProgressCb) -> ActionResult:
+    info = inspect_worldserver()
+    if info.status == "running":
+        on_progress("inspect", "already running")
+        return ActionResult.ALREADY
+
+    on_progress("compose_up", "docker compose up -d ac-worldserver ac-database")
+    result = subprocess.run(
+        [
+            "docker", "compose",
+            "--project-directory", "/ac",
+            "--env-file", "/ac/.env",
+            "up", "-d", "ac-worldserver", "ac-database",
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        on_progress("compose_up", f"compose up FAILED: {result.stderr}")
+        return ActionResult.ERROR
+
+    on_progress("wait_init", "waiting for World initialized line")
+    if not _wait_for_world_init(timeout=300, on_progress=on_progress):
+        return ActionResult.TIMEOUT
+
+    on_progress("done", "running")
     return ActionResult.OK
