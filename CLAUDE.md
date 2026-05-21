@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A single-file bash installer for AzerothCore (WoW 3.3.5a private server) + mod-playerbots + mod-ah-bot-plus + mod-individual-progression, running on Docker. The stack installs under `/opt/stacks/azerothcore/`.
+Two sibling sub-projects:
+
+- **`scripts/`** — a single-file bash installer for AzerothCore (WoW 3.3.5a private server) + mod-playerbots + mod-ah-bot-plus + mod-individual-progression, running on Docker. The AC stack installs under `/opt/stacks/azerothcore/`.
+- **`wow-server-sp-admin/`** — a FastAPI + HTMX web admin for monitoring and editing the running AC server. Installs to `/opt/stacks/azerothcore-admin/` (separate stack dir so its lifecycle never disturbs AC's). Every config edit becomes an `AC_*` env var in `docker-compose.admin.yml`, the LAST-precedence Compose layer. Design spec: `docs/superpowers/specs/2026-05-20-wow-server-sp-admin-design.md` (authoritative — read it before touching admin code).
 
 **Target environment:**
 - Ubuntu 22.04 LTS (CLI) is the recommended target. Ubuntu 24.04 is detected and allowed only after explicit user confirmation — treat it as "possible, maybe" rather than supported. Hardware target: Ryzen 5 7430U, 16 GB RAM, 512 GB SSD
@@ -14,7 +17,14 @@ A single-file bash installer for AzerothCore (WoW 3.3.5a private server) + mod-p
 ## Linting
 
 ```bash
-shellcheck scripts/*.sh
+shellcheck scripts/*.sh wow-server-sp-admin/scripts/*.sh
+```
+
+The admin app's Python tests run under Docker (no local venv needed):
+
+```bash
+docker run --rm -v "$(pwd)/wow-server-sp-admin:/src" -w /src python:3.12-slim \
+    bash -c "pip install -r requirements-dev.txt -q && python -m pytest -q"
 ```
 
 Suppress directives (`# shellcheck disable=SC1091`) are used only for dynamic `source` calls where the sourced file is not statically discoverable.
@@ -42,6 +52,12 @@ chmod +x scripts/*.sh
 ./scripts/uninstall-azerothcore.sh --dry-run         # preview cleanup
 ./scripts/uninstall-azerothcore.sh                   # full teardown
 ./scripts/uninstall-azerothcore.sh --yes             # skip confirmation
+
+./wow-server-sp-admin/scripts/install-azerothcore-admin.sh         # install/upgrade the admin stack
+./wow-server-sp-admin/scripts/verify-azerothcore-admin.sh          # post-install admin verification
+./wow-server-sp-admin/scripts/uninstall-azerothcore-admin.sh       # remove admin stack only (not AC)
+./wow-server-sp-admin/scripts/uninstall-azerothcore-admin.sh --dry-run
+./wow-server-sp-admin/scripts/uninstall-azerothcore-admin.sh --yes
 ```
 
 ## Architecture
@@ -84,6 +100,11 @@ Note: there is no `pause-1` phase. The first manual pause (Tailscale auth) runs 
 | `/opt/stacks/azerothcore/backups/` | Nightly `mysqldump`s + config tarball + git-revisions snapshot |
 | `~/.azerothcore-install-state` | Phase checkpoint file |
 | `~/.azerothcore-install-config` | Persisted prompt answers (shredded on success) |
+| `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-authored Compose overlay (LAST precedence, after `docker-compose.override.yml`). Created empty by the admin installer; populated only via the admin UI's Apply flow. The AC installer never reads or writes it. |
+| `/opt/stacks/azerothcore-admin/` | Admin stack root (separate from AC's so admin can manage AC without being affected by AC restarts) |
+| `/opt/stacks/azerothcore-admin/.env` | Admin runtime: `TAILSCALE_IP`, `ADMIN_PORT`, `HOST_UID`, `HOST_GID`, `DOCKER_GID` (mode 600) |
+| `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<unix-ts>` snapshots written before every Apply/Rollback (mounted into the admin container as `/admin-snapshots/`). Lives here, NOT next to `admin.yml`, because `/ac/`'s parent is ro inside the admin container — a sibling-file snapshot would hit EROFS. GC'd to 7-day retention on admin app boot. |
+| `docker logs azerothcore-admin` | Admin app's JSON-formatted stdout |
 
 ## Non-obvious internal conventions
 
@@ -134,6 +155,30 @@ These patterns appear in a healthy install and should not be chased as bugs. Whe
 - `Random teleporting bot <Name> (level N) to Map: … (i/k locations)` — normal `RandomBot` relocation driven by mod-playerbots' periodic re-distribution, not an error despite the verbose tone.
 - `Random Bots Stats: 0 online` with all of `Active/Moving/In flight/In combat/...: 0` is the **expected steady state when no real player is logged in.** `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1` (set in `docker-compose.override.yml`) gates the random-bot login engine on real-player presence — characters are not deleted, just kept `online=0` in `acore_characters.characters`. The pool (250 `RNDBOT*` accounts × 10 chars = ~2500 characters, split 200 RNDbot / 50 AddClass per `acore_playerbots.playerbots_account_type`) persists across restarts; graceful worldserver shutdown sets every character `online=0`. As soon as a real player connects, the engine ramps the active bot count toward `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS`. To confirm pool integrity from the host: `docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e "SELECT COUNT(*) FROM acore_characters.characters c JOIN acore_auth.account a ON a.id=c.account WHERE a.username LIKE 'RNDBOT%'"` should return ~2500.
 
+## Non-obvious admin app conventions
+
+These are the cross-cutting invariants of `wow-server-sp-admin/` you need to know before touching admin code OR before changing anything in `scripts/install-azerothcore.sh` that the admin reads (env-var derivation, mount layout, config paths). Internal-only details (snapshot semantics, runner internals, SSE plumbing) live in the admin's design spec.
+
+**Admin's only writes inside `/opt/stacks/azerothcore/` are `docker-compose.admin.yml` and `backups/`.** The whole `/ac/` mount is ro except those two rw sub-mounts. The admin **never** edits `docker-compose.override.yml`, AC's `.env` (at runtime — the *installer* does once), any `.conf` file, MySQL `custom.cnf`, or anything under `data/`. The single source of truth for installer-shipped defaults remains the AC installer's Phase 2.5 heredoc.
+
+**One installer-time touch outside the admin stack dir:** `wow-server-sp-admin/scripts/install-azerothcore-admin.sh` appends `docker-compose.admin.yml` to AC's `.env` `COMPOSE_FILE=` line (idempotent, preserves existing entries). If you ever regenerate AC's `.env` from scratch via the AC installer, that entry is lost — re-run the admin installer to put it back.
+
+**`docker-compose.admin.yml` is the LAST-precedence Compose layer.** Compose merges in `COMPOSE_FILE` order; an `AC_*` in admin.yml overrides the same key in override.yml. The same silent-drop trap CLAUDE.md documents above applies: an `AC_*` whose name doesn't reverse-map to a loaded config key is ignored without warning. The admin's Apply flow runs the same two-part check `install-azerothcore.sh:verify_managed_env_vars_bound_in_worldserver` does (presence in `docker exec ac-worldserver env` + reverse-map to a key in the loaded `.conf` files). The Python port of `config_key_to_ac_env_var` in `wow-server-sp-admin/app/services/env_var.py` is golden-file-tested against the bash helper over all ~1874 keys in the four `.conf.dist` files; both must agree exactly or the silent-drop check produces false negatives.
+
+**`AuctionHouseBot.GUIDs` is in admin's `BLOCKED_KEYS`.** Same reason CLAUDE.md notes it's the only key the AC installer still writes to a `.conf` file: it's installer-managed and runtime-discovered after Pause 3. The admin refuses to write it server-side regardless of what the client sends. Don't add it as an admin-editable key.
+
+**Admin container needs `group_add: ["${DOCKER_GID}"]`.** It runs as a non-root user (`HOST_UID:HOST_GID`) so writes to `docker-compose.admin.yml` have the installer user's ownership. But that user has no access to `/var/run/docker.sock` by default — every Docker SDK call dies with `PermissionError(13)`. The admin installer resolves the host's docker-group GID via `getent group docker` and writes `DOCKER_GID` to the admin's `.env`; `docker-compose.yml` mounts it via `group_add`. Do not remove this — the container is broken without it.
+
+**`admin.yml` writes are in place (open+truncate+write), NOT tmp+rename.** The file is a bind-mount source inode; `rename(2)` over it fails with EBUSY. Crash safety is via the snapshot-before-write invariant (snapshots in `/admin-snapshots/`, GC'd at 7-day retention on app boot). Both the snapshot and the write are covered by the action runner's single-flight lock via the `pre` hook so no concurrent apply can interleave a half-written file and no orphaned write can occur without a paired restart.
+
+**`Server.log` wait is truncate-aware.** AC's `Appender.Server=…,Server.log,w` (mode `w`) opens the log fresh at each boot, so the new worldserver truncates the file. The admin's `_wait_for_world_init` baselines `last_size` to the file's current size at function entry and resets to `0` on a detected size drop — otherwise a stale prior-boot "World Initialized" line trips a false positive on Restart before the new worldserver has even opened the log. If you ever change the Server.log appender mode in the worldserver config, revisit this routine.
+
+**Admin's Stop does NOT use `server shutdown N`.** AC's SIGTERM handler is `World::StopNow`, which immediately collapses any in-progress `server shutdown N` countdown — and `docker stop` sends SIGTERM as its first action. The admin holds the grace window itself with `time.sleep`, sends `announce`/`notify`/`saveall` over `docker attach` stdin (detach bytes `\x10\x11` = Ctrl-P, Ctrl-Q), then issues `docker stop --time 60 ac-worldserver` (the 60 s is not arbitrary — AC's clean-shutdown saveall can stretch to 30-45 s under bot-heavy load, and 60 s avoids a Docker-initiated SIGKILL mid-save). The admin then polls for `Status=exited` with its own 120 s budget separate from Docker's `--time`.
+
+**Admin's in-process backup mirrors `backup.sh` but does NOT invoke it.** `backup.sh` hardcodes `STACK_DIR=/opt/stacks/azerothcore` and writes via the host filesystem — neither works from inside the admin container's mount layout. `wow-server-sp-admin/app/services/backup_runner.py` re-implements the four `docker exec ac-database mysqldump` calls + the `tar -czf` of `.env`/`docker-compose.override.yml`/`configs/` + `git-revisions-<date>.txt` in Python. Filenames match `backup.sh`'s on-disk format exactly (`<db>-<date>.sql`, `azerothcore-config-<date>.tar.gz`, `git-revisions-<date>.txt`) so the host's nightly cron rotation (`find … -mtime +7 -delete`) handles admin-emitted backups identically.
+
+**Both uninstallers must NOT use `--remove-orphans`.** Same rule as the AC uninstaller — `--remove-orphans` would remove unrelated containers sharing the Compose project name. The admin's `docker rm -f azerothcore-admin` already covers the one service.
+
 ## Reference docs
 
 The `docs/` directory contains offline reference material. Consult it whenever you need to understand configuration options, verify a setting, or figure out how to do something with any of the modules.
@@ -149,6 +194,7 @@ The `docs/` directory contains offline reference material. Consult it whenever y
 | `docs/wikis/mod-individual-progression-wiki/` | mod-individual-progression wiki: installation, progression tiers, list of changes, useful extras |
 | `docs/superpowers/plans/` | Implementation plans for in-progress work in this repo |
 | `docs/superpowers/specs/` | Design specs for in-progress work in this repo |
+| `docs/superpowers/specs/2026-05-20-wow-server-sp-admin-design.md` | Authoritative design spec for `wow-server-sp-admin/` — read this before touching admin code, especially before changing the action runner, the apply/rollback flow, the post-apply verification, the snapshot/write semantics, or the mount layout |
 
 When making changes to config keys, reviewing module behaviour, or writing install logic, read the relevant wiki pages and the `.conf.dist` file rather than guessing defaults.
 
@@ -156,7 +202,8 @@ Check `docs/superpowers/plans/` and `docs/superpowers/specs/` before starting no
 
 ## Constraints to preserve
 
-- Scripts must **not** be run as root. The root guard (`EUID -eq 0`) at the top of `install-azerothcore.sh` is intentional.
+- Scripts must **not** be run as root. The root guard (`EUID -eq 0`) at the top of `install-azerothcore.sh` is intentional. Same rule applies to `install-azerothcore-admin.sh`.
 - Password inputs are restricted to shell-safe characters (`letters, numbers, . _ @ % + = , : -`) so the config file can be safely sourced on resume.
-- The uninstall script must **not** use `--remove-orphans` — it would risk removing unrelated containers sharing the Compose project name.
-- `verify-azerothcore.sh` must stay on `set -u` without `-e` so all checks run regardless of individual failures.
+- Neither uninstall script (`uninstall-azerothcore.sh`, `uninstall-azerothcore-admin.sh`) may use `--remove-orphans` — it would risk removing unrelated containers sharing the Compose project name.
+- `verify-azerothcore.sh` and `verify-azerothcore-admin.sh` must stay on `set -u` without `-e` so all checks run regardless of individual failures.
+- The admin app must **not** edit any file under `/opt/stacks/azerothcore/` other than `docker-compose.admin.yml` and `backups/*`. The whole-stack `/ac/` mount is ro in the admin container precisely to enforce this; do not add rw sub-mounts for any other path.

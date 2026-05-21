@@ -68,6 +68,35 @@ def _dump_db(db: str, db_password: str, target: Path) -> bool:
     return True
 
 
+def _write_git_revisions(stack_dir: Path, target: Path) -> bool:
+    """Mirror backup.sh's git-revisions-<date>.txt: one line per repo
+    with `name <sha>` (or `name unknown` if git fails). Best-effort; we
+    record `unknown` rather than aborting the whole backup."""
+    repos = (
+        ("core", stack_dir),
+        ("mod-playerbots", stack_dir / "modules" / "mod-playerbots"),
+        ("mod-ah-bot-plus", stack_dir / "modules" / "mod-ah-bot-plus"),
+    )
+    try:
+        lines: list[str] = []
+        for name, path in repos:
+            sha = "unknown"
+            if path.exists():
+                r = subprocess.run(
+                    ["git", "-C", str(path), "rev-parse", "HEAD"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    sha = r.stdout.strip() or "unknown"
+            lines.append(f"{name} {sha}")
+        target.write_text("\n".join(lines) + "\n")
+        target.chmod(0o600)
+        return True
+    except OSError as e:
+        log.error("git-revisions write failed: %s", e)
+        return False
+
+
 def _tar_config(stack_dir: Path, target: Path) -> bool:
     """tar.gz of .env + docker-compose.override.yml + configs/, matching
     backup.sh's content list. stack_dir is the in-container /ac mount."""
@@ -120,5 +149,14 @@ def run_full_backup(
     if not _tar_config(stack_dir, cfg):
         result.ok = False
         result.error = "config tar failed"
+        return result
+
+    # Match the host's backup.sh by also writing git-revisions-<date>.txt.
+    # Best-effort: a write failure here does NOT fail the whole backup,
+    # because the SQL dumps and config tarball (the actually-restorable
+    # artifacts) are already on disk.
+    revs = backups_dir / f"git-revisions-{date_str}.txt"
+    if not _write_git_revisions(stack_dir, revs):
+        log.warning("git-revisions write failed; backup otherwise OK")
 
     return result

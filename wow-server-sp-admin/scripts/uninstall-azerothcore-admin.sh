@@ -25,7 +25,10 @@ if [ "${AUTO_YES:-0}" -ne 1 ] && [ "$DRY_RUN" -eq 0 ]; then
     [ "$confirm" = "y" ] || { echo "Aborted."; exit 0; }
 fi
 
-run docker compose -f "$STACK_DIR/docker-compose.yml" --env-file "$STACK_DIR/.env" down --remove-orphans || true
+# NOTE: --remove-orphans is intentionally omitted. Per CLAUDE.md and the AC
+# uninstaller convention, it can remove unrelated containers that share the
+# Compose project name. The named `docker rm -f` below covers our one service.
+run docker compose -f "$STACK_DIR/docker-compose.yml" --env-file "$STACK_DIR/.env" down || true
 run docker rm -f azerothcore-admin 2>/dev/null || true
 run docker rmi -f azerothcore-admin:local 2>/dev/null || true
 run sudo rm -rf "$STACK_DIR"

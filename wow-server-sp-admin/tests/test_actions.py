@@ -90,7 +90,67 @@ def test_start_runs_compose_up_and_waits_for_world_init(
 
 def test_wait_for_world_init_matches_real_ac_log_line(tmp_path, monkeypatch):
     """Pin the exact log line AC emits. Verified against a real AC
-    install — see CLAUDE.md's note about 'WORLD: World Initialized'."""
+    install — see CLAUDE.md's note about 'WORLD: World Initialized'.
+
+    Simulates the production flow: file has stale prior-boot content
+    (already contains 'World Initialized'), then AC opens in mode 'w'
+    which truncates (size drops below entry baseline), then AC writes
+    the new boot's lines."""
+    from app.services.actions import _wait_for_world_init
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "Server.log"
+    # Stale prior-boot tail — must NOT match.
+    log_path.write_text("WORLD: World Initialized In 0 Minutes 12 Seconds\n" * 4)
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+
+    state = {"step": 0}
+
+    def _fake_sleep(_secs):
+        state["step"] += 1
+        if state["step"] == 1:
+            # AC opens Server.log with mode 'w' -> truncate.
+            log_path.write_text("")
+        elif state["step"] == 2:
+            # AC writes the boot init lines and the world-init marker.
+            log_path.write_text(
+                "Init line A\nInit line B\n"
+                "WORLD: World Initialized In 0 Minutes 8 Seconds\n"
+            )
+
+    monkeypatch.setattr("app.services.actions.time.sleep", _fake_sleep)
+    assert _wait_for_world_init(timeout=10, on_progress=lambda *_: None) is True
+
+
+def test_wait_for_world_init_case_insensitive(tmp_path, monkeypatch):
+    """Future-proof against upstream casing changes. Same truncate-then-write
+    flow as above so we exercise the post-baseline path."""
+    from app.services.actions import _wait_for_world_init
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "Server.log"
+    log_path.write_text("stale prior boot junk\n" * 5)
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+
+    fired = {"v": False}
+
+    def _fake_sleep(_secs):
+        if not fired["v"]:
+            log_path.write_text("")
+            with log_path.open("a") as f:
+                f.write("world initialized in 5 minutes 1 seconds\n")
+            fired["v"] = True
+
+    monkeypatch.setattr("app.services.actions.time.sleep", _fake_sleep)
+    assert _wait_for_world_init(timeout=10, on_progress=lambda *_: None) is True
+
+
+def test_wait_for_world_init_ignores_stale_prior_boot_line(tmp_path, monkeypatch):
+    """If Server.log only contains a 'World Initialized' line from the
+    previous boot and nothing new is written, the function must NOT match
+    — otherwise Restart reports success while AC is still booting."""
     from app.services.actions import _wait_for_world_init
 
     log_dir = tmp_path / "logs"
@@ -99,15 +159,6 @@ def test_wait_for_world_init_matches_real_ac_log_line(tmp_path, monkeypatch):
         "WORLD: World Initialized In 0 Minutes 12 Seconds\n"
     )
     monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
-    assert _wait_for_world_init(timeout=1, on_progress=lambda *_: None) is True
-
-
-def test_wait_for_world_init_case_insensitive(tmp_path, monkeypatch):
-    """Future-proof against upstream casing changes."""
-    from app.services.actions import _wait_for_world_init
-
-    log_dir = tmp_path / "logs"
-    log_dir.mkdir()
-    (log_dir / "Server.log").write_text("world initialized in 5 minutes 1 seconds")
-    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
-    assert _wait_for_world_init(timeout=1, on_progress=lambda *_: None) is True
+    # No file mutation during wait -> must time out.
+    monkeypatch.setattr("app.services.actions.time.sleep", lambda _s: None)
+    assert _wait_for_world_init(timeout=0, on_progress=lambda *_: None) is False
