@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block main %}
+<nav><a href="/">← Dashboard</a></nav>
+
+<div class="settings-layout">
+  <aside class="settings-filters">
+    <h2>Filters</h2>
+    <label><input type="text" id="search" placeholder="Search key, value, or comment..."></label>
+    <fieldset>
+      <legend>Source file</legend>
+      <label><input type="checkbox" value="worldserver.conf.dist" checked> worldserver</label>
+      <label><input type="checkbox" value="playerbots.conf.dist" checked> playerbots</label>
+      <label><input type="checkbox" value="mod_ahbot.conf.dist" checked> mod_ahbot</label>
+      <label><input type="checkbox" value="individualProgression.conf.dist" checked> individualProgression</label>
+    </fieldset>
+    <label><input type="checkbox" id="only-modified"> Show only modified</label>
+    <label><input type="checkbox" id="show-all"> Show all keys (off = Common only)</label>
+    <p id="result-count"></p>
+    <button id="apply-btn" disabled>Apply (<span id="pending-count">0</span>)</button>
+    <button id="rollback-btn">Rollback last apply</button>
+  </aside>
+
+  <main class="settings-list" id="key-list"></main>
+
+  <aside class="settings-detail" id="key-detail">
+    <p>Select a key to see details.</p>
+  </aside>
+</div>
+
+<dialog id="apply-dialog">
+  <h2>Apply changes</h2>
+  <pre id="apply-diff"></pre>
+  <button id="apply-confirm">Apply &amp; restart</button>
+  <button id="apply-cancel">Cancel</button>
+</dialog>
+<script>
+window.COMMON_KEYS = {{ common_keys|tojson }};
+</script>
+<script src="/static/settings.js" defer></script>
+{% endblock %}
