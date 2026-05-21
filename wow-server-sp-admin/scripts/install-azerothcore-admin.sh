@@ -121,11 +121,23 @@ curl -sSfL -o "$STACK_DIR/build/app/static/htmx-sse.js" \
     "https://unpkg.com/htmx-ext-sse@${HTMX_SSE_VERSION}/sse.js"
 
 # --- Step 7: write .env ---
+# DOCKER_GID is the host's docker-group GID. The admin container runs as
+# the non-root admin user (UID=HOST_UID, primary group GID=HOST_GID) and
+# would otherwise be unable to read /var/run/docker.sock (typically owned
+# root:docker, mode 660). docker-compose.yml's `group_add: ["${DOCKER_GID}"]`
+# gives the admin user supplementary access to the socket. Fall back to 999
+# (the Ubuntu/Debian default for the docker group) only if the lookup fails.
+DOCKER_GID="$(getent group docker | awk -F: '{print $3}')"
+if [ -z "$DOCKER_GID" ]; then
+    echo "WARNING: docker group not found via getent; defaulting DOCKER_GID=999." >&2
+    DOCKER_GID=999
+fi
 cat > "$STACK_DIR/.env" <<EOF
 TAILSCALE_IP=$TAILSCALE_IP
 ADMIN_PORT=$ADMIN_PORT
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
+DOCKER_GID=$DOCKER_GID
 EOF
 chmod 600 "$STACK_DIR/.env"
 

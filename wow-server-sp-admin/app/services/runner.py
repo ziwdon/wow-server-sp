@@ -85,24 +85,43 @@ class ActionRunner:
         self,
         name: str,
         func: Callable[[Callable[[str, str], None]], ActionResult],
+        *,
+        pre: Callable[[], None] | None = None,
     ) -> ActionRecord:
         """Register a new action and kick it off on a background task.
 
         Returns the ActionRecord immediately. Raises if another action
         is already in flight.
+
+        `pre` runs SYNCHRONOUSLY under the single-flight lock, after the
+        current-action check and before the record is published. Use it
+        for I/O that MUST be covered by the single-flight guarantee
+        (e.g. apply's snapshot+write of admin.yml): a torn write at this
+        point is impossible because no other apply can interleave, and
+        the resulting record always has a corresponding background task.
+        If `pre` raises, no record is registered and no task is spawned.
         """
         with self._lock:
             if self._current is not None:
                 raise RuntimeError("another action already running")
+            if pre is not None:
+                pre()
             record = ActionRecord(id=str(uuid.uuid4()), name=name)
             self._current = record
 
         loop = asyncio.get_running_loop()
 
-        def on_progress(step: str, msg: str) -> None:
+        def _commit(step: str, msg: str) -> None:
+            # Runs on the event loop: append + broadcast atomically with
+            # respect to subscribe(). If we appended on the worker thread
+            # and broadcast separately, a late subscribe() could replay
+            # the just-appended step AND receive the queued broadcast,
+            # duplicating the event.
             record.steps.append((step, msg))
-            # Schedule broadcast on the event loop (called from worker thread).
-            loop.call_soon_threadsafe(record._broadcast, ("progress", step, msg))
+            record._broadcast(("progress", step, msg))
+
+        def on_progress(step: str, msg: str) -> None:
+            loop.call_soon_threadsafe(_commit, step, msg)
 
         async def _run() -> None:
             try:

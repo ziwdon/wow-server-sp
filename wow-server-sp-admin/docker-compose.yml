@@ -11,6 +11,13 @@ services:
         HOST_UID: "${HOST_UID:-1000}"
         HOST_GID: "${HOST_GID:-1000}"
     restart: unless-stopped
+    # The non-root admin user (UID=HOST_UID) needs membership in a group
+    # whose GID matches the host's docker group so it can read/write the
+    # bind-mounted /var/run/docker.sock. The installer resolves the host's
+    # docker GID into DOCKER_GID and writes it to .env. Without this the
+    # container's first docker SDK call dies with PermissionError(13).
+    group_add:
+      - "${DOCKER_GID:-999}"
     ports:
       - "${TAILSCALE_IP}:${ADMIN_PORT:-8765}:8000"
     volumes:

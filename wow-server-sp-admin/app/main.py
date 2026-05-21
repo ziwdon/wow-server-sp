@@ -197,12 +197,6 @@ from app.services.actions import run_force_stop, run_restart, run_start, run_sto
 from app.services.runner import ActionRecord, runner
 
 
-def _render_progress(step: str, msg: str) -> str:
-    safe_step = (step or "").replace("<", "&lt;").replace(">", "&gt;")
-    safe_msg = (msg or "").replace("<", "&lt;").replace(">", "&gt;")
-    return f'<li class="step step-{safe_step}"><b>{safe_step}</b>: {safe_msg}</li>'
-
-
 def _esc(s: str) -> str:
     return (
         (s or "")
@@ -211,6 +205,15 @@ def _esc(s: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def _render_progress(step: str, msg: str) -> str:
+    # All four entities (& < > ") must be escaped: step is interpolated
+    # into a quoted attribute (class="step-…"), and msg can carry
+    # ampersands or angle brackets from arbitrary subprocess stderr.
+    safe_step = _esc(step)
+    safe_msg = _esc(msg)
+    return f'<li class="step step-{safe_step}"><b>{safe_step}</b>: {safe_msg}</li>'
 
 
 def _render_done(record: ActionRecord) -> str:
@@ -350,8 +353,9 @@ async def rollback_settings():
 
     state = get_state()
 
-    # Same lock-first guard as apply_settings — refuse to touch admin.yml
-    # if a lifecycle action is already in flight.
+    # Fast-fail if an action is already in flight. The real single-flight
+    # guarantee comes from runner.start's lock below; this just avoids the
+    # confusing "found snapshot, then 409" path.
     if runner.current() is not None:
         raise HTTPException(409, "another action already running")
 
@@ -359,27 +363,28 @@ async def rollback_settings():
     if not snapshots:
         raise HTTPException(404, "no admin.yml snapshots to roll back to")
     most_recent = snapshots[0]
+    # Read the chosen snapshot's content into memory so the pre-hook
+    # operates on a stable payload even if the snapshot dir changes
+    # between selection and lock acquisition.
+    payload = most_recent.read_text()
 
-    # Snapshot the current state before overwriting so the operator can
-    # roll *forward* again after a rollback. Without this, repeated
-    # rollbacks would each restore the same older snapshot — no path back.
-    state.admin.snapshot()
-    # In-place write, same constraints as AdminCompose.write_env.
-    with state.admin.path.open("w", encoding="utf-8") as f:
-        f.write(most_recent.read_text())
+    def _pre():
+        # Snapshot current state first so the operator can roll *forward*
+        # again after a rollback. Then overwrite admin.yml in place with
+        # the chosen snapshot's content. Both happen under runner._lock
+        # so a concurrent apply cannot interleave a partial write.
+        state.admin.snapshot()
+        with state.admin.path.open("w", encoding="utf-8") as f:
+            f.write(payload)
 
     try:
         record = runner.start(
             "rollback",
             lambda cb: _run_apply_then_verify(state, cb),
+            pre=_pre,
         )
     except RuntimeError as e:
-        raise HTTPException(
-            409,
-            f"another action started concurrently; admin.yml was rolled back "
-            f"but no restart was triggered — retry once current action "
-            f"finishes: {e}",
-        )
+        raise HTTPException(409, str(e))
     return {
         "id": record.id,
         "status": "running",
@@ -393,7 +398,10 @@ async def apply_settings(payload: ApplyPayload):
 
     state = get_state()
 
-    # 1. Single-flight gate — MUST happen before any file mutation.
+    # 1. Fast-fail if an action is in flight. (The authoritative single-
+    #    flight gate is runner.start's lock; the snapshot+write happens
+    #    INSIDE the locked action below, so a race here does not orphan
+    #    a write.)
     if runner.current() is not None:
         raise HTTPException(409, "another action already running")
 
@@ -410,8 +418,11 @@ async def apply_settings(payload: ApplyPayload):
     if unknown:
         raise HTTPException(400, f"unknown keys: {unknown}")
 
-    # 4. Build new env: start from current admin env, merge pending.
-    #    Empty value = delete.
+    # 4. Build the new env dict here (cheap, pure) so the runner action
+    #    only has to do I/O. Resolve pending edits against the *current*
+    #    admin.yml; the action will re-read at execution time to catch
+    #    any concurrent change, but in practice the single-flight lock
+    #    prevents that.
     current = state.admin.read_env()
     for key, value in payload.pending.items():
         env_var = state.key_index[key].env_var
@@ -419,24 +430,24 @@ async def apply_settings(payload: ApplyPayload):
             del current[env_var]
         elif value != "":
             current[env_var] = value
+    new_env = current
 
-    # 5. Snapshot, then write in place.
-    state.admin.snapshot()
-    state.admin.write_env(current)
+    # 5. Snapshot + write happen under runner._lock via the pre-hook so
+    #    the single-flight lock fully covers the snapshot+write sequence
+    #    (no orphaned writes; no concurrent apply can interleave a
+    #    half-written admin.yml).
+    def _pre():
+        state.admin.snapshot()
+        state.admin.write_env(new_env)
 
-    # 6. Fire-and-forget Restart via the runner.
     try:
         record = runner.start(
             "apply",
             lambda cb: _run_apply_then_verify(state, cb),
+            pre=_pre,
         )
     except RuntimeError as e:
-        raise HTTPException(
-            409,
-            f"another action started concurrently; admin.yml was written "
-            f"but no restart was triggered — retry once current action "
-            f"finishes: {e}",
-        )
+        raise HTTPException(409, str(e))
     return {"id": record.id, "status": "running"}
 
 

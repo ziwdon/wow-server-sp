@@ -6,6 +6,15 @@ function showBanner(msg) {
   setTimeout(() => b.remove(), 8000);
 }
 
+// Escape user/operator-supplied strings before interpolating into innerHTML
+// or quoted attributes. Keys come from upstream .conf.dist files (trusted);
+// effective values come from admin.yml (operator-set, so technically
+// arbitrary) — escape both so a stray quote/angle bracket can't break out.
+const ESC_MAP = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ESC_MAP[c]);
+}
+
 const state = { keys: [], pending: {}, common: new Set(COMMON_KEYS), selected: null };
 
 async function load() {
@@ -48,9 +57,9 @@ function _render() {
     const pending = state.pending[k.key];
     const value = pending !== undefined ? pending : k.effective_value;
     row.innerHTML = `
-      <span class="key-name">${k.key}</span>
-      <span class="key-source">${k.source}</span>
-      <input class="key-input" data-key="${k.key}" value="${value}">
+      <span class="key-name">${esc(k.key)}</span>
+      <span class="key-source">${esc(k.source)}</span>
+      <input class="key-input" data-key="${esc(k.key)}" value="${esc(value)}">
     `;
     row.addEventListener('click', () => selectKey(k));
     list.appendChild(row);
@@ -68,11 +77,11 @@ function selectKey(k) {
   state.selected = k;
   const detail = document.getElementById('key-detail');
   detail.innerHTML = `
-    <h2>${k.key}</h2>
-    <p><strong>${k.env_var}</strong></p>
-    <p>Effective: <code>${k.effective_value}</code> (from ${k.source})</p>
-    <p>Default: <code>${k.default}</code> (type: ${k.inferred_type})</p>
-    <pre>${k.comment || '(no comment)'}</pre>
+    <h2>${esc(k.key)}</h2>
+    <p><strong>${esc(k.env_var)}</strong></p>
+    <p>Effective: <code>${esc(k.effective_value)}</code> (from ${esc(k.source)})</p>
+    <p>Default: <code>${esc(k.default)}</code> (type: ${esc(k.inferred_type)})</p>
+    <pre>${esc(k.comment || '(no comment)')}</pre>
   `;
 }
 

@@ -152,13 +152,24 @@ WORLD_INIT_RE = re.compile(r"World\s+Initialized\s+In", re.IGNORECASE)
 
 def _wait_for_world_init(timeout: int, on_progress: ProgressCb) -> bool:
     """Tail /ac/logs/Server.log for the world-init line. Emitted exactly
-    once at end of boot, then Server.log goes quiet (per CLAUDE.md)."""
+    once at end of boot, then Server.log goes quiet (per CLAUDE.md).
+
+    Baselines `last_size` to the file's *current* size at entry so a stale
+    "World Initialized" line from the previous boot does NOT trigger a
+    false positive on Restart. AC's Server.log appender uses mode `w`
+    (truncate-on-open), so once the new worldserver opens the file the
+    size drops below `last_size`; we reset to 0 and read everything the
+    new boot writes from then on.
+    """
     log_path = Path(os.environ.get("AC_STACK_DIR", "/ac")) / "logs" / "Server.log"
     deadline = time.monotonic() + timeout
-    last_size = 0
+    last_size = log_path.stat().st_size if log_path.exists() else 0
     while time.monotonic() < deadline:
         if log_path.exists():
             size = log_path.stat().st_size
+            if size < last_size:
+                # AC re-opened Server.log in mode `w` -> file truncated.
+                last_size = 0
             if size > last_size:
                 with log_path.open("r", errors="replace") as f:
                     f.seek(last_size)

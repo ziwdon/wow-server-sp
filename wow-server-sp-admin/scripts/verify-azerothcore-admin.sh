@@ -11,9 +11,16 @@ ok()   { echo "[OK]   $*"; PASS=$((PASS+1)); }
 fail() { echo "[FAIL] $*"; FAIL=$((FAIL+1)); }
 info() { echo "[INFO] $*"; }
 
-# 1. stack dir exists
+# 1. stack dir exists with installer-user ownership
 if [ -d "$STACK_DIR" ]; then
     ok "stack dir exists: $STACK_DIR"
+    expected_owner="$(id -un):$(id -gn)"
+    actual_owner="$(stat -c '%U:%G' "$STACK_DIR" 2>/dev/null || echo unknown)"
+    if [ "$actual_owner" = "$expected_owner" ]; then
+        ok "stack dir owned by $expected_owner"
+    else
+        fail "stack dir owner is $actual_owner; expected $expected_owner"
+    fi
 else
     fail "stack dir missing: $STACK_DIR"
 fi
@@ -75,7 +82,18 @@ else
     info "TAILSCALE_IP/ADMIN_PORT not set -- skipping /healthz check"
 fi
 
-# 7. AC stack still functional (delegate)
+# 7. systemd unit, if installed, must be enabled (spec §Verification item 7)
+if [ -f /etc/systemd/system/azerothcore-admin.service ]; then
+    if systemctl is-enabled --quiet azerothcore-admin.service 2>/dev/null; then
+        ok "azerothcore-admin.service is enabled"
+    else
+        fail "azerothcore-admin.service is installed but NOT enabled"
+    fi
+else
+    info "azerothcore-admin.service not installed (skip)"
+fi
+
+# 8. AC stack still functional (delegate)
 if [ -x "$(dirname "$0")/../../scripts/verify-azerothcore.sh" ]; then
     info "delegating to AC verify script (exit code preserved)"
     # shellcheck disable=SC2015
