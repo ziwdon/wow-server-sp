@@ -1,3 +1,6 @@
+from app.logging_config import configure as _configure_logging
+_configure_logging()
+
 import logging
 import os
 from contextlib import asynccontextmanager
