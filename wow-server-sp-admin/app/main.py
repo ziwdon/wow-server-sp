@@ -3,9 +3,9 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -48,6 +48,24 @@ app = FastAPI(title="azerothcore-admin", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+
+
+@app.exception_handler(HTTPException)
+async def http_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
+    import traceback
+    log.error("unhandled: %s\n%s", exc, traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal error — see admin logs."},
+    )
 
 
 @app.get("/healthz")

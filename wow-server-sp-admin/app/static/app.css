@@ -30,3 +30,8 @@ pre { white-space: pre-wrap; font-size: 0.85rem; max-height: 12rem; overflow-y: 
 .key-source { font-size: 0.8rem; text-transform: uppercase; }
 .key-input { width: 100%; }
 .settings-detail { border-left: 1px solid #ccc; padding-left: 1rem; }
+.banner { padding: 0.75rem 1rem; margin: 0.5rem 0; border-radius: 4px; }
+.banner.error { background: #fee; border: 1px solid #c00; color: #c00; }
+.verify-failed { margin: 0.5rem 0; padding-left: 1.5rem; color: #c00; }
+.verify-failed code { font-family: monospace; }
+.verify-failed .vf-key { color: #666; font-size: 0.9em; }
