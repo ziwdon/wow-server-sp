@@ -1,0 +1,27 @@
+###############################################################################
+# SECTION HEADER (ignored)                                                    #
+###############################################################################
+#
+#    Foo.Enable
+#        Description: Whether the Foo subsystem is enabled.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+
+Foo.Enable = 1
+
+#
+#    Bar.Count
+#        Description: How many bars to spawn.
+#        Default:     10
+#
+
+Bar.Count = 10
+
+#
+#    Baz.Name
+#        Description: Name to display.
+#        Default:     ""
+#
+
+Baz.Name = ""
