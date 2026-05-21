@@ -36,7 +36,11 @@ async def lifespan(app: FastAPI):
             configs_dir=_AC_STACK / "configs",
             snapshots_dir=_SNAPSHOTS,
         )
-    # Task 26 appends snapshot GC here.
+    # GC any admin.yml.bak.* snapshots older than 7 days.
+    if _state_mod._state is not None:
+        removed = _state_mod._state.admin.gc_old_snapshots(keep_days=7)
+        if removed:
+            log.info("gc'd %d old admin.yml snapshots", removed)
     yield
 
 
@@ -311,6 +315,49 @@ BLOCKED_KEYS = frozenset({"AuctionHouseBot.GUIDs"})
 
 class ApplyPayload(BaseModel):
     pending: dict[str, str]
+
+
+@app.post("/api/settings/rollback")
+async def rollback_settings():
+    from fastapi import HTTPException
+
+    state = get_state()
+
+    # Same lock-first guard as apply_settings — refuse to touch admin.yml
+    # if a lifecycle action is already in flight.
+    if runner.current() is not None:
+        raise HTTPException(409, "another action already running")
+
+    snapshots = state.admin.list_snapshots()
+    if not snapshots:
+        raise HTTPException(404, "no admin.yml snapshots to roll back to")
+    most_recent = snapshots[0]
+
+    # Snapshot the current state before overwriting so the operator can
+    # roll *forward* again after a rollback. Without this, repeated
+    # rollbacks would each restore the same older snapshot — no path back.
+    state.admin.snapshot()
+    # In-place write, same constraints as AdminCompose.write_env.
+    with state.admin.path.open("w", encoding="utf-8") as f:
+        f.write(most_recent.read_text())
+
+    try:
+        record = runner.start(
+            "rollback",
+            lambda cb: _run_apply_then_verify(state, cb),
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            409,
+            f"another action started concurrently; admin.yml was rolled back "
+            f"but no restart was triggered — retry once current action "
+            f"finishes: {e}",
+        )
+    return {
+        "id": record.id,
+        "status": "running",
+        "restored_from": most_recent.name,
+    }
 
 
 @app.post("/api/settings/apply")
