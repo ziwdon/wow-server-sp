@@ -137,3 +137,30 @@ docker compose --env-file "$STACK_DIR/.env" up -d
 echo ""
 echo "Admin app starting at http://${TAILSCALE_IP}:${ADMIN_PORT}/"
 echo "Verify with: $REPO_DIR/scripts/verify-azerothcore-admin.sh"
+
+# --- Step 9: optional systemd unit ---
+echo ""
+read -rp "Install azerothcore-admin.service systemd unit (auto-start at boot)? [y/N] " answer
+if [ "${answer:-n}" = "y" ]; then
+    sudo tee /etc/systemd/system/azerothcore-admin.service <<'UNIT' >/dev/null
+[Unit]
+Description=AzerothCore Admin (Docker Compose)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/stacks/azerothcore-admin
+ExecStart=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env up -d
+ExecStop=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env down
+User=REPLACE_WITH_YOUR_USERNAME
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo sed -i "s/REPLACE_WITH_YOUR_USERNAME/$(whoami)/" /etc/systemd/system/azerothcore-admin.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now azerothcore-admin.service
+    echo "azerothcore-admin.service installed and enabled."
+fi
