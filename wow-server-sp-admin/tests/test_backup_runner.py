@@ -5,9 +5,7 @@ from app.services.backup_runner import BackupResult, run_full_backup
 
 
 @patch("app.services.backup_runner.subprocess.run")
-def test_run_full_backup_invokes_mysqldump_per_db(
-    mock_run, tmp_path, monkeypatch,
-):
+def test_run_full_backup_invokes_mysqldump_per_db(mock_run, tmp_path):
     # `docker exec ac-database mysql USE <db>` (existence probe) returns 0,
     # and `docker exec ac-database mysqldump <db>` returns 0 with bytes.
     def _fake_run(cmd, *args, **kwargs):
@@ -34,6 +32,7 @@ def test_run_full_backup_invokes_mysqldump_per_db(
         if "mysqldump" in c.args[0]
     ]
     assert len(dump_calls) == 4
+    assert (backups_dir / "azerothcore-config-2026-05-20.tar.gz").exists()
 
 
 @patch("app.services.backup_runner.subprocess.run")
@@ -57,3 +56,27 @@ def test_skips_missing_database(mock_run, tmp_path):
     assert not (backups_dir / "acore_playerbots-2026-05-20.sql").exists()
     assert (backups_dir / "acore_auth-2026-05-20.sql").exists()
     assert "acore_playerbots" in result.skipped
+    assert len(result.skipped) == 1
+    assert len(result.dumped) == 3  # the other three DBs were dumped
+
+
+@patch("app.services.backup_runner.subprocess.run")
+def test_dump_failure_sets_ok_false(mock_run, tmp_path):
+    def _fake_run(cmd, *args, **kwargs):
+        # Probe (mysql) always passes; dump of acore_characters fails
+        if "mysqldump" in cmd and "acore_characters" in cmd:
+            return MagicMock(returncode=1, stdout=b"", stderr=b"access denied")
+        return MagicMock(returncode=0, stdout=b"-- dump --", stderr=b"")
+
+    mock_run.side_effect = _fake_run
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    result = run_full_backup(
+        backups_dir=backups_dir,
+        stack_dir=tmp_path,
+        db_password="pw",
+        date_str="2026-05-20",
+    )
+    assert not result.ok
+    assert result.error is not None
+    assert "acore_characters" in result.error
