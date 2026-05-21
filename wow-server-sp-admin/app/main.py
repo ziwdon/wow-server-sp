@@ -204,7 +204,13 @@ def _render_progress(step: str, msg: str) -> str:
 
 
 def _esc(s: str) -> str:
-    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 def _render_done(record: ActionRecord) -> str:
