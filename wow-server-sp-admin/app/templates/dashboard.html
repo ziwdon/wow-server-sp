@@ -1,4 +1,29 @@
 {% extends "base.html" %}
 {% block main %}
-<p>azerothcore-admin is running.</p>
+<section class="grid">
+  <div id="status" hx-get="/api/status" hx-trigger="load, every 5s">
+    <p>Loading status...</p>
+  </div>
+  <div id="stats" hx-get="/api/stats" hx-trigger="load, every 5s">
+    <p>Loading stats...</p>
+  </div>
+  <div id="players" hx-get="/api/players" hx-trigger="load, every 10s">
+    <p>Loading player counts...</p>
+  </div>
+  <div id="logs" hx-get="/api/logs" hx-trigger="load, every 10s">
+    <p>Loading logs...</p>
+  </div>
+  <div id="backups" hx-get="/api/backups" hx-trigger="load, every 60s">
+    <p>Loading backup status...</p>
+  </div>
+</section>
+
+<section class="actions">
+  <button disabled title="Wired in Phase D">Stop</button>
+  <button disabled title="Wired in Phase D">Restart</button>
+  <button disabled title="Wired in Phase D">Start</button>
+  <button disabled title="Wired in Phase D" class="danger">Force stop</button>
+</section>
+
+<nav><a href="/settings">Settings →</a></nav>
 {% endblock %}

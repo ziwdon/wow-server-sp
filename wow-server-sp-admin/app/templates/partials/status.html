@@ -1,0 +1,6 @@
+<div class="panel">
+  <h2>Status</h2>
+  <p class="status status-{{ status }}">{{ status }}</p>
+  {% if started_at %}<p>Started: {{ started_at }}</p>{% endif %}
+  {% if exit_code is not none %}<p>Last exit: {{ exit_code }}</p>{% endif %}
+</div>

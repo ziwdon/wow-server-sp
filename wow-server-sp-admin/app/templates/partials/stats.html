@@ -1,0 +1,10 @@
+<div class="panel">
+  <h2>Resources</h2>
+  {% if stats %}
+  <p>CPU: {{ stats.cpu_percent }}%</p>
+  <p>Memory: {{ stats.memory_used_mb }} / {{ stats.memory_limit_mb }} MB</p>
+  <p>Uptime: {{ uptime }}</p>
+  {% else %}
+  <p>Container not running.</p>
+  {% endif %}
+</div>

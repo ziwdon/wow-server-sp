@@ -1,0 +1,9 @@
+<div class="panel">
+  <h2>Backups</h2>
+  {% if last_backup_human %}
+  <p>Last backup: {{ last_backup_human }}</p>
+  {% else %}
+  <p>No backups found.</p>
+  {% endif %}
+  {% if last_error %}<p class="error">{{ last_error }}</p>{% endif %}
+</div>
