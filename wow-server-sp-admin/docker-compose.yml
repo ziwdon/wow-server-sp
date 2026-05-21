@@ -1,0 +1,46 @@
+# wow-server-sp-admin runtime stack.
+# Lives at /opt/stacks/azerothcore-admin/ on the host after install.
+
+services:
+  azerothcore-admin:
+    container_name: azerothcore-admin
+    image: azerothcore-admin:local
+    build:
+      context: .
+      args:
+        HOST_UID: "${HOST_UID:-1000}"
+        HOST_GID: "${HOST_GID:-1000}"
+    restart: unless-stopped
+    ports:
+      - "${TAILSCALE_IP}:${ADMIN_PORT:-8765}:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/stacks/azerothcore:/ac:ro
+      # rw sub-mount: the one file the admin writes during Apply.
+      - /opt/stacks/azerothcore/docker-compose.admin.yml:/ac/docker-compose.admin.yml:rw
+      # rw sub-mount: where the admin writes mysqldump output during
+      # Stop/Restart. The parent /ac is ro; backups/ is the only other
+      # path that needs admin-side writes.
+      - /opt/stacks/azerothcore/backups:/ac/backups:rw
+      # rw mount for admin.yml.bak.<ts> snapshots. Deliberately OUTSIDE
+      # /ac/ because /ac is ro and writing a sibling-file snapshot next
+      # to /ac/docker-compose.admin.yml would hit "read-only file system".
+      # Lives in the admin stack dir so the AC installer is unaware of it.
+      - /opt/stacks/azerothcore-admin/snapshots:/admin-snapshots:rw
+    environment:
+      AC_STACK_DIR: /ac
+      ADMIN_SNAPSHOTS_DIR: /admin-snapshots
+      ADMIN_LOG_LEVEL: info
+    networks:
+      - azerothcore_ac-network
+
+networks:
+  # The AC stack's docker-compose.yml declares `networks: ac-network` and
+  # every AC service joins it. With COMPOSE_PROJECT_NAME=azerothcore the
+  # resulting Docker network is `azerothcore_ac-network`. We join it as
+  # external so we get Docker-DNS resolution for `ac-database` and
+  # `ac-worldserver`. Joining `azerothcore_default` would NOT work -- that
+  # network exists (Compose creates one even when unused) but has no AC
+  # services attached.
+  azerothcore_ac-network:
+    external: true
