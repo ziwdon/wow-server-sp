@@ -15,7 +15,7 @@ from app.services import backups as backups_svc
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
-from app.state import db_credentials, init_state, list_keys_resolved
+from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
 APP_DIR = Path(__file__).resolve().parent
 _AC_STACK = Path(os.environ.get("AC_STACK_DIR", "/ac"))
@@ -299,3 +299,74 @@ async def settings_page(request: Request) -> HTMLResponse:
             "common_keys": COMMON_KEYS,
         },
     )
+
+
+from pydantic import BaseModel
+
+# v1 non-goal (spec): "Editing AuctionHouseBot.GUIDs (installer-managed,
+# runtime-discovered)." Refused server-side because the dist-file index
+# does contain the key, so the existence check alone wouldn't block it.
+BLOCKED_KEYS = frozenset({"AuctionHouseBot.GUIDs"})
+
+
+class ApplyPayload(BaseModel):
+    pending: dict[str, str]
+
+
+@app.post("/api/settings/apply")
+async def apply_settings(payload: ApplyPayload):
+    from fastapi import HTTPException
+
+    state = get_state()
+
+    # 1. Single-flight gate — MUST happen before any file mutation.
+    if runner.current() is not None:
+        raise HTTPException(409, "another action already running")
+
+    # 2. Blocklist (closes the silent-drop trap for installer-managed keys).
+    blocked = [k for k in payload.pending if k in BLOCKED_KEYS]
+    if blocked:
+        raise HTTPException(
+            400,
+            f"refusing to write installer-managed keys: {blocked}",
+        )
+
+    # 3. Validate keys exist in the index — typo guard.
+    unknown = [k for k in payload.pending if k not in state.key_index]
+    if unknown:
+        raise HTTPException(400, f"unknown keys: {unknown}")
+
+    # 4. Build new env: start from current admin env, merge pending.
+    #    Empty value = delete.
+    current = state.admin.read_env()
+    for key, value in payload.pending.items():
+        env_var = state.key_index[key].env_var
+        if value == "" and env_var in current:
+            del current[env_var]
+        elif value != "":
+            current[env_var] = value
+
+    # 5. Snapshot, then write in place.
+    state.admin.snapshot()
+    state.admin.write_env(current)
+
+    # 6. Fire-and-forget Restart via the runner.
+    try:
+        record = runner.start(
+            "apply",
+            lambda cb: _run_apply_then_verify(state, cb),
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            409,
+            f"another action started concurrently; admin.yml was written "
+            f"but no restart was triggered — retry once current action "
+            f"finishes: {e}",
+        )
+    return {"id": record.id, "status": "running"}
+
+
+def _run_apply_then_verify(state, on_progress):
+    """Placeholder — Task 25 fills in the real implementation."""
+    from app.services.actions import run_restart
+    return run_restart(on_progress=on_progress)
