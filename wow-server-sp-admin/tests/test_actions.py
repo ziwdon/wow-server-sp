@@ -64,3 +64,50 @@ def test_stop_skips_when_already_stopped(mock_inspect):
     )
     result = run_stop(on_progress=lambda *_: None, run_backup=False, grace_seconds=30)
     assert result == ActionResult.OK
+
+
+@patch("app.services.actions.subprocess.run")
+@patch("app.services.actions._wait_for_world_init")
+@patch("app.services.actions.inspect_worldserver")
+def test_start_runs_compose_up_and_waits_for_world_init(
+    mock_inspect, mock_wait_init, mock_run,
+):
+    from app.services.docker_client import ContainerInfo
+
+    states = iter([
+        ContainerInfo(status="exited", started_at=None, exit_code=0, image=None),
+        ContainerInfo(status="running", started_at=None, exit_code=None, image=None),
+    ])
+    mock_inspect.side_effect = lambda: next(states)
+    mock_wait_init.return_value = True
+    mock_run.return_value = MagicMock(returncode=0)
+
+    from app.services.actions import run_start
+    result = run_start(on_progress=lambda *_: None)
+    assert result == ActionResult.OK
+    assert any("compose" in str(c.args) for c in mock_run.call_args_list)
+
+
+def test_wait_for_world_init_matches_real_ac_log_line(tmp_path, monkeypatch):
+    """Pin the exact log line AC emits. Verified against a real AC
+    install — see CLAUDE.md's note about 'WORLD: World Initialized'."""
+    from app.services.actions import _wait_for_world_init
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "Server.log").write_text(
+        "WORLD: World Initialized In 0 Minutes 12 Seconds\n"
+    )
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    assert _wait_for_world_init(timeout=1, on_progress=lambda *_: None) is True
+
+
+def test_wait_for_world_init_case_insensitive(tmp_path, monkeypatch):
+    """Future-proof against upstream casing changes."""
+    from app.services.actions import _wait_for_world_init
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "Server.log").write_text("world initialized in 5 minutes 1 seconds")
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    assert _wait_for_world_init(timeout=1, on_progress=lambda *_: None) is True
