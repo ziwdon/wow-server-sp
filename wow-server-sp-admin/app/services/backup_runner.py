@@ -43,6 +43,9 @@ def _db_exists(db: str, db_password: str) -> bool:
         ],
         capture_output=True,
     )
+    if result.returncode != 0:
+        msg = result.stderr.decode(errors="replace").strip()
+        log.warning("db probe for %s returned rc=%d: %s", db, result.returncode, msg)
     return result.returncode == 0
 
 
