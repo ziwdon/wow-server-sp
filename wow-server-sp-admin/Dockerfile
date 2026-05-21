@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir pytest==8.3.3 pytest-asyncio==0.24.0 httpx==0.27.2
 
 # Bake the .conf.dist files for offline key-index parsing.
 COPY dist/ /app/dist/
