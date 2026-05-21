@@ -168,7 +168,7 @@ async def api_backups(request: Request) -> HTMLResponse:
 
 from sse_starlette.sse import EventSourceResponse
 
-from app.services.actions import run_force_stop, run_restart, run_start, run_stop
+from app.services.actions import run_force_stop, run_restart, run_start, run_stop, verify_env_vars_bound, ActionResult
 from app.services.runner import ActionRecord, runner
 
 
@@ -366,7 +366,37 @@ async def apply_settings(payload: ApplyPayload):
     return {"id": record.id, "status": "running"}
 
 
-def _run_apply_then_verify(state, on_progress):
-    """Placeholder — Task 25 fills in the real implementation."""
-    from app.services.actions import run_restart
-    return run_restart(on_progress=on_progress)
+def _run_apply_then_verify(state, on_progress) -> ActionResult:
+    result = run_restart(on_progress=on_progress)
+    if result != ActionResult.OK:
+        return result
+
+    # Build expected from the just-written admin.yml. This excludes pending
+    # deletes (their env vars are absent from the file) so the verifier
+    # never marks a deleted key as failed.
+    expected = state.admin.read_env()
+
+    # Build the reverse map env_var -> dist-file key so VerifyFailure
+    # rows can name the human-facing key the operator was editing.
+    env_var_to_key = {
+        entry.env_var: key
+        for key, entry in state.key_index.items()
+        if entry.env_var in expected
+    }
+
+    failed = verify_env_vars_bound(
+        expected,
+        env_var_to_key=env_var_to_key,
+        on_progress=on_progress,
+    )
+
+    # Stash the failure list on the current ActionRecord so the SSE
+    # `done` event renderer (_render_done) can display it.
+    current = runner.current()
+    if current is not None:
+        current.verify_failed = failed
+
+    # A bind failure does NOT downgrade the action's overall status to
+    # error — the restart itself was successful and the UI surfaces the
+    # bind failure separately via the verify_failed list.
+    return ActionResult.OK
