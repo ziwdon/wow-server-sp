@@ -8,8 +8,14 @@ header h1 { margin-top: 0; }
 }
 .panel { border: 1px solid #ccc; padding: 1rem; border-radius: 4px; }
 .panel h2 { margin-top: 0; font-size: 1.1rem; }
-.actions { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
-.actions .danger { background: #d33; color: #fff; }
+.actions { display: flex; gap: 0.5rem; margin: 1rem 0; }
+.actions button { padding: 0.5rem 1rem; cursor: pointer; }
+button.danger { background: #fee; border: 1px solid #c00; color: #c00; }
+#action-log { list-style: none; padding: 0; font-family: monospace; font-size: 0.9rem; }
+#action-log li { padding: 0.2rem 0; }
+.step-done { color: #060; font-weight: bold; }
+.action-done.action-ok { color: #060; }
+.action-done.action-error { color: #c00; font-weight: bold; }
 .status-running { color: #060; }
 .status-exited, .status-missing { color: #c00; }
 .error { color: #c00; }

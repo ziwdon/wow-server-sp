@@ -19,10 +19,29 @@
 </section>
 
 <section class="actions">
-  <button disabled title="Wired in Phase D">Stop</button>
-  <button disabled title="Wired in Phase D">Restart</button>
-  <button disabled title="Wired in Phase D">Start</button>
-  <button disabled title="Wired in Phase D" class="danger">Force stop</button>
+  <button hx-post="/api/action/stop"
+          hx-confirm="Stop the server? Players get a 30-second warning, then saveall + clean shutdown + backup."
+          hx-swap="none">Stop</button>
+  <button hx-post="/api/action/restart"
+          hx-confirm="Restart the server? Same shutdown path as Stop, then start."
+          hx-swap="none">Restart</button>
+  <button hx-post="/api/action/start"
+          hx-confirm="Start the server?"
+          hx-swap="none">Start</button>
+  <button hx-post="/api/action/force-stop"
+          hx-confirm="FORCE STOP — no notify, no saveall, no backup. Only use if soft stop is hung. Continue?"
+          hx-swap="none" class="danger">Force stop</button>
+</section>
+
+<section>
+  <h2>Action log</h2>
+  <ul id="action-log"
+      hx-ext="sse"
+      sse-connect="/api/action/stream"
+      sse-swap="progress,done"
+      hx-swap="beforeend">
+    <!-- The initial idle/replay event fills this; subsequent progress events append. -->
+  </ul>
 </section>
 
 <nav><a href="/settings">Settings →</a></nav>
