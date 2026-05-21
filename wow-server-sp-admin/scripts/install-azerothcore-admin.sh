@@ -1,0 +1,139 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ "$EUID" -eq 0 ]; then
+    echo "ERROR: do not run as root; sudo is invoked internally where needed." >&2
+    exit 1
+fi
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STACK_DIR=/opt/stacks/azerothcore-admin
+AC_STACK_DIR=/opt/stacks/azerothcore
+
+if [ ! -d "$AC_STACK_DIR" ]; then
+    echo "ERROR: AzerothCore stack not found at $AC_STACK_DIR." >&2
+    echo "Install AzerothCore first via scripts/install-azerothcore.sh." >&2
+    exit 1
+fi
+
+# --- Step 1: Tailscale IP detection ---
+if ! command -v tailscale >/dev/null 2>&1; then
+    echo "ERROR: tailscale CLI not found; admin requires Tailscale." >&2
+    exit 1
+fi
+TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+if [ -z "$TAILSCALE_IP" ]; then
+    echo "ERROR: could not detect Tailscale IPv4 address." >&2
+    exit 1
+fi
+echo "Tailscale IP: $TAILSCALE_IP"
+
+# --- Step 2: port selection / collision check ---
+ADMIN_PORT="${ADMIN_PORT:-8765}"
+while ss -ltn "sport = :$ADMIN_PORT" 2>/dev/null | grep -q ":$ADMIN_PORT"; do
+    echo "Port $ADMIN_PORT is in use:"
+    sudo ss -ltnp "sport = :$ADMIN_PORT" || true
+    read -rp "Enter a different port [default 8765]: " ADMIN_PORT
+    ADMIN_PORT="${ADMIN_PORT:-8765}"
+done
+echo "Admin port: $ADMIN_PORT"
+
+# --- Step 3: COMPOSE_FILE entry in AC's .env (preserves existing entries) ---
+# We never overwrite an existing COMPOSE_FILE wholesale -- splitting on `:`
+# lets us append docker-compose.admin.yml without dropping any custom file
+# a future installer or operator may have added. This edit only touches
+# .env; it does NOT modify docker-compose.override.yml or any other
+# compose file content.
+ADMIN_YML_NAME='docker-compose.admin.yml'
+existing_line="$(grep -E '^COMPOSE_FILE=' "$AC_STACK_DIR/.env" 2>/dev/null | head -n1 || true)"
+if [ -z "$existing_line" ]; then
+    new_line="COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:${ADMIN_YML_NAME}"
+    echo "Adding COMPOSE_FILE to $AC_STACK_DIR/.env."
+    echo "$new_line" | sudo tee -a "$AC_STACK_DIR/.env" >/dev/null
+else
+    existing_value="${existing_line#COMPOSE_FILE=}"
+    case ":${existing_value}:" in
+        *":${ADMIN_YML_NAME}:"*)
+            echo "COMPOSE_FILE already includes ${ADMIN_YML_NAME}; leaving as-is."
+            ;;
+        *)
+            new_line="COMPOSE_FILE=${existing_value}:${ADMIN_YML_NAME}"
+            echo "Appending ${ADMIN_YML_NAME} to existing COMPOSE_FILE in $AC_STACK_DIR/.env."
+            # Escape sed delimiter -- file paths can contain dots and dashes; we use
+            # a fixed-delimiter sed against an exact-match anchor.
+            sudo awk -v old="$existing_line" -v new="$new_line" \
+                '$0 == old { print new; next } { print }' \
+                "$AC_STACK_DIR/.env" | sudo tee "$AC_STACK_DIR/.env.tmp" >/dev/null
+            sudo mv "$AC_STACK_DIR/.env.tmp" "$AC_STACK_DIR/.env"
+            ;;
+    esac
+fi
+
+# --- Step 4: empty admin.yml so AC compose calls don't fail ---
+if [ ! -f "$AC_STACK_DIR/docker-compose.admin.yml" ]; then
+    echo "Creating empty $AC_STACK_DIR/docker-compose.admin.yml."
+    sudo tee "$AC_STACK_DIR/docker-compose.admin.yml" >/dev/null <<'YAML'
+# Managed by wow-server-sp-admin. AC_* env vars added/removed via the admin UI.
+services:
+  ac-worldserver:
+    environment: {}
+YAML
+    sudo chown "$(id -u):$(id -g)" "$AC_STACK_DIR/docker-compose.admin.yml"
+    sudo chmod 644 "$AC_STACK_DIR/docker-compose.admin.yml"
+fi
+
+# --- Step 4b: backups dir (rw target for the admin's in-process backup) ---
+# The host's backup.sh cron normally creates this on first run, but the admin
+# needs to write here on day one (Stop/Restart triggers a backup).
+if [ ! -d "$AC_STACK_DIR/backups" ]; then
+    echo "Creating $AC_STACK_DIR/backups/."
+    sudo mkdir -p "$AC_STACK_DIR/backups"
+    sudo chown "$(id -u):$(id -g)" "$AC_STACK_DIR/backups"
+    sudo chmod 700 "$AC_STACK_DIR/backups"
+fi
+
+# --- Step 5: stack dir + snapshots subdir ---
+# snapshots/ is the rw target for admin.yml.bak.<ts> files. It MUST be
+# writable as the same UID/GID that runs the admin container (HOST_UID/GID),
+# because admin.yml writes/snapshots happen as that user.
+sudo mkdir -p "$STACK_DIR" "$STACK_DIR/snapshots"
+sudo chown "$(id -u):$(id -g)" "$STACK_DIR" "$STACK_DIR/snapshots"
+sudo chmod 700 "$STACK_DIR/snapshots"
+
+# --- Step 6: copy compose + dist into stack ---
+cp "$REPO_DIR/docker-compose.yml" "$STACK_DIR/"
+rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
+
+# Stage .conf.dist files under build/ so the Dockerfile can `COPY dist/`.
+mkdir -p "$STACK_DIR/build/dist"
+cp "$REPO_DIR/../docs/configs/"*.conf.dist "$STACK_DIR/build/dist/"
+
+# Vendor HTMX core + the SSE extension (one-time fetch). Both are referenced
+# in base.html from Task 4 -- vendoring both up-front means base.html never
+# 404s during Phase A/B/C even though the SSE-consuming UI lands in Phase D.
+HTMX_VERSION=2.0.3
+HTMX_SSE_VERSION=2.2.2
+curl -sSfL -o "$STACK_DIR/build/app/static/htmx.min.js" \
+    "https://unpkg.com/htmx.org@${HTMX_VERSION}/dist/htmx.min.js"
+# Upstream `htmx-ext-sse` ships `sse.js` (unminified) at the version-pinned
+# path; save it as `htmx-sse.js` (no `.min`) so the filename is honest.
+curl -sSfL -o "$STACK_DIR/build/app/static/htmx-sse.js" \
+    "https://unpkg.com/htmx-ext-sse@${HTMX_SSE_VERSION}/sse.js"
+
+# --- Step 7: write .env ---
+cat > "$STACK_DIR/.env" <<EOF
+TAILSCALE_IP=$TAILSCALE_IP
+ADMIN_PORT=$ADMIN_PORT
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+EOF
+chmod 600 "$STACK_DIR/.env"
+
+# --- Step 8: build image and bring up ---
+cd "$STACK_DIR"
+docker compose --project-directory "$STACK_DIR/build" --env-file "$STACK_DIR/.env" build
+docker compose --env-file "$STACK_DIR/.env" up -d
+
+echo ""
+echo "Admin app starting at http://${TAILSCALE_IP}:${ADMIN_PORT}/"
+echo "Verify with: $REPO_DIR/scripts/verify-azerothcore-admin.sh"
