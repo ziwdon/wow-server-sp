@@ -62,7 +62,7 @@ def tail_filtered(
             if len(keep) >= n:
                 return keep[-n:]
 
-    lines = _decode_tail(chunks, 0)
+    lines = _decode_tail(chunks, offset)
     keep = [line for line in lines if not _is_benign(line)]
     return keep[-n:]
 
