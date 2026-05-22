@@ -9,9 +9,9 @@
 </div>
 <div class="log-errors-bar {% if errors_size == 0 %}clean{% else %}dirty{% endif %}">
   {% if errors_size == 0 %}
-  <span class="dot"></span> Errors.log: {{ errors_size }} bytes (clean)
+  <span class="errors-dot"></span> Errors.log: {{ errors_size }} bytes (clean)
   {% else %}
-  <span class="dot"></span> Errors.log: {{ errors_size }} bytes
+  <span class="errors-dot"></span> Errors.log: {{ errors_size }} bytes
   {% endif %}
 </div>
 <pre id="server-log" class="logview">{{ server_lines|join('\n') }}</pre>

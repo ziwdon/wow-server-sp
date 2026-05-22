@@ -3,11 +3,11 @@
   --panel-bg:    #1e1a0e;
   --sidebar-bg:  #19160b;
   --border:      #3a2e18;
-  --border-dark: var(--border-dark);
+  --border-dark: #2a2418;
   --gold:        #c8922a;
   --gold-bright: #ffd060;
   --text:        #e8dcc8;
-  --text-warm:   var(--text-warm);
+  --text-warm:   #c8b890;
   --text-muted:  #888070;
   --text-dim:    #55504a;
   --green:       #88c870;
@@ -133,6 +133,9 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .btn-green  { background: #0e1f0e; border-color: #2a6a1a;      color: var(--green); }
 .btn-danger { background: #1f0e0e; border-color: #6a1a1a;      color: var(--red); }
 .btn-muted  { background: none;    border-color: var(--border); color: var(--text-muted); }
+.btn-apply  { background: #2a2010; border-color: var(--gold);   color: var(--gold-bright); width: 100%; }
+.btn-apply:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-rollback { background: none;  border-color: var(--border); color: var(--text-muted);  width: 100%; }
 .btn-sm {
   font-size: 0.75rem;
   padding: 2px 8px;
@@ -267,7 +270,7 @@ pre.logview {
   overflow-y: auto;
 }
 .sidebar-section { display: flex; flex-direction: column; gap: 0.4rem; }
-.sidebar-section-label {
+.sidebar-label {
   font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
