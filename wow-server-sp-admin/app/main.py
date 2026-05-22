@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import datetime as dt
+import re
 
 from app.services import backups as backups_svc
 from app.services import db_stats
@@ -98,7 +99,7 @@ async def api_status(request: Request) -> HTMLResponse:
         {
             "request": request,
             "status": info.status,
-            "started_at": info.started_at,
+            "started_at_human": _format_started_at(info.started_at),
             "exit_code": info.exit_code,
         },
     )
@@ -119,6 +120,19 @@ def _humanize_uptime(started_at: str | None) -> str:
     hours, rem = divmod(int(delta.total_seconds()), 3600)
     minutes = rem // 60
     return f"{hours}h {minutes}m"
+
+
+def _format_started_at(s: str | None) -> str:
+    if not s:
+        return "—"
+    try:
+        # Docker timestamps use nanosecond precision; fromisoformat only handles
+        # up to microseconds. Truncate any extra sub-second digits.
+        truncated = re.sub(r'(\.\d{6})\d+', r'\1', s).replace('Z', '+00:00')
+        started = dt.datetime.fromisoformat(truncated)
+        return started.strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, AttributeError):
+        return "—"
 
 
 @app.get("/api/stats", response_class=HTMLResponse)
