@@ -17,22 +17,18 @@
   </div>
   <div class="nav-right">
     <span id="last-refresh"></span>
-    <span id="nav-status-pill" class="status-pill">● —</span>
+    <span id="nav-status-pill"
+          class="status-pill"
+          hx-get="/api/status"
+          hx-trigger="load, every 60s"
+          hx-select=".stat-card-status"
+          hx-swap="outerHTML">● —</span>
   </div>
 </nav>
 <main>{% block main %}{% endblock %}</main>
 <script>
   document.addEventListener('htmx:afterSwap', function(e) {
     if (e.detail.target && e.detail.target.id === 'status') {
-      const card = document.getElementById('status');
-      if (!card) return;
-      const val = card.querySelector('.stat-value');
-      const pill = document.getElementById('nav-status-pill');
-      if (val && pill) {
-        const cls = Array.from(val.classList).find(c => c.startsWith('status-'));
-        pill.textContent = '● ' + (val.textContent.trim());
-        pill.className = 'status-pill' + (cls ? ' ' + cls : '');
-      }
       const now = new Date();
       const ts = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
       const ref = document.getElementById('last-refresh');
