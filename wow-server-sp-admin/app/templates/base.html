@@ -21,12 +21,24 @@
           class="status-pill"
           hx-get="/api/status"
           hx-trigger="load, every 60s"
-          hx-select=".stat-card-status"
-          hx-swap="outerHTML">● —</span>
+          hx-swap="none">● —</span>
   </div>
 </nav>
 <main>{% block main %}{% endblock %}</main>
 <script>
+  document.addEventListener('htmx:afterRequest', function(e) {
+    if (e.detail.elt && e.detail.elt.id === 'nav-status-pill') {
+      var tmp = document.createElement('div');
+      tmp.innerHTML = e.detail.xhr.responseText;
+      var statusEl = tmp.querySelector('[class*="status-"]');
+      var pill = document.getElementById('nav-status-pill');
+      if (statusEl && pill) {
+        pill.textContent = '● ' + statusEl.textContent.trim().replace(/^[●\s]+/, '');
+        var statusCls = Array.from(statusEl.classList).find(function(c) { return c.startsWith('status-') && c !== 'status-pill'; });
+        pill.className = 'status-pill' + (statusCls ? ' ' + statusCls : '');
+      }
+    }
+  });
   document.addEventListener('htmx:afterSwap', function(e) {
     if (e.detail.target && e.detail.target.id === 'status') {
       const now = new Date();
