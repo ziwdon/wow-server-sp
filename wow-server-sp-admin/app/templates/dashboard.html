@@ -1,48 +1,70 @@
 {% extends "base.html" %}
 {% block main %}
-<section class="grid">
-  <div id="status" hx-get="/api/status" hx-trigger="load, every 60s">
-    <p>Loading status...</p>
-  </div>
-  <div id="stats" hx-get="/api/stats" hx-trigger="load, every 60s">
-    <p>Loading stats...</p>
-  </div>
-  <div id="players" hx-get="/api/players" hx-trigger="load, every 60s">
-    <p>Loading player counts...</p>
-  </div>
-  <div id="logs" hx-get="/api/logs" hx-trigger="load">
-    <p>Loading logs...</p>
-  </div>
-  <div id="backups" hx-get="/api/backups" hx-trigger="load, every 60s">
-    <p>Loading backup status...</p>
-  </div>
-</section>
+<div class="dashboard-content">
 
-<section class="actions">
-  <button hx-post="/api/action/stop"
-          hx-confirm="Stop the server? Players get a 30-second warning, then saveall + clean shutdown + backup."
-          hx-swap="none">Stop</button>
-  <button hx-post="/api/action/restart"
-          hx-confirm="Restart the server? Same shutdown path as Stop, then start."
-          hx-swap="none">Restart</button>
-  <button hx-post="/api/action/start"
-          hx-confirm="Start the server?"
-          hx-swap="none">Start</button>
-  <button hx-post="/api/action/force-stop"
-          hx-confirm="FORCE STOP — no notify, no saveall, no backup. Only use if soft stop is hung. Continue?"
-          hx-swap="none" class="danger">Force stop</button>
-</section>
+  <div class="stat-row">
+    <div id="status" hx-get="/api/status" hx-trigger="load, every 60s">
+      <div class="stat-card"><div class="stat-label">Server Status</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+    </div>
+    <div id="stats" hx-get="/api/stats" hx-trigger="load, every 60s">
+      <div class="stat-card"><div class="stat-label">Resources</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+    </div>
+    <div id="players" hx-get="/api/players" hx-trigger="load, every 60s">
+      <div class="stat-card"><div class="stat-label">Online</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+    </div>
+    <div id="backups" hx-get="/api/backups" hx-trigger="load, every 60s">
+      <div class="stat-card"><div class="stat-label">Last Backup</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+    </div>
+  </div>
 
-<section>
-  <h2>Action log</h2>
-  <ul id="action-log"
-      hx-ext="sse"
-      sse-connect="/api/action/stream"
-      sse-swap="progress,done"
-      hx-swap="beforeend">
-    <!-- The initial idle/replay event fills this; subsequent progress events append. -->
-  </ul>
-</section>
+  <div class="action-bar">
+    <button class="btn btn-green"
+            hx-post="/api/action/start"
+            hx-confirm="Start the server?"
+            hx-swap="none">Start</button>
+    <button class="btn btn-gold"
+            hx-post="/api/action/restart"
+            hx-confirm="Restart the server? Same shutdown path as Stop, then start."
+            hx-swap="none">Restart</button>
+    <button class="btn btn-gold"
+            hx-post="/api/action/stop"
+            hx-confirm="Stop the server? Players get a 30-second warning, then saveall + clean shutdown + backup."
+            hx-swap="none">Stop</button>
+    <div class="action-divider"></div>
+    <button class="btn btn-danger"
+            hx-post="/api/action/force-stop"
+            hx-confirm="FORCE STOP — no notify, no saveall, no backup. Only use if soft stop is hung. Continue?"
+            hx-swap="none">Force Stop</button>
+  </div>
 
-<nav><a href="/settings">Settings →</a></nav>
+  <div class="lower-grid">
+    <div id="logs" class="panel" hx-get="/api/logs" hx-trigger="load">
+      <div class="stat-card"><div class="stat-label">Logs</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Server Activity</span>
+      </div>
+      <div class="panel-body">
+        <ul id="action-log"
+            hx-ext="sse"
+            sse-connect="/api/action/stream"
+            sse-swap="progress,done"
+            hx-swap="beforeend">
+        </ul>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script>
+function switchLog(btn, targetId) {
+  document.querySelectorAll('.log-tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.logview').forEach(function(p) { p.style.display = 'none'; });
+  btn.classList.add('active');
+  var el = document.getElementById(targetId);
+  if (el) el.style.display = '';
+}
+</script>
 {% endblock %}
