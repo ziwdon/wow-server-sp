@@ -194,7 +194,9 @@ async def api_backups(request: Request) -> HTMLResponse:
     )
     human = None
     if s.last_backup_unix:
-        human = dt.datetime.fromtimestamp(s.last_backup_unix).strftime("%Y-%m-%d %H:%M")
+        human = dt.datetime.fromtimestamp(
+            s.last_backup_unix, tz=dt.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
     return templates.TemplateResponse(
         "partials/backups.html",
         {
