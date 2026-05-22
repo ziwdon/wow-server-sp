@@ -108,6 +108,10 @@ def list_keys_resolved() -> list[dict]:
     s = get_state()
 
     # mtime-based cache: recompute only when override_yml or admin_yml changes.
+    # conf files under configs_dir are intentionally excluded — the admin
+    # container mounts /ac/ read-only (except admin.yml and backups/), so
+    # conf files can only change via the host installer, which requires a
+    # full restart anyway.
     current_mtimes = {
         str(s.override_yml): (
             s.override_yml.stat().st_mtime if s.override_yml.exists() else 0.0
@@ -149,6 +153,9 @@ def list_keys_resolved() -> list[dict]:
             }
         )
 
+    # Two separate assignments are not atomic under multi-worker deployments,
+    # but the worst case (concurrent recompute) is a harmless redundant read.
+    # The app runs as a single uvicorn worker; no lock needed here.
     s._keys_cache = out
     s._keys_cache_mtimes = current_mtimes
     return out
