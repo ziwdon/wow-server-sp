@@ -185,6 +185,8 @@ These are the cross-cutting invariants of `wow-server-sp-admin/` you need to kno
 
 **`settings.js` source-file checkbox selector is `.check-group input[type=checkbox][value]`.** The sidebar class changed from `.settings-filters` to `.settings-sidebar` / `.check-group` in the UI overhaul. If you add new sidebar checkboxes that should trigger a re-render, put them inside `.check-group` or wire them up separately — the current selector only catches `.check-group` children.
 
+**Settings page defaults to "Show only modified" on load.** The `only-modified` checkbox carries `checked` in `settings.html`, so `_render()` runs with `modifiedOnly = true` on the first paint — only keys with `source === 'admin'` or `source === 'installer'` are shown. There is no "Show all keys" toggle and no `COMMON_KEYS` curated list; unchecking "Show only modified" shows the full ~1874-key index. When the filter is active and no modified keys exist, the list renders a single `.empty-state` paragraph instead of going blank — do not interpret an empty list on a fresh install as a rendering bug. The pending-count badge and Apply button are updated before the empty-state early return so they always reflect the true pending state regardless of filter output.
+
 ## Reference docs
 
 The `docs/` directory contains offline reference material. Consult it whenever you need to understand configuration options, verify a setting, or figure out how to do something with any of the modules.
