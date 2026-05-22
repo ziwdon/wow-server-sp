@@ -52,3 +52,14 @@ def test_tail_filtered_drops_partial_line_when_max_bytes_reached(tmp_path):
     assert tail_filtered(p, n=5, max_bytes=len(tail_window)) == [
         "recent complete line"
     ]
+
+
+def test_tail_filtered_keeps_line_when_max_bytes_starts_at_boundary(tmp_path):
+    p = tmp_path / "Server.log"
+    tail_window = "first complete\nsecond complete\n"
+    p.write_text("older\n" + tail_window)
+
+    assert tail_filtered(p, n=5, max_bytes=len(tail_window)) == [
+        "first complete",
+        "second complete",
+    ]

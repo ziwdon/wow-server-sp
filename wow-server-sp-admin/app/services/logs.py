@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import BinaryIO
 
 BENIGN_PATTERNS = [
     re.compile(r"mysql: \[Warning\] Using a password on the command line"),
@@ -25,10 +26,17 @@ def _is_benign(line: str) -> bool:
     return any(p.search(line) for p in BENIGN_PATTERNS)
 
 
-def _decode_tail(chunks: list[bytes], offset: int) -> list[str]:
+def _starts_at_line_boundary(f: BinaryIO, offset: int) -> bool:
+    if offset == 0:
+        return True
+    f.seek(offset - 1)
+    return f.read(1) == b"\n"
+
+
+def _decode_tail(chunks: list[bytes], starts_at_line_boundary: bool) -> list[str]:
     data = b"".join(reversed(chunks))
     lines = data.decode("utf-8", errors="replace").splitlines()
-    if offset > 0 and lines:
+    if not starts_at_line_boundary and lines:
         return lines[1:]
     return lines
 
@@ -46,6 +54,7 @@ def tail_filtered(
 
     chunks: list[bytes] = []
     bytes_read = 0
+    starts_at_line_boundary = True
     with path.open("rb") as f:
         f.seek(0, 2)
         offset = f.tell()
@@ -57,12 +66,13 @@ def tail_filtered(
             chunks.append(f.read(read_size))
             bytes_read += read_size
 
-            lines = _decode_tail(chunks, offset)
+            starts_at_line_boundary = _starts_at_line_boundary(f, offset)
+            lines = _decode_tail(chunks, starts_at_line_boundary)
             keep = [line for line in lines if not _is_benign(line)]
             if len(keep) >= n:
                 return keep[-n:]
 
-    lines = _decode_tail(chunks, offset)
+    lines = _decode_tail(chunks, starts_at_line_boundary)
     keep = [line for line in lines if not _is_benign(line)]
     return keep[-n:]
 
