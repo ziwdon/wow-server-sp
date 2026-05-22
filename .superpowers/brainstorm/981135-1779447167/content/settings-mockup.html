@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings Mockup</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: #12100a;
+    color: #e8dcc8;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  nav.topnav {
+    background: #1a1508;
+    border-bottom: 2px solid #c8922a;
+    padding: 0 1.5rem;
+    display: flex;
+    align-items: center;
+    height: 52px;
+    flex-shrink: 0;
+  }
+  .nav-brand { color: #ffd060; font-weight: bold; font-size: 1.05rem; letter-spacing: 0.03em; margin-right: 2rem; white-space: nowrap; }
+  .nav-brand span { color: #c8922a; font-size: 1.1em; }
+  .nav-links { display: flex; }
+  .nav-link { color: #c8b890; text-decoration: none; padding: 0 1.1rem; height: 52px; display: flex; align-items: center; font-size: 0.92rem; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+  .nav-link.active { color: #ffd060; border-bottom-color: #ffd060; }
+  .nav-status { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; }
+  .status-pill { padding: 3px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+  .status-pill.running { background: #0e1f0e; border: 1px solid #2a5a1a; color: #88c870; }
+  .nav-refresh { color: #888070; font-size: 0.75rem; }
+
+  /* ── Page layout ── */
+  .settings-page {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 240px 1fr 300px;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    background: #19160b;
+    border-right: 1px solid #3a2e18;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow-y: auto;
+  }
+  .sidebar-section { display: flex; flex-direction: column; gap: 0.4rem; }
+  .sidebar-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #c8922a;
+    margin-bottom: 0.15rem;
+  }
+  .search-input {
+    width: 100%;
+    background: #12100a;
+    border: 1px solid #3a2e18;
+    border-radius: 3px;
+    padding: 0.4rem 0.6rem;
+    color: #e8dcc8;
+    font-size: 0.85rem;
+  }
+  .search-input:focus { outline: none; border-color: #c8922a; }
+  .search-input::placeholder { color: #55504a; }
+
+  .check-group { display: flex; flex-direction: column; gap: 0.3rem; background: #12100a; border: 1px solid #3a2e18; border-radius: 3px; padding: 0.5rem 0.6rem; }
+  .check-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #c8b890; white-space: nowrap; cursor: pointer; }
+  .check-item input[type=checkbox] { accent-color: #c8922a; flex-shrink: 0; }
+
+  .toggle-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #c8b890; cursor: pointer; }
+  .toggle-item input[type=checkbox] { accent-color: #c8922a; }
+
+  .result-count { font-size: 0.78rem; color: #888070; }
+
+  .sidebar-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: auto; padding-top: 1rem; border-top: 1px solid #3a2e18; }
+  .btn { padding: 0.45rem 1rem; border-radius: 3px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: 1px solid; width: 100%; text-align: center; }
+  .btn-apply { background: #2a2010; border-color: #c8922a; color: #ffd060; }
+  .btn-apply:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-rollback { background: #12100a; border-color: #3a2e18; color: #888070; }
+
+  .pending-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #c8922a;
+    color: #12100a;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0 6px;
+    min-width: 18px;
+    height: 18px;
+    margin-left: 0.4rem;
+  }
+
+  /* ── Key list ── */
+  .key-list {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .key-list-header {
+    display: grid;
+    grid-template-columns: 1fr 80px 100px 1fr;
+    gap: 0.5rem;
+    padding: 0.45rem 0.75rem;
+    background: #19160b;
+    border-bottom: 1px solid #3a2e18;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #888070;
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+  }
+  .key-row {
+    display: grid;
+    grid-template-columns: 1fr 80px 100px 1fr;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid #22201a;
+    align-items: center;
+    font-size: 0.83rem;
+    cursor: pointer;
+  }
+  .key-row:hover { background: #211e12; }
+  .key-row.selected { background: #2a2412; border-left: 2px solid #c8922a; }
+  .key-row.modified { background: #1a1f0e; }
+  .key-name { font-family: 'Consolas', 'Menlo', monospace; color: #e8dcc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .key-source { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .source-default { color: #55504a; }
+  .source-installer { color: #7ab0e0; }
+  .source-admin { color: #88c870; }
+  .key-badge { font-size: 0.68rem; padding: 1px 6px; border-radius: 10px; border: 1px solid #3a2e18; color: #888070; background: #19160b; white-space: nowrap; }
+  .key-input-cell { display: flex; align-items: center; }
+  .key-input {
+    width: 100%;
+    background: #12100a;
+    border: 1px solid #2a2418;
+    border-radius: 3px;
+    padding: 3px 6px;
+    color: #e8dcc8;
+    font-family: 'Consolas', 'Menlo', monospace;
+    font-size: 0.82rem;
+  }
+  .key-input:focus { outline: none; border-color: #c8922a; }
+  .key-input.readonly { background: #19160b; color: #55504a; cursor: not-allowed; border-color: #2a2418; }
+  .key-input.modified { border-color: #88c870; background: #0e1a0a; }
+
+  /* ── Detail panel ── */
+  .detail-panel {
+    background: #19160b;
+    border-left: 1px solid #3a2e18;
+    padding: 1rem 1.1rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .detail-key-name {
+    font-family: 'Consolas', 'Menlo', monospace;
+    font-size: 0.95rem;
+    color: #ffd060;
+    font-weight: 600;
+    word-break: break-all;
+  }
+  .detail-env-var {
+    font-family: 'Consolas', 'Menlo', monospace;
+    font-size: 0.78rem;
+    color: #7ab0e0;
+    word-break: break-all;
+  }
+  .detail-row { display: flex; flex-direction: column; gap: 0.15rem; }
+  .detail-row-label { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #c8922a; }
+  .detail-row-value { font-family: 'Consolas', 'Menlo', monospace; font-size: 0.82rem; color: #c8b890; }
+  .detail-comment {
+    font-size: 0.8rem;
+    color: #888070;
+    line-height: 1.5;
+    background: #12100a;
+    border: 1px solid #2a2418;
+    border-radius: 3px;
+    padding: 0.5rem 0.7rem;
+    font-family: 'Consolas', 'Menlo', monospace;
+    white-space: pre-wrap;
+  }
+  .detail-placeholder { color: #55504a; font-size: 0.88rem; margin: auto; text-align: center; padding: 2rem 1rem; }
+
+  .mockup-note { background: #1a1f2e; border: 1px solid #3a4a6a; border-radius: 4px; padding: 0.5rem 1rem; font-size: 0.8rem; color: #8888cc; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<div class="mockup-note" style="margin:0.5rem 1rem;">📐 Settings mockup — static preview. Sidebar is now wide enough for all labels. Click a row to see the detail panel concept. Tell me what you'd change.</div>
+
+<nav class="topnav">
+  <div class="nav-brand"><span>⚔</span> AzerothCore Admin</div>
+  <div class="nav-links">
+    <a class="nav-link" href="#">Dashboard</a>
+    <a class="nav-link active" href="#">Settings</a>
+  </div>
+  <div class="nav-status">
+    <span class="nav-refresh">Last refresh: 14:32</span>
+    <span class="status-pill running">● RUNNING</span>
+  </div>
+</nav>
+
+<div class="settings-page">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Search</div>
+      <input class="search-input" type="text" placeholder="Key, value, or comment…">
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Source file</div>
+      <div class="check-group">
+        <label class="check-item"><input type="checkbox" checked> worldserver</label>
+        <label class="check-item"><input type="checkbox" checked> playerbots</label>
+        <label class="check-item"><input type="checkbox" checked> mod_ahbot</label>
+        <label class="check-item"><input type="checkbox" checked> individualProgression</label>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Filter</div>
+      <label class="toggle-item"><input type="checkbox"> Show only modified</label>
+      <label class="toggle-item" style="margin-top:0.3rem;"><input type="checkbox"> Show all keys <span style="font-size:0.75rem;color:#55504a;">(default: common only)</span></label>
+    </div>
+
+    <div class="result-count">42 keys shown</div>
+
+    <div class="sidebar-actions">
+      <button class="btn btn-apply">Apply <span class="pending-badge">3</span></button>
+      <button class="btn btn-rollback">Rollback last apply</button>
+    </div>
+  </aside>
+
+  <!-- Key list -->
+  <div class="key-list">
+    <div class="key-list-header">
+      <span>Key</span>
+      <span>Source</span>
+      <span>Flags</span>
+      <span>Value</span>
+    </div>
+
+    <div class="key-row">
+      <span class="key-name">AiPlayerbot.Enabled</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="1"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">AiPlayerbot.MinRandomBots</span>
+      <span class="key-source source-admin">admin</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input modified" value="200"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">AiPlayerbot.MaxRandomBots</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="250"></div>
+    </div>
+    <div class="key-row selected">
+      <span class="key-name">AiPlayerbot.DisabledWithoutRealPlayer</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="1"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">AuctionHouseBot.GUIDs</span>
+      <span class="key-source source-installer">installer</span>
+      <span><span class="key-badge">installer-managed</span></span>
+      <div class="key-input-cell"><input class="key-input readonly" value="12345,12346,12347" readonly></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">AuctionHouseBot.EnableSeller</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="1"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">Rate.XP.Kill</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="3"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">Rate.XP.Quest</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input modified" value="5"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">GameType</span>
+      <span class="key-source source-default">default</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="0"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">PlayerLimit</span>
+      <span class="key-source source-default">default</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input" value="100"></div>
+    </div>
+    <div class="key-row">
+      <span class="key-name">ProgressionSystem.Enabled</span>
+      <span class="key-source source-installer">installer</span>
+      <span></span>
+      <div class="key-input-cell"><input class="key-input modified" value="0"></div>
+    </div>
+  </div>
+
+  <!-- Detail panel -->
+  <aside class="detail-panel">
+    <div class="detail-key-name">AiPlayerbot.DisabledWithoutRealPlayer</div>
+    <div class="detail-env-var">AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER</div>
+
+    <div class="detail-row">
+      <div class="detail-row-label">Effective value</div>
+      <div class="detail-row-value">1 <span style="color:#55504a;">(from installer)</span></div>
+    </div>
+    <div class="detail-row">
+      <div class="detail-row-label">Default</div>
+      <div class="detail-row-value">0 <span style="color:#55504a;">(type: int)</span></div>
+    </div>
+
+    <div class="detail-row">
+      <div class="detail-row-label">Description</div>
+      <div class="detail-comment">Disable random bots when no real
+player is online. Set to 1 to
+conserve resources when the
+server is idle.</div>
+    </div>
+  </aside>
+
+</div>
+
+</body>
+</html>

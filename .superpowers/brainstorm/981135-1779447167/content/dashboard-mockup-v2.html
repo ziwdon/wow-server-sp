@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard Mockup v2</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: #12100a;
+    color: #e8dcc8;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  nav.topnav {
+    background: #1a1508;
+    border-bottom: 2px solid #c8922a;
+    padding: 0 1.5rem;
+    display: flex;
+    align-items: center;
+    height: 52px;
+    flex-shrink: 0;
+  }
+  .nav-brand { color: #ffd060; font-weight: bold; font-size: 1.05rem; letter-spacing: 0.03em; margin-right: 2rem; white-space: nowrap; }
+  .nav-brand span { color: #c8922a; font-size: 1.1em; }
+  .nav-links { display: flex; gap: 0; }
+  .nav-link { color: #c8b890; text-decoration: none; padding: 0 1.1rem; height: 52px; display: flex; align-items: center; font-size: 0.92rem; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+  .nav-link.active { color: #ffd060; border-bottom-color: #ffd060; }
+  .nav-status { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; }
+  .status-pill { padding: 3px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; }
+  .status-pill.running { background: #0e1f0e; border: 1px solid #2a5a1a; color: #88c870; }
+  .nav-refresh { color: #888070; font-size: 0.75rem; }
+  main { flex: 1; padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 1rem; }
+  .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; }
+  .stat-card { background: #1e1a0e; border: 1px solid #3a2e18; border-top: 2px solid #c8922a; border-radius: 4px; padding: 0.75rem 1rem; }
+  .stat-card .label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #c8922a; margin-bottom: 0.35rem; }
+  .stat-card .value { font-size: 1.05rem; color: #e8dcc8; font-weight: 600; }
+  .stat-card .sub { font-size: 0.78rem; color: #888070; margin-top: 0.2rem; }
+  .value.running { color: #88c870; }
+  .action-bar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .action-bar .section-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #888070; margin-right: 0.25rem; }
+  .btn { padding: 0.45rem 1.1rem; border-radius: 3px; font-size: 0.88rem; font-weight: 600; cursor: pointer; border: 1px solid; letter-spacing: 0.02em; }
+  .btn-gold { background: #2a2010; border-color: #c8922a; color: #ffd060; }
+  .btn-green { background: #0e1f0e; border-color: #2a6a1a; color: #88c870; }
+  .btn-danger { background: #1f0e0e; border-color: #6a1a1a; color: #c85050; }
+  .lower-grid { display: grid; grid-template-columns: 1fr 340px; gap: 0.75rem; flex: 1; min-height: 0; }
+  .panel { background: #1e1a0e; border: 1px solid #3a2e18; border-radius: 4px; display: flex; flex-direction: column; overflow: hidden; }
+  .panel-header { padding: 0.6rem 1rem; border-bottom: 1px solid #3a2e18; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+  .panel-title { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #c8922a; }
+  .panel-action { font-size: 0.75rem; cursor: pointer; background: none; border: 1px solid #3a2e18; padding: 2px 8px; border-radius: 3px; color: #c8b890; }
+  .log-tabs { display: flex; border-bottom: 1px solid #3a2e18; background: #19160b; flex-shrink: 0; }
+  .log-tab { padding: 0.4rem 1rem; font-size: 0.78rem; color: #888070; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .log-tab.active { color: #ffd060; border-bottom-color: #c8922a; }
+  .log-errors-bar { padding: 0.4rem 1rem; background: #0e1f0e; border-bottom: 1px solid #2a3a1a; font-size: 0.8rem; color: #88c870; flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
+  .log-errors-bar .dot { width: 7px; height: 7px; border-radius: 50%; background: #88c870; display: inline-block; }
+  pre.logview { font-family: 'Consolas', 'Menlo', monospace; font-size: 0.78rem; color: #c8b890; padding: 0.75rem 1rem; white-space: pre-wrap; overflow-y: auto; flex: 1; line-height: 1.5; background: #15130a; min-height: 260px; }
+  .activity-list { list-style: none; font-family: 'Consolas', 'Menlo', monospace; font-size: 0.8rem; }
+  .activity-list li { padding: 0.25rem 0; border-bottom: 1px solid #2a2418; color: #c8b890; }
+  .activity-list li:last-child { border-bottom: none; }
+  .activity-list .step-name { color: #c8922a; font-weight: bold; }
+  .activity-list .step-done { color: #88c870; }
+  footer.refresh-footer { font-size: 0.75rem; color: #55504a; text-align: right; padding: 0.5rem 1.5rem; border-top: 1px solid #2a2418; background: #15130a; }
+  .mockup-note { background: #1a1f2e; border: 1px solid #3a4a6a; border-radius: 4px; padding: 0.6rem 1rem; font-size: 0.8rem; color: #8888cc; margin-bottom: 0.5rem; }
+  .divider { width: 1px; height: 20px; background: #3a2e18; margin: 0 0.25rem; }
+</style>
+</head>
+<body>
+
+<div class="mockup-note" style="margin:0.75rem 1.5rem 0;">📐 Dashboard mockup v2 — buttons reordered: Start → Restart → Stop → Force Stop</div>
+
+<nav class="topnav">
+  <div class="nav-brand"><span>⚔</span> AzerothCore Admin</div>
+  <div class="nav-links">
+    <a class="nav-link active" href="#">Dashboard</a>
+    <a class="nav-link" href="#">Settings</a>
+  </div>
+  <div class="nav-status">
+    <span class="nav-refresh">Last refresh: 14:32</span>
+    <span class="status-pill running">● RUNNING</span>
+  </div>
+</nav>
+
+<main>
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="label">Server Status</div>
+      <div class="value running">Running</div>
+      <div class="sub">Started 2026-05-22 08:14 UTC</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Resources</div>
+      <div class="value">12% CPU · 4.2 / 16 GB</div>
+      <div class="sub">Uptime: 6h 18m</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Online</div>
+      <div class="value">2 real · 48 bots</div>
+      <div class="sub">Pool: 250 bot accounts</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Last Backup</div>
+      <div class="value">2026-05-22 04:00 UTC</div>
+      <div class="sub">Nightly cron · no errors</div>
+    </div>
+  </div>
+
+  <div class="action-bar">
+    <span class="section-label">Actions</span>
+    <button class="btn btn-green">Start</button>
+    <button class="btn btn-gold">Restart</button>
+    <button class="btn btn-gold">Stop</button>
+    <div class="divider"></div>
+    <button class="btn btn-danger">Force Stop</button>
+  </div>
+
+  <div class="lower-grid">
+    <div class="panel logs-panel" style="display:flex;flex-direction:column;">
+      <div class="panel-header">
+        <span class="panel-title">Logs</span>
+        <button class="panel-action">Refresh</button>
+      </div>
+      <div class="log-tabs">
+        <div class="log-tab active">Server.log</div>
+        <div class="log-tab">Playerbots.log</div>
+      </div>
+      <div class="log-errors-bar">
+        <span class="dot"></span>
+        Errors.log: <strong>0 bytes</strong> (clean)
+      </div>
+      <pre class="logview">
+>> Loading SQL updates for 'world' DB...
+>> The file '2024_11_12_00.sql' was applied...
+>> The file '2024_11_13_00.sql' was applied...
+>> Loading SQL updates for 'auth' DB...
+>> auth database is up-to-date!
+>> Loading SQL updates for 'characters' DB...
+>> characters database is up-to-date!
+AzerothCore rev. 2024-11 (Playerbot branch)
+&lt;Ctrl-C to stop&gt;
+WORLD: World Initialized
+      </pre>
+    </div>
+
+    <div class="panel" style="display:flex;flex-direction:column;">
+      <div class="panel-header">
+        <span class="panel-title">Server Activity</span>
+      </div>
+      <div class="panel-body" style="padding:0.5rem 0.75rem;overflow-y:auto;flex:1;">
+        <ul class="activity-list">
+          <li><span class="step-name">restart</span>: announcing shutdown…</li>
+          <li><span class="step-name">restart</span>: saveall…</li>
+          <li><span class="step-name">restart</span>: backup…</li>
+          <li class="step-done">✓ restart: finished OK</li>
+          <li style="color:#55504a;font-size:0.75rem;padding-top:0.35rem;">— 14:28 —</li>
+          <li class="step-done">✓ apply: finished OK</li>
+          <li><span class="step-name">apply</span>: verifying env vars…</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="refresh-footer">Last refreshed: 14:32 · Panels auto-refresh every 60s</footer>
+
+</body>
+</html>

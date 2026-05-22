@@ -1,0 +1,44 @@
+<h2>Three Design Approaches</h2>
+<p class="subtitle">All three keep HTMX + Jinja2 + FastAPI. No backend changes. Pick the scope that feels right.</p>
+
+<div class="options">
+
+  <div class="option" data-choice="minimal" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Minimal Reskin</h3>
+      <p>Apply the WoW Classic gold/brown palette and fix the specific complaints — move Settings into a top nav link, increase the log panel height, widen the settings filter sidebar so checkbox labels don't wrap. The underlying grid layout stays the same; it just looks dramatically better.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Low risk — almost no structural HTML changes</li><li>Easiest to implement and review</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Dashboard panels still follow the auto-fit grid (can produce 2, 3, or 4 columns depending on viewport)</li><li>Action Log section label stays confusing unless explicitly renamed</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="structured" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Structured Redesign <span style="color:#c8a84b;font-size:0.8em;">(Recommended)</span></h3>
+      <p>Top nav bar (Dashboard / Settings + status pill). Dashboard reorganized into a clear hierarchy: a stat-card row at the top (Status, Resources, Players, Backups — fixed 4-column), action button row below it, then a tall full-width Logs panel that gets 40–50% of the vertical space. Action log (SSE stream) renamed to "Server Activity" and placed below the action buttons where it belongs. Full CSS rewrite in WoW Classic palette.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Fixes every pain point mentioned</li><li>Predictable, aligned grid — no more variable column counts</li><li>Logs panel actually usable</li><li>Settings clearly reachable in nav</li><li>Settings sidebar gets wider + checkbox labels fully readable</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>More template edits than option A (still only HTML/CSS/Jinja2 — no Python changes)</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="immersive" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Full Immersive Overhaul</h3>
+      <p>Everything in B, plus: decorative WoW-style panel borders (ornate corners), a background texture, a custom logotype/crest at the top, monospace "console" font for log output, and the settings key-list redesigned as a table with color-coded source badges that are easier to scan.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Maximum WoW atmosphere</li><li>Settings list significantly easier to read</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>Background textures and decorative borders can feel busy or slow down visual scanning of live data</li><li>Most CSS to write — highest risk of regressions if something changes later</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<p class="subtitle" style="margin-top:1.5rem;">My recommendation is <strong>B</strong> — it addresses every listed pain point without going overboard. The WoW Classic palette alone will make it feel very different.</p>

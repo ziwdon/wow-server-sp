@@ -1,0 +1,70 @@
+<h2>Navigation Structure</h2>
+<p class="subtitle">The current app has no real navigation — Settings is a lone link buried below the Action Log. How should the app be structured?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="sidebar" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#1a1a2e;padding:8px;border-radius:4px;font-family:monospace;font-size:11px;color:#ccc;min-height:180px;display:flex;gap:6px;">
+      <div style="width:120px;background:#0f1117;border-right:2px solid #c8a84b;padding:8px;border-radius:3px 0 0 3px;flex-shrink:0;">
+        <div style="color:#c8a84b;font-weight:bold;font-size:12px;margin-bottom:12px;">⚔ AzerothCore</div>
+        <div style="color:#a0c8ff;margin:6px 0;padding:3px 6px;background:#1e2d4a;border-radius:3px;">📊 Dashboard</div>
+        <div style="color:#888;margin:6px 0;padding:3px 6px;">⚙ Settings</div>
+        <div style="color:#888;margin:6px 0;padding:3px 6px;margin-top:auto;">─────</div>
+        <div style="color:#5a7a5a;margin:6px 0;padding:3px 6px;">● Running</div>
+      </div>
+      <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;">
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Status</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Resources</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Players</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Backups</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;grid-column:1/-1;">Logs (tall)</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Sidebar Navigation</h3>
+      <p>Persistent left sidebar with page links + live server status indicator. More room to add pages later. Dashboard fills the remaining width.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="topnav" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#1a1a2e;padding:8px;border-radius:4px;font-family:monospace;font-size:11px;color:#ccc;min-height:180px;">
+      <div style="background:#0f1117;border-bottom:2px solid #c8a84b;padding:6px 10px;display:flex;align-items:center;gap:16px;margin-bottom:6px;border-radius:3px 3px 0 0;">
+        <span style="color:#c8a84b;font-weight:bold;">⚔ AzerothCore</span>
+        <span style="color:#a0c8ff;padding:2px 8px;background:#1e2d4a;border-radius:3px;">Dashboard</span>
+        <span style="color:#888;padding:2px 8px;">Settings</span>
+        <span style="margin-left:auto;color:#5a7a5a;">● Running</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;padding:4px;">
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Status</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Resources</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Players</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Backups</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;grid-column:1/-1;">Logs (tall)</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Top Navigation Bar</h3>
+      <p>Horizontal nav bar with Dashboard / Settings tabs + server status pill on the right. Maximizes vertical space for content. Familiar web-app pattern.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="single" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#1a1a2e;padding:8px;border-radius:4px;font-family:monospace;font-size:11px;color:#ccc;min-height:180px;">
+      <div style="background:#0f1117;border-bottom:2px solid #c8a84b;padding:6px 10px;display:flex;align-items:center;gap:16px;margin-bottom:6px;border-radius:3px 3px 0 0;">
+        <span style="color:#c8a84b;font-weight:bold;">⚔ AzerothCore</span>
+        <span style="margin-left:auto;color:#5a7a5a;">● Running</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px 4px 2px;">
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Status + Controls</div>
+        <div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Resources + Players</div>
+      </div>
+      <div style="padding:4px 4px 2px;"><div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:6px;">Logs (large, dominant)</div></div>
+      <div style="padding:2px 4px;"><div style="background:#0f1117;border:1px solid #2a3a2a;border-radius:3px;padding:3px 6px;font-size:10px;color:#c8a84b;cursor:pointer;">⚙ Settings panel (expandable inline)</div></div>
+    </div>
+    <div class="card-body">
+      <h3>C — Single-Page with Expandable Settings</h3>
+      <p>No separate settings page — a drawer/accordion expands in-place. Simpler mental model for a single-user tool, but settings panel may feel cramped inline.</p>
+    </div>
+  </div>
+
+</div>
