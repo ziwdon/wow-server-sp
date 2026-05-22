@@ -3,9 +3,11 @@
   --panel-bg:    #1e1a0e;
   --sidebar-bg:  #19160b;
   --border:      #3a2e18;
+  --border-dark: var(--border-dark);
   --gold:        #c8922a;
   --gold-bright: #ffd060;
   --text:        #e8dcc8;
+  --text-warm:   var(--text-warm);
   --text-muted:  #888070;
   --text-dim:    #55504a;
   --green:       #88c870;
@@ -48,7 +50,7 @@ nav.topnav {
 .nav-icon { color: var(--gold); }
 .nav-links { display: flex; }
 .nav-link {
-  color: #c8b890;
+  color: var(--text-warm);
   text-decoration: none;
   padding: 0 1.1rem;
   height: 52px;
@@ -125,7 +127,6 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   cursor: pointer;
   border: 1px solid;
   letter-spacing: 0.02em;
-  background: none;
 }
 .btn:hover { opacity: 0.85; }
 .btn-gold   { background: #2a2010; border-color: var(--gold);  color: var(--gold-bright); }
@@ -139,7 +140,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   cursor: pointer;
   background: none;
   border: 1px solid var(--border);
-  color: #c8b890;
+  color: var(--text-warm);
 }
 
 /* ── Lower grid ── */
@@ -217,14 +218,14 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 pre.logview {
   font-family: 'Consolas', 'Menlo', monospace;
   font-size: 0.78rem;
-  color: #c8b890;
+  color: var(--text-warm);
   padding: 0.75rem 1rem;
   white-space: pre-wrap;
   overflow-y: auto;
   flex: 1;
   line-height: 1.5;
   background: var(--log-bg);
-  min-height: 240px;
+  min-height: 0;
 }
 
 /* ── Server Activity ── */
@@ -233,7 +234,7 @@ pre.logview {
   font-family: 'Consolas', 'Menlo', monospace;
   font-size: 0.8rem;
 }
-#action-log li { padding: 0.25rem 0; border-bottom: 1px solid #2a2418; color: #c8b890; }
+#action-log li { padding: 0.25rem 0; border-bottom: 1px solid var(--border-dark); color: var(--text-warm); }
 #action-log li:last-child { border-bottom: none; }
 .step-done { color: var(--green); font-weight: bold; }
 .action-done.action-ok    { color: var(--green); }
@@ -298,7 +299,7 @@ pre.logview {
   align-items: center;
   gap: 0.5rem;
   font-size: 0.85rem;
-  color: #c8b890;
+  color: var(--text-warm);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -308,7 +309,7 @@ pre.logview {
   align-items: flex-start;
   gap: 0.5rem;
   font-size: 0.85rem;
-  color: #c8b890;
+  color: var(--text-warm);
   cursor: pointer;
 }
 .toggle-item input[type=checkbox] { accent-color: var(--gold); flex-shrink: 0; margin-top: 2px; }
@@ -411,7 +412,7 @@ pre.logview {
 .key-input {
   width: 100%;
   background: var(--input-bg);
-  border: 1px solid #2a2418;
+  border: 1px solid var(--border-dark);
   border-radius: 3px;
   padding: 3px 6px;
   color: var(--text);
@@ -452,14 +453,14 @@ pre.logview {
   letter-spacing: 0.08em;
   color: var(--gold);
 }
-.detail-section-value { font-family: 'Consolas', 'Menlo', monospace; font-size: 0.82rem; color: #c8b890; }
+.detail-section-value { font-family: 'Consolas', 'Menlo', monospace; font-size: 0.82rem; color: var(--text-warm); }
 .detail-from { color: var(--text-dim); }
 .detail-comment {
   font-size: 0.8rem;
   color: var(--text-muted);
   line-height: 1.5;
   background: var(--input-bg);
-  border: 1px solid #2a2418;
+  border: 1px solid var(--border-dark);
   border-radius: 3px;
   padding: 0.5rem 0.7rem;
   font-family: 'Consolas', 'Menlo', monospace;
@@ -489,11 +490,11 @@ pre.logview {
   white-space: pre-wrap;
   max-height: 20rem;
   overflow-y: auto;
-  color: #c8b890;
+  color: var(--text-warm);
 }
 .dialog-actions { display: flex; gap: 0.5rem; }
 
 /* Verify failed */
 .verify-failed { margin: 0.5rem 0; padding-left: 1.5rem; color: var(--red); }
 .verify-failed code { font-family: 'Consolas', 'Menlo', monospace; }
-.vf-key { color: #666; font-size: 0.9em; }
+.vf-key { color: var(--text-muted); font-size: 0.8rem; }
