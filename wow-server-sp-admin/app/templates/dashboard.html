@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% block main %}
 <section class="grid">
-  <div id="status" hx-get="/api/status" hx-trigger="load, every 5s">
+  <div id="status" hx-get="/api/status" hx-trigger="load, every 60s">
     <p>Loading status...</p>
   </div>
-  <div id="stats" hx-get="/api/stats" hx-trigger="load, every 5s">
+  <div id="stats" hx-get="/api/stats" hx-trigger="load, every 60s">
     <p>Loading stats...</p>
   </div>
-  <div id="players" hx-get="/api/players" hx-trigger="load, every 10s">
+  <div id="players" hx-get="/api/players" hx-trigger="load, every 60s">
     <p>Loading player counts...</p>
   </div>
   <div id="logs" hx-get="/api/logs" hx-trigger="load">
@@ -45,4 +45,14 @@
 </section>
 
 <nav><a href="/settings">Settings →</a></nav>
+
+<footer id="last-refresh">Not yet refreshed</footer>
+<script>
+document.addEventListener('htmx:afterSwap', function () {
+  var now = new Date();
+  var hhmm = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  var el = document.getElementById('last-refresh');
+  if (el) el.textContent = 'Last refreshed: ' + hhmm;
+});
+</script>
 {% endblock %}
