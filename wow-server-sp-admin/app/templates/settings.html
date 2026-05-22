@@ -21,15 +21,8 @@
     <div class="sidebar-section">
       <div class="sidebar-label">Display</div>
       <label class="toggle-item">
-        <input type="checkbox" id="only-modified">
+        <input type="checkbox" id="only-modified" checked>
         <span class="toggle-label-wrap"><span>Show only modified</span></span>
-      </label>
-      <label class="toggle-item">
-        <input type="checkbox" id="show-all">
-        <span class="toggle-label-wrap">
-          <span>Show all keys</span>
-          <span class="toggle-hint">default: common only</span>
-        </span>
       </label>
       <label class="toggle-item">
         <input type="checkbox" id="show-meta">
@@ -67,8 +60,5 @@
     <button class="btn btn-muted" id="apply-cancel">Cancel</button>
   </div>
 </dialog>
-<script>
-window.COMMON_KEYS = {{ common_keys|tojson }};
-</script>
 <script src="/static/settings.js" defer></script>
 {% endblock %}

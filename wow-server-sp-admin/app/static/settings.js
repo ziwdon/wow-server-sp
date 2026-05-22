@@ -15,7 +15,7 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ESC_MAP[c]);
 }
 
-const state = { keys: [], pending: {}, common: new Set(COMMON_KEYS), selected: null };
+const state = { keys: [], pending: {}, selected: null };
 
 async function load() {
   const r = await fetch('/api/keys');
@@ -23,9 +23,8 @@ async function load() {
   render();
 }
 
-function matches(k, q, files, modifiedOnly, showAll) {
+function matches(k, q, files, modifiedOnly) {
   if (!files.has(k.source_file)) return false;
-  if (!showAll && !state.common.has(k.key)) return false;
   if (modifiedOnly && k.source !== 'admin' && k.source !== 'installer') return false;
   if (!q) return true;
   const hay = (k.key + ' ' + k.default + ' ' + k.comment + ' ' + k.env_var).toLowerCase();
@@ -45,12 +44,27 @@ function _render() {
       .filter(c => c.checked).map(c => c.value)
   );
   const modifiedOnly = document.getElementById('only-modified').checked;
-  const showAll = document.getElementById('show-all').checked;
-  const filtered = state.keys.filter(k => matches(k, q, files, modifiedOnly, showAll));
+  const filtered = state.keys.filter(k => matches(k, q, files, modifiedOnly));
   document.getElementById('result-count').textContent = `${filtered.length} keys`;
 
   const list = document.getElementById('key-list');
   list.innerHTML = '';
+
+  const pendingCount = Object.keys(state.pending).length;
+  const badge = document.getElementById('pending-count');
+  if (badge) {
+    badge.textContent = pendingCount;
+    badge.style.display = pendingCount > 0 ? '' : 'none';
+  }
+  document.getElementById('apply-btn').disabled = pendingCount === 0;
+
+  if (filtered.length === 0 && modifiedOnly) {
+    const msg = document.createElement('p');
+    msg.className = 'empty-state';
+    msg.textContent = 'No modified configurations — uncheck "Show only modified" to browse all keys.';
+    list.appendChild(msg);
+    return;
+  }
   filtered.slice(0, 200).forEach(k => {
     const row = document.createElement('div');
     const readOnly = Boolean(k.read_only);
@@ -79,13 +93,6 @@ function _render() {
     more.textContent = `+${filtered.length - 200} more — narrow your search`;
     list.appendChild(more);
   }
-  const pendingCount = Object.keys(state.pending).length;
-  const badge = document.getElementById('pending-count');
-  if (badge) {
-    badge.textContent = pendingCount;
-    badge.style.display = pendingCount > 0 ? '' : 'none';
-  }
-  document.getElementById('apply-btn').disabled = pendingCount === 0;
 }
 
 function selectKey(k) {
@@ -131,7 +138,7 @@ document.addEventListener('change', e => {
   }
 });
 
-['search', 'only-modified', 'show-all'].forEach(id => {
+['search', 'only-modified'].forEach(id => {
   document.getElementById(id).addEventListener('input', render);
 });
 document.querySelectorAll('.check-group input[type=checkbox][value]')
