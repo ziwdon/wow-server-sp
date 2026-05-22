@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -27,6 +27,8 @@ class _State:
     admin: AdminCompose
     _lock: threading.Lock
     _mtimes: dict[Path, float]
+    _keys_cache: list[dict] | None = None
+    _keys_cache_mtimes: dict[str, float] = field(default_factory=dict)
 
 
 _state: _State | None = None
@@ -104,6 +106,19 @@ def _parse_conf_values(configs_dir: Path) -> dict[str, str]:
 def list_keys_resolved() -> list[dict]:
     """Return serializable list of all indexed keys with effective values."""
     s = get_state()
+
+    # mtime-based cache: recompute only when override_yml or admin_yml changes.
+    current_mtimes = {
+        str(s.override_yml): (
+            s.override_yml.stat().st_mtime if s.override_yml.exists() else 0.0
+        ),
+        str(s.admin_yml): (
+            s.admin_yml.stat().st_mtime if s.admin_yml.exists() else 0.0
+        ),
+    }
+    if s._keys_cache is not None and current_mtimes == s._keys_cache_mtimes:
+        return s._keys_cache
+
     override_env = _parse_override_env(s.override_yml)
     admin_env = s.admin.read_env()
     conf_values = _parse_conf_values(s.configs_dir)
@@ -133,6 +148,9 @@ def list_keys_resolved() -> list[dict]:
                 "read_only_reason": reason,
             }
         )
+
+    s._keys_cache = out
+    s._keys_cache_mtimes = current_mtimes
     return out
 
 
