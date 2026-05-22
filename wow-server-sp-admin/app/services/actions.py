@@ -16,6 +16,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import docker
+import docker.errors
+
 from app.services.console import WorldserverConsole
 from app.services.docker_client import WORLDSERVER, inspect_worldserver
 from app.services.env_var import config_key_to_ac_env_var
@@ -147,6 +150,75 @@ def run_stop(
     return ActionResult.OK
 
 
+def _ac_compose_base_args(ac_container_path: Path) -> tuple[list[str], dict[str, str]]:
+    """Build (cmd_args, extra_env) for a `docker compose` call that manages
+    the AC project from inside the admin container.
+
+    The crux: Docker Compose resolves relative bind-mount paths (./data/mysql
+    etc.) relative to the project-directory. Inside the admin container AC's
+    stack is mounted at /ac/ = /opt/stacks/azerothcore on the host. Without an
+    explicit --project-directory, those paths resolve to /ac/... which the host
+    Docker daemon cannot find.  We set --project-directory to the HOST-side path
+    (determined from the admin container's own mount info) so the daemon gets
+    valid paths like /opt/stacks/azerothcore/data/mysql.
+
+    Separately, every AC service has `env_file: ${DOCKER_AC_ENV_FILE:-conf/dist/env.ac}`.
+    With --project-directory pointing to the host path, that relative env_file
+    would also resolve to the host path which is NOT accessible inside the
+    container.  We override DOCKER_AC_ENV_FILE to the absolute /ac/... path in
+    extra_env so the CLI can still read the file.
+
+    Docker Compose does not search for compose files in --project-directory; it
+    looks in CWD (/app/ — no compose files there).  We pass explicit -f args
+    using /ac/... paths, derived from COMPOSE_FILE in /ac/.env.
+    """
+    # Determine host-side AC stack path by inspecting our own container mounts.
+    host_ac_path = "/opt/stacks/azerothcore"  # documented install default
+    try:
+        client = docker.from_env()
+        me = client.containers.get("azerothcore-admin")
+        for m in me.attrs.get("Mounts", []):
+            if m.get("Destination") == "/ac":
+                found = m.get("Source", "").strip()
+                if found:
+                    host_ac_path = found
+                    break
+    except Exception:  # noqa: BLE001 — no daemon in tests or wrong container name
+        pass
+
+    # Read COMPOSE_FILE and COMPOSE_PROJECT_NAME from /ac/.env.
+    compose_files = "docker-compose.yml"
+    project_name = "azerothcore"
+    env_path = ac_container_path / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(errors="replace").splitlines():
+            if line.startswith("COMPOSE_FILE="):
+                compose_files = line[len("COMPOSE_FILE="):].strip()
+            elif line.startswith("COMPOSE_PROJECT_NAME="):
+                project_name = line[len("COMPOSE_PROJECT_NAME="):].strip()
+
+    # Build -f args using /ac/... container paths (readable by the CLI).
+    f_args: list[str] = []
+    for cf in compose_files.split(":"):
+        cf = cf.strip()
+        if cf:
+            f_args += ["-f", str(ac_container_path / cf)]
+
+    cmd_args = [
+        "docker", "compose",
+        "--project-name", project_name,
+        "--project-directory", host_ac_path,
+        *f_args,
+        "--env-file", str(env_path),
+    ]
+
+    # Override env_file path to the absolute container path so the CLI can read
+    # it; the --project-directory host path is not accessible inside the container.
+    extra_env = {"DOCKER_AC_ENV_FILE": str(ac_container_path / "conf/dist/env.ac")}
+
+    return cmd_args, extra_env
+
+
 WORLD_INIT_RE = re.compile(r"World\s+Initialized\s+In", re.IGNORECASE)
 
 
@@ -188,15 +260,14 @@ def run_start(*, on_progress: ProgressCb) -> ActionResult:
         on_progress("inspect", "already running")
         return ActionResult.ALREADY
 
+    ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
+    compose_args, extra_env = _ac_compose_base_args(ac_stack)
+
     on_progress("compose_up", "docker compose up -d ac-worldserver ac-database")
     result = subprocess.run(
-        [
-            "docker", "compose",
-            "--project-directory", "/ac",
-            "--env-file", "/ac/.env",
-            "up", "-d", "ac-worldserver", "ac-database",
-        ],
+        [*compose_args, "up", "-d", "ac-worldserver", "ac-database"],
         capture_output=True, text=True,
+        env={**os.environ, **extra_env},
     )
     if result.returncode != 0:
         on_progress("compose_up", f"compose up FAILED: {result.stderr}")

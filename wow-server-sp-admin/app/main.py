@@ -1,6 +1,7 @@
 from app.logging_config import configure as _configure_logging
 _configure_logging()
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -310,20 +311,36 @@ async def post_force_stop():
 async def stream_action(id: str | None = None):
     """Subscribe to progress for an action.
 
-    With no `id`, streams the currently-running or most-recently-finished
-    action. With an `id`, returns the matching record (or idle if unknown).
+    With an `id`, streams that specific record (or an idle event if unknown).
+
+    With no `id`, streams a persistent live feed: if an action is currently
+    running it is streamed immediately (with full history replay for late
+    joiners).  When no action is running, heartbeat events are emitted every
+    second so the EventSource connection stays open.  As soon as the next
+    action starts it is streamed automatically — no reconnect lag.
     """
-    record: ActionRecord | None
     if id is not None:
         record = runner.get(id)
-    else:
-        record = runner.current() or runner.last()
+        if record is None:
+            async def _idle_once():
+                yield {"event": "idle", "data": '<p class="idle">No action found.</p>'}
+            return EventSourceResponse(_idle_once())
+        return EventSourceResponse(_sse_stream(record))
 
-    if record is None:
-        async def _empty():
-            yield {"event": "idle", "data": '<p class="idle">No action in progress.</p>'}
-        return EventSourceResponse(_empty())
-    return EventSourceResponse(_sse_stream(record))
+    async def _live():
+        last_streamed_id: str | None = None
+        while True:
+            record = runner.current() or runner.last()
+            if record is not None and record.id != last_streamed_id:
+                last_streamed_id = record.id
+                async for item in _sse_stream(record):
+                    yield item
+            else:
+                # No action running (or same completed action) — heartbeat.
+                yield {"event": "heartbeat", "data": ""}
+                await asyncio.sleep(1)
+
+    return EventSourceResponse(_live())
 
 
 @app.get("/settings", response_class=HTMLResponse)
