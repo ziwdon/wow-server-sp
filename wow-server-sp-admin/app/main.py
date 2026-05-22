@@ -326,23 +326,6 @@ async def stream_action(id: str | None = None):
     return EventSourceResponse(_sse_stream(record))
 
 
-COMMON_KEYS = [
-    # AC playerbots
-    "AiPlayerbot.Enabled", "AiPlayerbot.MinRandomBots", "AiPlayerbot.MaxRandomBots",
-    "AiPlayerbot.BotActiveAlone", "AiPlayerbot.DisabledWithoutRealPlayer",
-    # AC core gameplay
-    "GameType", "PlayerLimit", "MaxOverspeedPings",
-    "Rate.XP.Quest", "Rate.XP.Kill", "Rate.XP.Explore",
-    "AllowTwoSide.Interaction.Auction", "AllowTwoSide.Interaction.Chat",
-    "MapUpdate.Threads", "MapUpdate.Interval", "MinWorldUpdateTime",
-    "Server.LoginInfo", "Quests.IgnoreAutoAccept",
-    # mod-ah-bot
-    "AuctionHouseBot.EnableSeller", "AuctionHouseBot.Buyer.Enabled",
-    # progression
-    "FunRealmEnabled", "ProgressionSystem.Enabled",
-]
-
-
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -350,7 +333,6 @@ async def settings_page(request: Request) -> HTMLResponse:
         {
             "request": request,
             "title": "azerothcore-admin · settings",
-            "common_keys": COMMON_KEYS,
         },
     )
 

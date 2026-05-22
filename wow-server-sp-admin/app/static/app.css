@@ -246,6 +246,7 @@ pre.logview {
 /* ── Misc ── */
 .loading { color: var(--text-muted); animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.empty-state { padding: 1rem; color: var(--text-muted); font-style: italic; text-align: center; }
 .error { color: var(--red); }
 .banner { padding: 0.75rem 1rem; margin: 0.5rem 1.5rem; border-radius: 4px; font-size: 0.88rem; }
 .banner.error { background: #1f0e0e; border: 1px solid #6a1a1a; color: var(--red); }
@@ -317,7 +318,6 @@ pre.logview {
 }
 .toggle-item input[type=checkbox] { accent-color: var(--gold); flex-shrink: 0; margin-top: 2px; }
 .toggle-label-wrap { display: flex; flex-direction: column; gap: 0.1rem; }
-.toggle-hint { font-size: 0.72rem; color: var(--text-dim); }
 #result-count { font-size: 0.78rem; color: var(--text-muted); }
 .sidebar-actions {
   margin-top: auto;
