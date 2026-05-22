@@ -62,11 +62,8 @@ def stats_worldserver() -> ContainerStats | None:
     system_delta = (
         cpu_stats.get("system_cpu_usage", 0) - precpu.get("system_cpu_usage", 0)
     )
-    num_cpus = cpu_stats.get("online_cpus") or len(
-        cpu_stats.get("cpu_usage", {}).get("percpu_usage", []) or []
-    ) or 1
     cpu_percent = (
-        (cpu_delta / system_delta) * num_cpus * 100.0
+        (cpu_delta / system_delta) * 100.0
         if system_delta > 0
         else 0.0
     )
