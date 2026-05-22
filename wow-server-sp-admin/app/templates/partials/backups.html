@@ -1,9 +1,13 @@
-<div class="panel">
-  <h2>Backups</h2>
+<div class="stat-card">
+  <div class="stat-label">Last Backup</div>
   {% if last_backup_human %}
-  <p>Last backup: {{ last_backup_human }}</p>
+  <div class="stat-value">{{ last_backup_human }}</div>
+  {% if last_error %}
+  <div class="stat-sub" style="color:var(--red)">{{ last_error }}</div>
   {% else %}
-  <p>No backups found.</p>
+  <div class="stat-sub">no errors</div>
   {% endif %}
-  {% if last_error %}<p class="error">{{ last_error }}</p>{% endif %}
+  {% else %}
+  <div class="stat-value" style="color:var(--text-muted)">No backups</div>
+  {% endif %}
 </div>

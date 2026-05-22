@@ -1,9 +1,9 @@
-<div class="panel">
-  <h2>Online</h2>
+<div class="stat-card">
+  <div class="stat-label">Online</div>
   {% if counts %}
-  <p>Real players: {{ counts.real }}</p>
-  <p>Bots: {{ counts.bots }}</p>
+  <div class="stat-value">{{ counts.real }} real · {{ counts.bots }} bots</div>
   {% else %}
-  <p>DB unreachable.</p>
+  <div class="stat-value" style="color:var(--text-muted)">—</div>
+  <div class="stat-sub">DB unreachable</div>
   {% endif %}
 </div>

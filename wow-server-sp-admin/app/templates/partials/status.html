@@ -1,6 +1,10 @@
-<div class="panel">
-  <h2>Status</h2>
-  <p class="status status-{{ status }}">{{ status }}</p>
-  {% if started_at_human != "—" %}<p>Started: {{ started_at_human }}</p>{% endif %}
-  {% if exit_code is not none %}<p>Last exit: {{ exit_code }}</p>{% endif %}
+<div class="stat-card">
+  <div class="stat-label">Server Status</div>
+  <div class="stat-value status-{{ status }}">{{ status|upper }}</div>
+  {% if started_at_human != "—" %}
+  <div class="stat-sub">Started: {{ started_at_human }}</div>
+  {% endif %}
+  {% if exit_code is not none %}
+  <div class="stat-sub">Last exit: {{ exit_code }}</div>
+  {% endif %}
 </div>

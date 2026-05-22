@@ -1,10 +1,10 @@
-<div class="panel">
-  <h2>Resources</h2>
+<div class="stat-card">
+  <div class="stat-label">Resources</div>
   {% if stats %}
-  <p>CPU (system): {{ stats.cpu_percent }}%</p>
-  <p>Memory: {{ stats.memory_used_mb }} / {{ stats.memory_limit_mb }} MB</p>
-  <p>Uptime: {{ uptime }}</p>
+  <div class="stat-value">{{ stats.cpu_percent }}% CPU · {{ stats.memory_used_mb }} / {{ stats.memory_limit_mb }} MB</div>
+  <div class="stat-sub">Uptime: {{ uptime }}</div>
   {% else %}
-  <p>Container not running.</p>
+  <div class="stat-value" style="color:var(--text-muted)">—</div>
+  <div class="stat-sub">Container not running</div>
   {% endif %}
 </div>
