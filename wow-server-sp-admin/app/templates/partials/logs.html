@@ -1,12 +1,18 @@
-<div class="panel">
-  <h2>Logs <button class="refresh-btn"
-      hx-get="/api/logs" hx-target="#logs" hx-swap="innerHTML">Refresh</button></h2>
-  <p>Errors.log: <strong>{{ errors_size }}</strong> bytes
-    {% if errors_size == 0 %}(clean){% endif %}</p>
-  <details><summary>Server.log (last {{ server_lines|length }} lines)</summary>
-    <pre>{{ server_lines|join('\n') }}</pre>
-  </details>
-  <details><summary>Playerbots.log (last {{ pb_lines|length }} lines)</summary>
-    <pre>{{ pb_lines|join('\n') }}</pre>
-  </details>
+<div class="panel-header">
+  <span class="panel-title">Logs</span>
+  <button class="btn btn-sm"
+          hx-get="/api/logs" hx-target="#logs" hx-swap="innerHTML">Refresh</button>
 </div>
+<div class="log-tabs">
+  <button class="log-tab active" onclick="switchLog(this, 'server-log')">Server.log</button>
+  <button class="log-tab" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
+</div>
+<div class="log-errors-bar {% if errors_size == 0 %}clean{% else %}dirty{% endif %}">
+  {% if errors_size == 0 %}
+  <span class="dot"></span> Errors.log: {{ errors_size }} bytes (clean)
+  {% else %}
+  <span class="dot"></span> Errors.log: {{ errors_size }} bytes
+  {% endif %}
+</div>
+<pre id="server-log" class="logview">{{ server_lines|join('\n') }}</pre>
+<pre id="playerbots-log" class="logview" style="display:none">{{ pb_lines|join('\n') }}</pre>
