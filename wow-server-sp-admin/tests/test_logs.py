@@ -42,3 +42,13 @@ def test_tail_filtered_does_not_read_entire_file(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "read_text", fail_read_text)
 
     assert tail_filtered(p, n=2, max_bytes=4096) == ["recent line 1", "recent line 2"]
+
+
+def test_tail_filtered_drops_partial_line_when_max_bytes_reached(tmp_path):
+    p = tmp_path / "Server.log"
+    tail_window = "should never be returned\nrecent complete line\n"
+    p.write_text("truncated older line " + tail_window)
+
+    assert tail_filtered(p, n=5, max_bytes=len(tail_window)) == [
+        "recent complete line"
+    ]
