@@ -179,6 +179,12 @@ These are the cross-cutting invariants of `wow-server-sp-admin/` you need to kno
 
 **Both uninstallers must NOT use `--remove-orphans`.** Same rule as the AC uninstaller — `--remove-orphans` would remove unrelated containers sharing the Compose project name. The admin's `docker rm -f azerothcore-admin` already covers the one service.
 
+**The top nav bar lives in `base.html`, not `dashboard.html`.** `#last-refresh` and `#nav-status-pill` are `<span>` elements inside `<nav class="topnav">` in `base.html`. The status pill polls `/api/status` every 60 s via `hx-get`/`hx-swap="none"` and a `htmx:afterRequest` JS handler that parses the response and updates the pill's text and CSS class — **not** `hx-swap="outerHTML"` or `hx-select`. Using `outerHTML` would destroy the polling element after the first swap; `hx-swap="none"` keeps it alive. The `htmx:afterSwap` listener in the same script block updates `#last-refresh` only when the dashboard's `#status` stat card swaps (i.e. only on the dashboard page — the nav pill handles its own polling independently on every page).
+
+**`switchLog()` is defined in `dashboard.html`'s inline `<script>`, not `settings.js`.** `settings.js` is only loaded on the settings page. Log tab switching (`onclick="switchLog(this, 'server-log')"`) in `partials/logs.html` calls `switchLog` from that inline script. Do not move the function to `settings.js` — it would be undefined when the logs partial renders on the dashboard.
+
+**`settings.js` source-file checkbox selector is `.check-group input[type=checkbox][value]`.** The sidebar class changed from `.settings-filters` to `.settings-sidebar` / `.check-group` in the UI overhaul. If you add new sidebar checkboxes that should trigger a re-render, put them inside `.check-group` or wire them up separately — the current selector only catches `.check-group` children.
+
 ## Reference docs
 
 The `docs/` directory contains offline reference material. Consult it whenever you need to understand configuration options, verify a setting, or figure out how to do something with any of the modules.
@@ -195,6 +201,7 @@ The `docs/` directory contains offline reference material. Consult it whenever y
 | `docs/superpowers/plans/` | Implementation plans for in-progress work in this repo |
 | `docs/superpowers/specs/` | Design specs for in-progress work in this repo |
 | `docs/superpowers/specs/2026-05-20-wow-server-sp-admin-design.md` | Authoritative design spec for `wow-server-sp-admin/` — read this before touching admin code, especially before changing the action runner, the apply/rollback flow, the post-apply verification, the snapshot/write semantics, or the mount layout |
+| `docs/superpowers/specs/2026-05-22-admin-ui-overhaul-design.md` | UI/UX overhaul spec (WoW Classic palette, nav bar, stat cards, settings layout) — read this before touching `app/templates/`, `app/static/app.css`, or `app/static/settings.js` |
 
 When making changes to config keys, reviewing module behaviour, or writing install logic, read the relevant wiki pages and the `.conf.dist` file rather than guessing defaults.
 
