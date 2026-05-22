@@ -41,7 +41,7 @@ function render() {
 function _render() {
   const q = document.getElementById('search').value;
   const files = new Set(
-    [...document.querySelectorAll('.settings-filters input[type=checkbox][value]')]
+    [...document.querySelectorAll('.check-group input[type=checkbox][value]')]
       .filter(c => c.checked).map(c => c.value)
   );
   const modifiedOnly = document.getElementById('only-modified').checked;
@@ -68,6 +68,9 @@ function _render() {
       <span class="key-flags">${readOnlyBadge}</span>
       <input class="key-input" data-key="${esc(k.key)}" value="${esc(value)}"${readOnlyAttrs}>
     `;
+    if (document.getElementById('show-meta') && document.getElementById('show-meta').checked) {
+      row.classList.add('show-meta');
+    }
     row.addEventListener('click', () => selectKey(k));
     list.appendChild(row);
   });
@@ -76,23 +79,37 @@ function _render() {
     more.textContent = `+${filtered.length - 200} more — narrow your search`;
     list.appendChild(more);
   }
-  document.getElementById('pending-count').textContent = Object.keys(state.pending).length;
-  document.getElementById('apply-btn').disabled = Object.keys(state.pending).length === 0;
+  const pendingCount = Object.keys(state.pending).length;
+  const badge = document.getElementById('pending-count');
+  if (badge) {
+    badge.textContent = pendingCount;
+    badge.style.display = pendingCount > 0 ? '' : 'none';
+  }
+  document.getElementById('apply-btn').disabled = pendingCount === 0;
 }
 
 function selectKey(k) {
   state.selected = k;
   const detail = document.getElementById('key-detail');
   const readOnlyBadge = k.read_only
-    ? `<p><span class="key-badge">${esc(k.read_only_reason || 'installer-managed')}</span></p>`
+    ? `<span class="key-badge">${esc(k.read_only_reason || 'installer-managed')}</span>`
     : '';
   detail.innerHTML = `
-    <h2>${esc(k.key)}</h2>
-    <p><strong>${esc(k.env_var)}</strong></p>
-    ${readOnlyBadge}
-    <p>Effective: <code>${esc(k.effective_value)}</code> (from ${esc(k.source)})</p>
-    <p>Default: <code>${esc(k.default)}</code> (type: ${esc(k.inferred_type)})</p>
-    <pre>${esc(k.comment || '(no comment)')}</pre>
+    <div class="detail-key-name">${esc(k.key)}</div>
+    <div class="detail-env-var">${esc(k.env_var)}</div>
+    ${readOnlyBadge ? `<div>${readOnlyBadge}</div>` : ''}
+    <div class="detail-section">
+      <div class="detail-section-label">Effective value</div>
+      <div class="detail-section-value">${esc(k.effective_value)} <span class="detail-from">(from ${esc(k.source)})</span></div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-label">Default</div>
+      <div class="detail-section-value">${esc(k.default)} <span class="detail-from">(type: ${esc(k.inferred_type)})</span></div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-label">Description</div>
+      <div class="detail-comment">${esc(k.comment || '(no comment)')}</div>
+    </div>
   `;
 }
 
@@ -117,7 +134,7 @@ document.addEventListener('change', e => {
 ['search', 'only-modified', 'show-all'].forEach(id => {
   document.getElementById(id).addEventListener('input', render);
 });
-document.querySelectorAll('.settings-filters input[type=checkbox][value]')
+document.querySelectorAll('.check-group input[type=checkbox][value]')
   .forEach(c => c.addEventListener('change', render));
 
 document.getElementById('apply-btn').addEventListener('click', async () => {
@@ -181,5 +198,23 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
   await watchActionUntilDone(id, 'Rollback');
   await load();
 });
+
+const showMetaEl = document.getElementById('show-meta');
+if (showMetaEl) {
+  showMetaEl.addEventListener('change', function() {
+    const on = this.checked;
+    const header = document.getElementById('key-list-header');
+    if (header) {
+      if (on) {
+        header.classList.add('show-meta');
+        header.innerHTML = '<span>Key</span><span>Source</span><span>Flags</span><span>Value</span>';
+      } else {
+        header.classList.remove('show-meta');
+        header.innerHTML = '<span>Key</span><span>Value</span>';
+      }
+    }
+    render();
+  });
+}
 
 load();
