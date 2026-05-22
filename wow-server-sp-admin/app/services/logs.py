@@ -49,6 +49,12 @@ def tail_filtered(
     max_bytes: int = 1024 * 1024,
 ) -> list[str]:
     """Return up to n trailing non-benign lines without scanning huge logs."""
+    if n < 0:
+        raise ValueError("n must be non-negative")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if n == 0:
+        return []
     if not path.exists():
         return []
 

@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from app.services.logs import tail_filtered, BENIGN_PATTERNS
@@ -34,10 +35,12 @@ def test_tail_filtered_does_not_read_entire_file(tmp_path, monkeypatch):
         + "\nrecent line 1\nrecent line 2\n"
     )
 
+    original_read_text = Path.read_text
+
     def fail_read_text(self, *args, **kwargs):
         if self == p:
             raise AssertionError("tail_filtered must not read the whole log file")
-        return Path.read_text(self, *args, **kwargs)
+        return original_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", fail_read_text)
 
@@ -63,3 +66,23 @@ def test_tail_filtered_keeps_line_when_max_bytes_starts_at_boundary(tmp_path):
         "first complete",
         "second complete",
     ]
+
+
+def test_tail_filtered_n_zero_returns_empty(tmp_path):
+    p = tmp_path / "Server.log"
+    p.write_text("line 1\nline 2\n")
+    assert tail_filtered(p, n=0) == []
+
+
+def test_tail_filtered_n_negative_raises(tmp_path):
+    p = tmp_path / "Server.log"
+    p.write_text("line 1\n")
+    with pytest.raises(ValueError, match="non-negative"):
+        tail_filtered(p, n=-1)
+
+
+def test_tail_filtered_chunk_size_zero_raises(tmp_path):
+    p = tmp_path / "Server.log"
+    p.write_text("line 1\n")
+    with pytest.raises(ValueError, match="positive"):
+        tail_filtered(p, chunk_size=0)
