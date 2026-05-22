@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections import deque
 from pathlib import Path
 
 BENIGN_PATTERNS = [
@@ -26,16 +25,46 @@ def _is_benign(line: str) -> bool:
     return any(p.search(line) for p in BENIGN_PATTERNS)
 
 
-def tail_filtered(path: Path, n: int = 20) -> list[str]:
-    """Return up to n trailing non-benign lines from path."""
+def _decode_tail(chunks: list[bytes], offset: int) -> list[str]:
+    data = b"".join(reversed(chunks))
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if offset > 0 and lines:
+        return lines[1:]
+    return lines
+
+
+def tail_filtered(
+    path: Path,
+    n: int = 20,
+    *,
+    chunk_size: int = 8192,
+    max_bytes: int = 1024 * 1024,
+) -> list[str]:
+    """Return up to n trailing non-benign lines without scanning huge logs."""
     if not path.exists():
         return []
-    keep: deque[str] = deque(maxlen=n)
-    for raw in path.read_text(errors="replace").splitlines():
-        if _is_benign(raw):
-            continue
-        keep.append(raw)
-    return list(keep)
+
+    chunks: list[bytes] = []
+    bytes_read = 0
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        offset = f.tell()
+
+        while offset > 0 and bytes_read < max_bytes:
+            read_size = min(chunk_size, offset, max_bytes - bytes_read)
+            offset -= read_size
+            f.seek(offset)
+            chunks.append(f.read(read_size))
+            bytes_read += read_size
+
+            lines = _decode_tail(chunks, offset)
+            keep = [line for line in lines if not _is_benign(line)]
+            if len(keep) >= n:
+                return keep[-n:]
+
+    lines = _decode_tail(chunks, 0)
+    keep = [line for line in lines if not _is_benign(line)]
+    return keep[-n:]
 
 
 def file_size(path: Path) -> int:
