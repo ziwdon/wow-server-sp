@@ -1,37 +1,71 @@
 {% extends "base.html" %}
 {% block main %}
-<nav><a href="/">← Dashboard</a></nav>
+<div class="settings-page">
 
-<div class="settings-layout">
-  <aside class="settings-filters">
-    <h2>Filters</h2>
-    <label><input type="text" id="search" placeholder="Search key, value, or comment..."></label>
-    <fieldset>
-      <legend>Source file</legend>
-      <label><input type="checkbox" value="worldserver.conf.dist" checked> worldserver</label>
-      <label><input type="checkbox" value="playerbots.conf.dist" checked> playerbots</label>
-      <label><input type="checkbox" value="mod_ahbot.conf.dist" checked> mod_ahbot</label>
-      <label><input type="checkbox" value="individualProgression.conf.dist" checked> individualProgression</label>
-    </fieldset>
-    <label><input type="checkbox" id="only-modified"> Show only modified</label>
-    <label><input type="checkbox" id="show-all"> Show all keys (off = Common only)</label>
-    <p id="result-count"></p>
-    <button id="apply-btn" disabled>Apply (<span id="pending-count">0</span>)</button>
-    <button id="rollback-btn">Rollback last apply</button>
+  <aside class="settings-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Search</div>
+      <input class="search-input" type="text" id="search" placeholder="Key, value, or comment…">
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Source file</div>
+      <div class="check-group">
+        <label class="check-item"><input type="checkbox" value="worldserver.conf.dist" checked> worldserver</label>
+        <label class="check-item"><input type="checkbox" value="playerbots.conf.dist" checked> playerbots</label>
+        <label class="check-item"><input type="checkbox" value="mod_ahbot.conf.dist" checked> mod_ahbot</label>
+        <label class="check-item"><input type="checkbox" value="individualProgression.conf.dist" checked> individualProgression</label>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Display</div>
+      <label class="toggle-item">
+        <input type="checkbox" id="only-modified">
+        <span class="toggle-label-wrap"><span>Show only modified</span></span>
+      </label>
+      <label class="toggle-item">
+        <input type="checkbox" id="show-all">
+        <span class="toggle-label-wrap">
+          <span>Show all keys</span>
+          <span class="toggle-hint">default: common only</span>
+        </span>
+      </label>
+      <label class="toggle-item">
+        <input type="checkbox" id="show-meta">
+        <span class="toggle-label-wrap"><span>Show source &amp; flags</span></span>
+      </label>
+    </div>
+
+    <div id="result-count"></div>
+
+    <div class="sidebar-actions">
+      <button class="btn btn-apply" id="apply-btn" disabled>Apply <span class="pending-badge" id="pending-count">0</span></button>
+      <button class="btn btn-rollback" id="rollback-btn">Rollback last apply</button>
+    </div>
   </aside>
 
-  <main class="settings-list" id="key-list"><p class="loading">Loading settings…</p></main>
+  <div class="settings-list-wrapper">
+    <div id="key-list-header" class="key-list-header">
+      <span>Key</span>
+      <span>Value</span>
+    </div>
+    <main class="settings-list" id="key-list"><p class="loading">Loading settings…</p></main>
+  </div>
 
   <aside class="settings-detail" id="key-detail">
-    <p>Select a key to see details.</p>
+    <p style="color:var(--text-dim);font-size:0.88rem;padding:1rem;">Select a key to see details.</p>
   </aside>
+
 </div>
 
 <dialog id="apply-dialog">
   <h2>Apply changes</h2>
   <pre id="apply-diff"></pre>
-  <button id="apply-confirm">Apply &amp; restart</button>
-  <button id="apply-cancel">Cancel</button>
+  <div class="dialog-actions">
+    <button class="btn btn-apply" id="apply-confirm">Apply &amp; restart</button>
+    <button class="btn btn-muted" id="apply-cancel">Cancel</button>
+  </div>
 </dialog>
 <script>
 window.COMMON_KEYS = {{ common_keys|tojson }};
