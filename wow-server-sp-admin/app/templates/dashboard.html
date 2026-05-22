@@ -45,14 +45,4 @@
 </section>
 
 <nav><a href="/settings">Settings →</a></nav>
-
-<footer id="last-refresh">Not yet refreshed</footer>
-<script>
-document.addEventListener('htmx:afterSwap', function () {
-  var now = new Date();
-  var hhmm = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-  var el = document.getElementById('last-refresh');
-  if (el) el.textContent = 'Last refreshed: ' + hhmm;
-});
-</script>
 {% endblock %}
