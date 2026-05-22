@@ -37,4 +37,5 @@ pre { white-space: pre-wrap; font-size: 0.85rem; max-height: 12rem; overflow-y: 
 .banner.error { background: #fee; border: 1px solid #c00; color: #c00; }
 .verify-failed { margin: 0.5rem 0; padding-left: 1.5rem; color: #c00; }
 .verify-failed code { font-family: monospace; }
+.refresh-btn { font-size: 0.75rem; padding: 0.1rem 0.5rem; margin-left: 0.5rem; cursor: pointer; vertical-align: middle; }
 .verify-failed .vf-key { color: #666; font-size: 0.9em; }
