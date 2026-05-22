@@ -109,11 +109,17 @@ def _humanize_bytes(b: int) -> int:
     return round(b / (1024 * 1024))
 
 
+def _normalize_docker_ts(s: str) -> str:
+    # Docker timestamps use nanosecond precision; fromisoformat only handles
+    # up to microseconds. Truncate any extra sub-second digits.
+    return re.sub(r'(\.\d{6})\d+', r'\1', s).replace('Z', '+00:00')
+
+
 def _humanize_uptime(started_at: str | None) -> str:
     if not started_at:
         return "—"
     try:
-        started = dt.datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        started = dt.datetime.fromisoformat(_normalize_docker_ts(started_at))
     except ValueError:
         return "—"
     delta = dt.datetime.now(dt.timezone.utc) - started
@@ -126,10 +132,7 @@ def _format_started_at(s: str | None) -> str:
     if not s:
         return "—"
     try:
-        # Docker timestamps use nanosecond precision; fromisoformat only handles
-        # up to microseconds. Truncate any extra sub-second digits.
-        truncated = re.sub(r'(\.\d{6})\d+', r'\1', s).replace('Z', '+00:00')
-        started = dt.datetime.fromisoformat(truncated)
+        started = dt.datetime.fromisoformat(_normalize_docker_ts(s))
         return started.strftime("%Y-%m-%d %H:%M UTC")
     except (ValueError, AttributeError):
         return "—"
