@@ -1,5 +1,6 @@
 <div class="panel">
-  <h2>Logs</h2>
+  <h2>Logs <button class="refresh-btn"
+      hx-get="/api/logs" hx-target="#logs" hx-swap="innerHTML">Refresh</button></h2>
   <p>Errors.log: <strong>{{ errors_size }}</strong> bytes
     {% if errors_size == 0 %}(clean){% endif %}</p>
   <details><summary>Server.log (last {{ server_lines|length }} lines)</summary>
