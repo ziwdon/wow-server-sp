@@ -48,6 +48,18 @@ def _installer_copy_through_admin_yml(tmp_path: Path) -> tuple[Path, Path]:
     return script, ac_stack
 
 
+def _systemd_prompt_script(tmp_path: Path) -> Path:
+    """Create a test copy that only runs the optional systemd prompt block."""
+    marker = "# --- Step 9: optional systemd unit ---\n"
+    source = INSTALLER.read_text()
+    _, systemd_prompt_block = source.split(marker, maxsplit=1)
+
+    script = tmp_path / "install-systemd-prompt.sh"
+    script.write_text(f"#!/bin/bash\nset -euo pipefail\n{marker}{systemd_prompt_block}")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
 class InstallerScriptTest(unittest.TestCase):
     def test_installer_refuses_admin_yml_directory_without_removing_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -92,6 +104,62 @@ class InstallerScriptTest(unittest.TestCase):
             "- /opt/stacks/azerothcore/docker-compose.admin.yml:/ac/docker-compose.admin.yml:rw",
             compose,
         )
+
+    def test_systemd_unit_prompt_defaults_to_yes(self):
+        source = INSTALLER.read_text()
+
+        self.assertIn(
+            "Install azerothcore-admin.service systemd unit (auto-start at boot)? [Y/n] ",
+            source,
+        )
+        self.assertNotIn("[y/N]", source)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            script = _systemd_prompt_script(tmp_path)
+
+            stubs = tmp_path / "stubs"
+            stubs.mkdir()
+            _write_stub(
+                stubs / "sudo",
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$SUDO_LOG\"\n"
+                "if [ \"${1:-}\" = \"tee\" ]; then\n"
+                "    cat >/dev/null\n"
+                "fi\n",
+            )
+
+            cases = {
+                "": True,
+                "y": True,
+                "Y": True,
+                "n": False,
+                "N": False,
+                "later": False,
+            }
+            for answer, should_install in cases.items():
+                with self.subTest(answer=answer):
+                    sudo_log = tmp_path / f"sudo-{answer or 'enter'}.log"
+                    env = os.environ.copy()
+                    env["PATH"] = f"{stubs}:{env['PATH']}"
+                    env["SUDO_LOG"] = str(sudo_log)
+
+                    result = subprocess.run(
+                        [str(script)],
+                        input=f"{answer}\n",
+                        text=True,
+                        capture_output=True,
+                        env=env,
+                        check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    sudo_calls = sudo_log.read_text() if sudo_log.exists() else ""
+                    self.assertEqual(
+                        "systemctl enable --now azerothcore-admin.service"
+                        in sudo_calls,
+                        should_install,
+                    )
 
 
 if __name__ == "__main__":
