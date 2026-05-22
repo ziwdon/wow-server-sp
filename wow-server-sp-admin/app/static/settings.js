@@ -53,13 +53,20 @@ function _render() {
   list.innerHTML = '';
   filtered.slice(0, 200).forEach(k => {
     const row = document.createElement('div');
-    row.className = 'key-row source-' + k.source;
+    const readOnly = Boolean(k.read_only);
+    const readOnlyReason = k.read_only_reason || 'installer-managed';
+    const readOnlyAttrs = readOnly ? ' disabled readonly aria-readonly="true"' : '';
+    const readOnlyBadge = readOnly
+      ? `<span class="key-badge" title="${esc(readOnlyReason)}">${esc(readOnlyReason)}</span>`
+      : '';
+    row.className = 'key-row source-' + k.source + (readOnly ? ' read-only' : '');
     const pending = state.pending[k.key];
     const value = pending !== undefined ? pending : k.effective_value;
     row.innerHTML = `
       <span class="key-name">${esc(k.key)}</span>
       <span class="key-source">${esc(k.source)}</span>
-      <input class="key-input" data-key="${esc(k.key)}" value="${esc(value)}">
+      <span class="key-flags">${readOnlyBadge}</span>
+      <input class="key-input" data-key="${esc(k.key)}" value="${esc(value)}"${readOnlyAttrs}>
     `;
     row.addEventListener('click', () => selectKey(k));
     list.appendChild(row);
@@ -76,9 +83,13 @@ function _render() {
 function selectKey(k) {
   state.selected = k;
   const detail = document.getElementById('key-detail');
+  const readOnlyBadge = k.read_only
+    ? `<p><span class="key-badge">${esc(k.read_only_reason || 'installer-managed')}</span></p>`
+    : '';
   detail.innerHTML = `
     <h2>${esc(k.key)}</h2>
     <p><strong>${esc(k.env_var)}</strong></p>
+    ${readOnlyBadge}
     <p>Effective: <code>${esc(k.effective_value)}</code> (from ${esc(k.source)})</p>
     <p>Default: <code>${esc(k.default)}</code> (type: ${esc(k.inferred_type)})</p>
     <pre>${esc(k.comment || '(no comment)')}</pre>
@@ -89,6 +100,11 @@ document.addEventListener('change', e => {
   if (e.target.classList.contains('key-input')) {
     const key = e.target.dataset.key;
     const k = state.keys.find(x => x.key === key);
+    if (k.read_only) {
+      delete state.pending[key];
+      e.target.value = k.effective_value;
+      return;
+    }
     if (e.target.value === k.effective_value) {
       delete state.pending[key];
     } else {

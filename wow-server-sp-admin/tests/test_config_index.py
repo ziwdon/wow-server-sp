@@ -1,6 +1,9 @@
+import tempfile
 from pathlib import Path
 
-from app.services.config_index import KeyEntry, parse_dist_file
+import pytest
+
+from app.services.config_index import KeyEntry, build_key_index, parse_dist_file
 
 
 def test_parses_three_keys_with_comments_and_defaults(tmp_path):
@@ -11,7 +14,7 @@ def test_parses_three_keys_with_comments_and_defaults(tmp_path):
 
     foo = entries[0]
     assert foo.default == "1"
-    assert foo.inferred_type == "int"
+    assert foo.inferred_type == "bool"
     assert "Whether the Foo subsystem is enabled." in foo.comment
     assert foo.source_file == fixture.name
     assert foo.line_number == 11
@@ -47,8 +50,109 @@ def test_keys_with_floats_get_float_type(tmp_path):
     assert entries[0].inferred_type == "float"
 
 
-def test_zero_and_one_are_ints_not_bools(tmp_path):
+def test_zero_and_one_are_ints_without_bool_context(tmp_path):
     f = tmp_path / "x.conf.dist"
     f.write_text("#\n#    A\n#\n\nA = 0\n#\n#    B\n#\n\nB = 1\n")
     entries = parse_dist_file(f)
     assert [e.inferred_type for e in entries] == ["int", "int"]
+
+
+def test_real_keys_get_context_aware_types():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        dist = Path(temp_dir)
+        (dist / "worldserver.conf.dist").write_text(
+            "#\n"
+            "#    PlayerLimit\n"
+            "#        Default:     1000\n"
+            "\n"
+            "PlayerLimit = 1000\n"
+            "\n"
+            "#\n"
+            "#    Server.LoginInfo\n"
+            "#        Description: Display core version (.server info) on login.\n"
+            "#        Default:     0 - (Disabled)\n"
+            "#                     1 - (Enabled)\n"
+            "\n"
+            "Server.LoginInfo = 0\n"
+            "\n"
+            "#\n"
+            "#    Rate.XP.Kill\n"
+            "#    Rate.XP.Quest\n"
+            "#        Description: Experience rates (outside battleground)\n"
+            "#        Default:     1 - (Rate.XP.Kill)\n"
+            "#                     1 - (Rate.XP.Quest)\n"
+            "\n"
+            "Rate.XP.Kill = 1\n"
+            "Rate.XP.Quest = 1\n"
+        )
+        (dist / "playerbots.conf.dist").write_text(
+            "# Enable or disable Playerbots module\n"
+            "AiPlayerbot.Enabled = 1\n"
+        )
+        (dist / "mod_ahbot.conf.dist").write_text(
+            "#    AuctionHouseBot.GUIDs\n"
+            "#        These are the character GUIDS that will be used to create auctions.\n"
+            "#        It can be a single value or multiple values separated by a comma.\n"
+            "#    Examples:\n"
+            "#        AuctionHouseBot.GUIDs = 3,4\n"
+            "\n"
+            "AuctionHouseBot.GUIDs = 0\n"
+        )
+        (dist / "individualProgression.conf.dist").write_text("")
+        index = build_key_index(dist)
+
+    assert index["AiPlayerbot.Enabled"].inferred_type == "bool"
+    assert index["Rate.XP.Kill"].inferred_type == "float"
+    assert index["PlayerLimit"].inferred_type == "int"
+    assert index["Server.LoginInfo"].inferred_type == "bool"
+    assert index["AuctionHouseBot.GUIDs"].inferred_type == "string"
+
+
+def test_grouped_comment_blocks_are_attached_to_each_documented_key(tmp_path):
+    f = tmp_path / "mod_ahbot.conf.dist"
+    f.write_text(
+        "[worldserver]\n"
+        "\n"
+        "#################################################################\n"
+        "# AUCTION HOUSE BOT IN-GAME COMMANDS\n"
+        "#\n"
+        "#    Available GM commands:\n"
+        "#        .ahbot reload - Reloads AuctionHouseBot configuration\n"
+        "#################################################################\n"
+        "\n"
+        "#################################################################\n"
+        "# AUCTION HOUSE BOT SETTINGS\n"
+        "#    AuctionHouseBot.DEBUG\n"
+        "#        Enable/Disable Debugging output\n"
+        "#    Default: false (disabled)\n"
+        "#\n"
+        "#    AuctionHouseBot.GUIDs\n"
+        "#        These are the character GUIDS used to create auctions.\n"
+        "#        It can be a single value or multiple values separated by a comma.\n"
+        "#    Examples:\n"
+        "#        AuctionHouseBot.GUIDs = 3,4\n"
+        "#\n"
+        "#    AuctionHouseBot.ItemsPerCycle\n"
+        "#        How many items to post on the auction house every cycle.\n"
+        "#    Default 150\n"
+        "#################################################################\n"
+        "\n"
+        "AuctionHouseBot.DEBUG = false\n"
+        "AuctionHouseBot.GUIDs = 0\n"
+        "AuctionHouseBot.ItemsPerCycle = 150\n"
+    )
+
+    entries = {entry.key: entry for entry in parse_dist_file(f)}
+
+    assert "Enable/Disable Debugging output" in entries["AuctionHouseBot.DEBUG"].comment
+    assert ".ahbot reload" not in entries["AuctionHouseBot.DEBUG"].comment
+    assert "character GUIDS used to create auctions" in entries["AuctionHouseBot.GUIDs"].comment
+    assert "Enable/Disable Debugging output" not in entries["AuctionHouseBot.GUIDs"].comment
+    assert "How many items to post" in entries["AuctionHouseBot.ItemsPerCycle"].comment
+
+
+def test_build_key_index_fails_when_required_dist_files_are_missing(tmp_path):
+    (tmp_path / "worldserver.conf.dist").write_text("PlayerLimit = 1000\n")
+
+    with pytest.raises(FileNotFoundError, match="playerbots.conf.dist"):
+        build_key_index(tmp_path)

@@ -13,11 +13,13 @@ def _init_apply_state(tmp_path, *, admin_yml_content: str | None = None):
     (dist / "worldserver.conf.dist").write_text(
         "#\n#    Foo.Enable\n#\n\nFoo.Enable = 1\n"
     )
+    (dist / "playerbots.conf.dist").write_text("")
     # mod_ahbot.conf.dist must be present so AuctionHouseBot.GUIDs is in
     # the key index — exercises the blocklist, not the unknown-key path.
     (dist / "mod_ahbot.conf.dist").write_text(
         "#\n#    AuctionHouseBot.GUIDs\n#\n\nAuctionHouseBot.GUIDs = 0\n"
     )
+    (dist / "individualProgression.conf.dist").write_text("")
     admin_yml = tmp_path / "docker-compose.admin.yml"
     admin_yml.write_text(
         admin_yml_content

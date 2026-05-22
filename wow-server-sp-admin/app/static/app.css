@@ -23,12 +23,15 @@ pre { white-space: pre-wrap; font-size: 0.85rem; max-height: 12rem; overflow-y: 
 .settings-layout { display: grid; grid-template-columns: 16rem 1fr 22rem; gap: 1rem; }
 .settings-filters { border-right: 1px solid #ccc; padding-right: 1rem; }
 .settings-filters fieldset { border: 1px solid #ccc; }
-.key-row { display: grid; grid-template-columns: 1fr 6rem 12rem; gap: 0.5rem; padding: 0.25rem; cursor: pointer; }
+.key-row { display: grid; grid-template-columns: minmax(0, 1fr) 6rem 9rem 12rem; gap: 0.5rem; padding: 0.25rem; cursor: pointer; }
 .key-row:hover { background: #f4f4f4; }
 .key-row.source-admin .key-source { color: #060; font-weight: bold; }
 .key-row.source-installer .key-source { color: #06c; }
 .key-source { font-size: 0.8rem; text-transform: uppercase; }
 .key-input { width: 100%; }
+.key-row.read-only .key-input { background: #f4f4f4; color: #555; cursor: not-allowed; }
+.key-flags { min-height: 1rem; }
+.key-badge { display: inline-block; border: 1px solid #999; border-radius: 4px; padding: 0.05rem 0.3rem; color: #333; background: #f8f8f8; font-size: 0.75rem; line-height: 1.3; }
 .settings-detail { border-left: 1px solid #ccc; padding-left: 1rem; }
 .banner { padding: 0.75rem 1rem; margin: 0.5rem 0; border-radius: 4px; }
 .banner.error { background: #fee; border: 1px solid #c00; color: #c00; }
