@@ -28,7 +28,7 @@ def test_format_started_at_no_subseconds():
 
 
 def test_api_backups_timestamp_includes_utc():
-    # unix timestamp 1716144665 = 2024-05-19 19:31:05 UTC
+    # unix timestamp 1716144665 = 2024-05-19 18:51:05 UTC
     mock_status = BackupStatus(last_backup_unix=1716144665.0, last_error=None)
     with patch("app.main.backups_svc.backup_status", return_value=mock_status):
         client = TestClient(app)
