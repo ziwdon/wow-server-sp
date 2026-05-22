@@ -45,6 +45,7 @@ echo "Admin port: $ADMIN_PORT"
 # .env; it does NOT modify docker-compose.override.yml or any other
 # compose file content.
 ADMIN_YML_NAME='docker-compose.admin.yml'
+ADMIN_YML_PATH="$AC_STACK_DIR/$ADMIN_YML_NAME"
 existing_line="$(grep -E '^COMPOSE_FILE=' "$AC_STACK_DIR/.env" 2>/dev/null | head -n1 || true)"
 if [ -z "$existing_line" ]; then
     new_line="COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:${ADMIN_YML_NAME}"
@@ -70,16 +71,25 @@ else
 fi
 
 # --- Step 4: empty admin.yml so AC compose calls don't fail ---
-if [ ! -f "$AC_STACK_DIR/docker-compose.admin.yml" ]; then
-    echo "Creating empty $AC_STACK_DIR/docker-compose.admin.yml."
-    sudo tee "$AC_STACK_DIR/docker-compose.admin.yml" >/dev/null <<'YAML'
+if [ -d "$ADMIN_YML_PATH" ]; then
+    echo "ERROR: $ADMIN_YML_PATH exists as a directory; expected a regular file." >&2
+    echo "The installer will not remove it. Inspect that directory, move or remove it yourself if appropriate, then re-run this installer." >&2
+    exit 1
+fi
+if [ -e "$ADMIN_YML_PATH" ] && [ ! -f "$ADMIN_YML_PATH" ]; then
+    echo "ERROR: $ADMIN_YML_PATH exists but is not a regular file." >&2
+    exit 1
+fi
+if [ ! -f "$ADMIN_YML_PATH" ]; then
+    echo "Creating empty $ADMIN_YML_PATH."
+    sudo tee "$ADMIN_YML_PATH" >/dev/null <<'YAML'
 # Managed by wow-server-sp-admin. AC_* env vars added/removed via the admin UI.
 services:
   ac-worldserver:
     environment: {}
 YAML
-    sudo chown "$(id -u):$(id -g)" "$AC_STACK_DIR/docker-compose.admin.yml"
-    sudo chmod 644 "$AC_STACK_DIR/docker-compose.admin.yml"
+    sudo chown "$(id -u):$(id -g)" "$ADMIN_YML_PATH"
+    sudo chmod 644 "$ADMIN_YML_PATH"
 fi
 
 # --- Step 4b: backups dir (rw target for the admin's in-process backup) ---

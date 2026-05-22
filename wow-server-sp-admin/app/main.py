@@ -194,6 +194,7 @@ async def api_backups(request: Request) -> HTMLResponse:
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.actions import run_force_stop, run_restart, run_start, run_stop, verify_env_vars_bound, ActionResult
+from app.services.config_policy import BLOCKED_KEYS
 from app.services.runner import ActionRecord, runner
 
 
@@ -336,12 +337,6 @@ async def settings_page(request: Request) -> HTMLResponse:
 
 
 from pydantic import BaseModel
-
-# v1 non-goal (spec): "Editing AuctionHouseBot.GUIDs (installer-managed,
-# runtime-discovered)." Refused server-side because the dist-file index
-# does contain the key, so the existence check alone wouldn't block it.
-BLOCKED_KEYS = frozenset({"AuctionHouseBot.GUIDs"})
-
 
 class ApplyPayload(BaseModel):
     pending: dict[str, str]

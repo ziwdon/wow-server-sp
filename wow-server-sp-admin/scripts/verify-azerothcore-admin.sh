@@ -25,12 +25,18 @@ else
     fail "stack dir missing: $STACK_DIR"
 fi
 
-# 2. admin container running
+# 2. admin container running and healthy
 status="$(docker inspect --format='{{.State.Status}}' azerothcore-admin 2>/dev/null || echo missing)"
 if [ "$status" = "running" ]; then
     ok "azerothcore-admin container is running"
 else
     fail "azerothcore-admin container status: $status"
+fi
+health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' azerothcore-admin 2>/dev/null || echo missing)"
+if [ "$health" = "healthy" ]; then
+    ok "azerothcore-admin container health is healthy"
+else
+    fail "azerothcore-admin container health: $health"
 fi
 
 # 3. listening on tailscale interface

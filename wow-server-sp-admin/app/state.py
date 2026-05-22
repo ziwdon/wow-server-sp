@@ -12,6 +12,7 @@ import yaml
 
 from app.services.compose_admin import AdminCompose
 from app.services.config_index import KeyEntry, build_key_index
+from app.services.config_policy import read_only_reason
 from app.services.resolver import EffectiveValue, resolve_effective
 
 
@@ -116,6 +117,7 @@ def list_keys_resolved() -> list[dict]:
             override_env=override_env,
             admin_env=admin_env,
         )
+        reason = read_only_reason(key)
         out.append(
             {
                 "key": key,
@@ -123,9 +125,12 @@ def list_keys_resolved() -> list[dict]:
                 "effective_value": ev.value,
                 "source": ev.source,
                 "default": entry.default,
+                "default_value": entry.default,
                 "inferred_type": entry.inferred_type,
                 "comment": entry.comment,
                 "source_file": entry.source_file,
+                "read_only": bool(reason),
+                "read_only_reason": reason,
             }
         )
     return out
