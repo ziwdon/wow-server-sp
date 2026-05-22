@@ -9,7 +9,36 @@
 <script src="/static/htmx-sse.js" defer></script>
 </head>
 <body>
-<header><h1>{{ title }}</h1></header>
+<nav class="topnav">
+  <a class="nav-brand" href="/"><span class="nav-icon">⚔</span> AzerothCore Admin</a>
+  <div class="nav-links">
+    <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/">Dashboard</a>
+    <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
+  </div>
+  <div class="nav-right">
+    <span id="last-refresh"></span>
+    <span id="nav-status-pill" class="status-pill">● —</span>
+  </div>
+</nav>
 <main>{% block main %}{% endblock %}</main>
+<script>
+  document.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target && e.detail.target.id === 'status') {
+      const card = document.getElementById('status');
+      if (!card) return;
+      const val = card.querySelector('.stat-value');
+      const pill = document.getElementById('nav-status-pill');
+      if (val && pill) {
+        const cls = Array.from(val.classList).find(c => c.startsWith('status-'));
+        pill.textContent = '● ' + (val.textContent.trim());
+        pill.className = 'status-pill' + (cls ? ' ' + cls : '');
+      }
+      const now = new Date();
+      const ts = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+      const ref = document.getElementById('last-refresh');
+      if (ref) ref.textContent = 'Last refresh: ' + ts;
+    }
+  });
+</script>
 </body>
 </html>
