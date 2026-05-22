@@ -3,16 +3,16 @@
 <div class="dashboard-content">
 
   <div class="stat-row">
-    <div id="status" hx-get="/api/status" hx-trigger="load, every 60s">
+    <div id="status" hx-get="/api/status" hx-trigger="load, every 10s, refresh">
       <div class="stat-card"><div class="stat-label">Server Status</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
     </div>
-    <div id="stats" hx-get="/api/stats" hx-trigger="load, every 60s">
+    <div id="stats" hx-get="/api/stats" hx-trigger="load, every 10s, refresh">
       <div class="stat-card"><div class="stat-label">Resources</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
     </div>
-    <div id="players" hx-get="/api/players" hx-trigger="load, every 60s">
+    <div id="players" hx-get="/api/players" hx-trigger="load, every 10s, refresh">
       <div class="stat-card"><div class="stat-label">Online</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
     </div>
-    <div id="backups" hx-get="/api/backups" hx-trigger="load, every 60s">
+    <div id="backups" hx-get="/api/backups" hx-trigger="load, every 10s, refresh">
       <div class="stat-card"><div class="stat-label">Last Backup</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
     </div>
   </div>
@@ -66,5 +66,16 @@ function switchLog(btn, targetId) {
   var el = document.getElementById(targetId);
   if (el) el.style.display = '';
 }
+
+// When an action finishes (SSE 'done' event), immediately refresh all stat
+// cards rather than waiting for the next 10s poll tick.
+document.addEventListener('htmx:sseMessage', function(e) {
+  if (e.detail && e.detail.type === 'done') {
+    ['status', 'stats', 'players', 'backups'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el) htmx.trigger(el, 'refresh');
+    });
+  }
+});
 </script>
 {% endblock %}
