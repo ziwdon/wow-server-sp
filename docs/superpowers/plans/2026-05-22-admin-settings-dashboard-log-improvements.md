@@ -207,6 +207,48 @@ git add wow-server-sp-admin/tests/test_logs.py wow-server-sp-admin/app/services/
 git commit -m "perf(admin): bound dashboard log tail reads"
 ```
 
+## Task 2a (Optional): Add Missing Edge-Case Log Tests
+
+Identified by the Task 2 code review as Important gaps. The code is correct in both
+cases — these tests document and lock in the behavior.
+
+**Files:**
+- Modify: `wow-server-sp-admin/tests/test_logs.py`
+
+- [ ] **Step 1: Add the two missing tests**
+
+Add to `wow-server-sp-admin/tests/test_logs.py`:
+
+```python
+def test_tail_filtered_empty_file_returns_empty(tmp_path):
+    p = tmp_path / "Server.log"
+    p.write_text("")
+    assert tail_filtered(p, n=20) == []
+
+
+def test_tail_filtered_all_benign_returns_empty(tmp_path):
+    p = tmp_path / "Playerbots.log"
+    lines = "\n".join(f"bot {i} A:follow - FAILED" for i in range(50))
+    p.write_text(lines + "\n")
+    assert tail_filtered(p, n=20) == []
+```
+
+- [ ] **Step 2: Run focused log tests**
+
+```bash
+docker run --rm -v "$(pwd)/wow-server-sp-admin:/src" -w /src python:3.12-slim \
+    bash -c "pip install -r requirements-dev.txt -q && python -m pytest tests/test_logs.py -v"
+```
+
+Expected: PASS (10 tests).
+
+- [ ] **Step 3: Commit Task 2a**
+
+```bash
+git add wow-server-sp-admin/tests/test_logs.py
+git commit -m "test(admin): cover empty-file and all-benign log tail edge cases"
+```
+
 ## Task 3: Dashboard On-Demand Logs and Scroll Limits
 
 **Files:**
