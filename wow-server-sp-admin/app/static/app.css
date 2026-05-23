@@ -433,7 +433,6 @@ pre.logview {
   font-size: 0.82rem;
 }
 .key-input:focus { outline: none; border-color: var(--gold); }
-.key-input.modified { border-color: var(--green); background: #0e1a0a; }
 .key-row-applied .key-name { color: var(--green); }
 .key-row-pending .key-name { color: var(--yellow); }
 .key-input-applied {

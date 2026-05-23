@@ -149,6 +149,7 @@ document.addEventListener('input', e => {
   if (e.target.classList.contains('key-input')) {
     const key = e.target.dataset.key;
     const k = state.keys.find(x => x.key === key);
+    if (!k) return;
     if (k.read_only) {
       delete state.pending[key];
       e.target.value = k.effective_value;
