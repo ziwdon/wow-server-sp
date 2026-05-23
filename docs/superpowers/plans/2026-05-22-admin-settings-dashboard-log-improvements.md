@@ -249,12 +249,17 @@ git add wow-server-sp-admin/tests/test_logs.py
 git commit -m "test(admin): cover empty-file and all-benign log tail edge cases"
 ```
 
-## Task 3: Dashboard On-Demand Logs and Scroll Limits
+## Task 3: Scroll Limits (CSS-only)
+
+> **Scope narrowed by user decision (2026-05-23):** Dashboard On-Demand Logs (Steps 1–3)
+> deferred. Only the CSS scroll-limit changes (Step 4) were implemented. Steps 1–3 skipped.
+> The structural CSS selector `.lower-grid > .panel:last-child .panel-body` replaces the
+> `.activity-panel` class approach so no template changes are needed.
 
 **Files:**
-- Modify: `wow-server-sp-admin/tests/test_main.py`
-- Modify: `wow-server-sp-admin/app/templates/dashboard.html`
-- Modify: `wow-server-sp-admin/app/templates/partials/logs.html`
+- ~~Modify: `wow-server-sp-admin/tests/test_main.py`~~ (skipped)
+- ~~Modify: `wow-server-sp-admin/app/templates/dashboard.html`~~ (skipped)
+- ~~Modify: `wow-server-sp-admin/app/templates/partials/logs.html`~~ (skipped)
 - Modify: `wow-server-sp-admin/app/static/app.css`
 
 - [ ] **Step 1: Write the failing dashboard log-load test**
@@ -314,7 +319,7 @@ In `wow-server-sp-admin/app/templates/partials/logs.html`, change the button tex
           hx-get="/api/logs" hx-target="#logs" hx-swap="innerHTML">Load latest logs</button>
 ```
 
-- [ ] **Step 4: Add dashboard scroll CSS**
+- [x] **Step 4: Add dashboard scroll CSS**
 
 Update `wow-server-sp-admin/app/static/app.css` dashboard rules:
 
