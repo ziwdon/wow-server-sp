@@ -31,6 +31,13 @@ function isApplied(k) {
   return k.source === 'admin' || k.source === 'installer';
 }
 
+function refreshSelectedKey() {
+  if (!state.selected) return;
+  const fresh = state.keys.find(x => x.key === state.selected.key);
+  if (fresh) selectKey(fresh);
+  else state.selected = null;
+}
+
 function updatePendingControls() {
   const pendingCount = Object.keys(state.pending).length;
   const badge = document.getElementById('pending-count');
@@ -227,6 +234,7 @@ document.getElementById('apply-confirm').addEventListener('click', async () => {
   await load();
   await watchActionUntilDone(id, 'Apply');
   await load();
+  refreshSelectedKey();
 });
 
 document.getElementById('rollback-btn').addEventListener('click', async () => {
@@ -240,6 +248,7 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
   await load();
   await watchActionUntilDone(id, 'Rollback');
   await load();
+  refreshSelectedKey();
 });
 
 const showMetaEl = document.getElementById('show-meta');
