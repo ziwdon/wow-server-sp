@@ -23,9 +23,27 @@ async function load() {
   render();
 }
 
+function hasPending(k) {
+  return Object.prototype.hasOwnProperty.call(state.pending, k.key);
+}
+
+function isApplied(k) {
+  return k.source === 'admin' || k.source === 'installer';
+}
+
+function updatePendingControls() {
+  const pendingCount = Object.keys(state.pending).length;
+  const badge = document.getElementById('pending-count');
+  if (badge) {
+    badge.textContent = pendingCount;
+    badge.style.display = pendingCount > 0 ? '' : 'none';
+  }
+  document.getElementById('apply-btn').disabled = pendingCount === 0;
+}
+
 function matches(k, q, files, modifiedOnly) {
   if (!files.has(k.source_file)) return false;
-  if (modifiedOnly && k.source !== 'admin' && k.source !== 'installer') return false;
+  if (modifiedOnly && k.source !== 'admin' && k.source !== 'installer' && !hasPending(k)) return false;
   if (!q) return true;
   const hay = (k.key + ' ' + k.default + ' ' + k.comment + ' ' + k.env_var).toLowerCase();
   return hay.includes(q.toLowerCase());
@@ -50,13 +68,7 @@ function _render() {
   const list = document.getElementById('key-list');
   list.innerHTML = '';
 
-  const pendingCount = Object.keys(state.pending).length;
-  const badge = document.getElementById('pending-count');
-  if (badge) {
-    badge.textContent = pendingCount;
-    badge.style.display = pendingCount > 0 ? '' : 'none';
-  }
-  document.getElementById('apply-btn').disabled = pendingCount === 0;
+  updatePendingControls();
 
   if (filtered.length === 0 && modifiedOnly) {
     const msg = document.createElement('p');
@@ -73,14 +85,22 @@ function _render() {
     const readOnlyBadge = readOnly
       ? `<span class="key-badge" title="${esc(readOnlyReason)}">${esc(readOnlyReason)}</span>`
       : '';
-    row.className = 'key-row source-' + k.source + (readOnly ? ' read-only' : '');
-    const pending = state.pending[k.key];
-    const value = pending !== undefined ? pending : k.effective_value;
+    const pending = hasPending(k);
+    const applied = isApplied(k);
+    const rowClasses = ['key-row', 'source-' + k.source];
+    if (readOnly) rowClasses.push('read-only');
+    if (pending) rowClasses.push('key-row-pending');
+    else if (applied) rowClasses.push('key-row-applied');
+    row.className = rowClasses.join(' ');
+    const value = pending ? state.pending[k.key] : k.effective_value;
+    const inputClasses = ['key-input'];
+    if (pending) inputClasses.push('key-input-pending');
+    else if (applied) inputClasses.push('key-input-applied');
     row.innerHTML = `
       <span class="key-name">${esc(k.key)}</span>
       <span class="key-source">${esc(k.source)}</span>
       <span class="key-flags">${readOnlyBadge}</span>
-      <input class="key-input" data-key="${esc(k.key)}" value="${esc(value)}"${readOnlyAttrs}>
+      <input class="${inputClasses.join(' ')}" data-key="${esc(k.key)}" value="${esc(value)}"${readOnlyAttrs}>
     `;
     if (document.getElementById('show-meta') && document.getElementById('show-meta').checked) {
       row.classList.add('show-meta');
@@ -101,13 +121,18 @@ function selectKey(k) {
   const readOnlyBadge = k.read_only
     ? `<span class="key-badge">${esc(k.read_only_reason || 'installer-managed')}</span>`
     : '';
+  const pending = hasPending(k);
+  const applied = isApplied(k);
+  const effectiveValue = pending ? state.pending[k.key] : k.effective_value;
+  const valueClass = pending ? ' detail-value-pending' : (applied ? ' detail-value-applied' : '');
+  const sourceText = pending ? 'pending, not applied' : `from ${k.source}`;
   detail.innerHTML = `
     <div class="detail-key-name">${esc(k.key)}</div>
     <div class="detail-env-var">${esc(k.env_var)}</div>
     ${readOnlyBadge ? `<div>${readOnlyBadge}</div>` : ''}
     <div class="detail-section">
       <div class="detail-section-label">Effective value</div>
-      <div class="detail-section-value">${esc(k.effective_value)} <span class="detail-from">(from ${esc(k.source)})</span></div>
+      <div class="detail-section-value${valueClass}">${esc(effectiveValue)} <span class="detail-from">(${esc(sourceText)})</span></div>
     </div>
     <div class="detail-section">
       <div class="detail-section-label">Default</div>
@@ -120,7 +145,7 @@ function selectKey(k) {
   `;
 }
 
-document.addEventListener('change', e => {
+document.addEventListener('input', e => {
   if (e.target.classList.contains('key-input')) {
     const key = e.target.dataset.key;
     const k = state.keys.find(x => x.key === key);
@@ -134,7 +159,17 @@ document.addEventListener('change', e => {
     } else {
       state.pending[key] = e.target.value;
     }
-    render();
+    const row = e.target.closest('.key-row');
+    const pending = hasPending(k);
+    const applied = isApplied(k);
+    if (row) {
+      row.classList.toggle('key-row-pending', pending);
+      row.classList.toggle('key-row-applied', !pending && applied);
+    }
+    e.target.classList.toggle('key-input-pending', pending);
+    e.target.classList.toggle('key-input-applied', !pending && applied);
+    updatePendingControls();
+    if (state.selected && state.selected.key === key) selectKey(k);
   }
 });
 
