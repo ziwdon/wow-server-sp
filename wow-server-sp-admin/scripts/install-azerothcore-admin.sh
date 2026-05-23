@@ -162,9 +162,10 @@ echo "Verify with: $REPO_DIR/scripts/verify-azerothcore-admin.sh"
 
 # --- Step 9: optional systemd unit ---
 echo ""
-read -rp "Install azerothcore-admin.service systemd unit (auto-start at boot)? [y/N] " answer
-if [ "${answer:-n}" = "y" ]; then
-    sudo tee /etc/systemd/system/azerothcore-admin.service <<'UNIT' >/dev/null
+read -rp "Install azerothcore-admin.service systemd unit (auto-start at boot)? [Y/n] " answer
+case "${answer:-y}" in
+    [yY])
+        sudo tee /etc/systemd/system/azerothcore-admin.service <<'UNIT' >/dev/null
 [Unit]
 Description=AzerothCore Admin (Docker Compose)
 After=docker.service
@@ -181,8 +182,9 @@ User=REPLACE_WITH_YOUR_USERNAME
 [Install]
 WantedBy=multi-user.target
 UNIT
-    sudo sed -i "s/REPLACE_WITH_YOUR_USERNAME/$(whoami)/" /etc/systemd/system/azerothcore-admin.service
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now azerothcore-admin.service
-    echo "azerothcore-admin.service installed and enabled."
-fi
+        sudo sed -i "s/REPLACE_WITH_YOUR_USERNAME/$(whoami)/" /etc/systemd/system/azerothcore-admin.service
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now azerothcore-admin.service
+        echo "azerothcore-admin.service installed and enabled."
+        ;;
+esac

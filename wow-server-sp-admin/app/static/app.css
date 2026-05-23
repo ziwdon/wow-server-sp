@@ -13,6 +13,8 @@
   --green:       #88c870;
   --red:         #c85050;
   --blue:        #7ab0e0;
+  --yellow:      #e0c45a;
+  --yellow-bg:   #2a2410;
   --log-bg:      #15130a;
   --input-bg:    #12100a;
 }
@@ -81,11 +83,13 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 /* ── Dashboard content wrapper ── */
 .dashboard-content {
   flex: 1;
+  height: calc(100vh - 52px);
   padding: 1.25rem 1.5rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* ── Stat cards ── */
@@ -149,11 +153,15 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 /* ── Lower grid ── */
 .lower-grid {
   display: grid;
-  grid-template-columns: 1fr 340px;
+  grid-template-columns: minmax(0, 1fr) 340px;
   gap: 0.75rem;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
+
+.lower-grid > .panel { min-height: 0; }
+.lower-grid > .panel:last-child .panel-body { min-height: 0; overflow-y: auto; }
 
 /* ── Panels ── */
 .panel {
@@ -236,6 +244,7 @@ pre.logview {
   list-style: none;
   font-family: 'Consolas', 'Menlo', monospace;
   font-size: 0.8rem;
+  min-height: 0;
 }
 #action-log li { padding: 0.25rem 0; border-bottom: 1px solid var(--border-dark); color: var(--text-warm); }
 #action-log li:last-child { border-bottom: none; }
@@ -254,8 +263,9 @@ pre.logview {
 /* ── Settings page ── */
 .settings-page {
   flex: 1;
+  height: calc(100vh - 52px);
   display: grid;
-  grid-template-columns: 270px 1fr 420px;
+  grid-template-columns: 270px minmax(0, 1fr) 525px;
   min-height: 0;
   overflow: hidden;
 }
@@ -360,7 +370,7 @@ pre.logview {
 .settings-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
 .key-list-header {
   display: grid;
-  grid-template-columns: 1fr 140px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
   gap: 0.5rem;
   padding: 0.45rem 0.75rem;
   background: var(--sidebar-bg);
@@ -374,17 +384,17 @@ pre.logview {
   position: sticky;
   top: 0;
 }
-.key-list-header.show-meta { grid-template-columns: 1fr 80px 100px 140px; }
+.key-list-header.show-meta { grid-template-columns: minmax(0, 1fr) 80px 100px minmax(240px, 300px); }
 .key-row {
   display: grid;
-  grid-template-columns: 1fr 140px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
   gap: 0.5rem;
   padding: 0.4rem 0.75rem;
   border-bottom: 1px solid #22201a;
   align-items: center;
   cursor: pointer;
 }
-.key-row.show-meta { grid-template-columns: 1fr 80px 100px 140px; }
+.key-row.show-meta { grid-template-columns: minmax(0, 1fr) 80px 100px minmax(240px, 300px); }
 .key-row:hover { background: #211e12; }
 .key-row.selected { background: #2a2412; border-left: 2px solid var(--gold); }
 .key-row.read-only .key-input { background: var(--sidebar-bg); color: var(--text-dim); cursor: not-allowed; }
@@ -423,7 +433,20 @@ pre.logview {
   font-size: 0.82rem;
 }
 .key-input:focus { outline: none; border-color: var(--gold); }
-.key-input.modified { border-color: var(--green); background: #0e1a0a; }
+.key-row-applied .key-name { color: var(--green); }
+.key-row-pending .key-name { color: var(--yellow); }
+.key-input-applied {
+  border-color: #2a6a1a;
+  background: #0e1a0a;
+  color: var(--green);
+}
+.key-input-pending {
+  border-color: var(--yellow);
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.detail-value-applied { color: var(--green); }
+.detail-value-pending { color: var(--yellow); }
 
 /* Settings detail panel */
 .settings-detail {
