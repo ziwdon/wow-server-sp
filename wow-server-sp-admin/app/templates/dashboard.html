@@ -46,10 +46,8 @@
       <div class="panel-header">
         <span class="panel-title">Server Activity</span>
       </div>
-      <div class="panel-body">
+      <div class="panel-body" hx-ext="sse" sse-connect="/api/action/stream">
         <ul id="action-log"
-            hx-ext="sse"
-            sse-connect="/api/action/stream"
             sse-swap="progress,done"
             hx-swap="beforeend">
         </ul>
@@ -67,10 +65,28 @@ function switchLog(btn, targetId) {
   if (el) el.style.display = '';
 }
 
-// When an action finishes (SSE 'done' event), immediately refresh all stat
-// cards rather than waiting for the next 10s poll tick.
+// Clear the action log when an action button fires so old history doesn't
+// accumulate across multiple actions.
+document.addEventListener('htmx:afterRequest', function(e) {
+  if (e.detail.elt && e.detail.elt.closest && e.detail.elt.closest('.action-bar')) {
+    document.getElementById('action-log').innerHTML = '';
+  }
+});
+
+// On SSE progress events: debounced status-card refresh so the running/exited
+// state updates during long stop/restart sequences without hammering the API.
+// On SSE done events: refresh all four stat cards immediately.
+var _sseStatusTimer;
 document.addEventListener('htmx:sseMessage', function(e) {
-  if (e.detail && e.detail.type === 'done') {
+  if (!e.detail) return;
+  if (e.detail.type === 'progress') {
+    clearTimeout(_sseStatusTimer);
+    _sseStatusTimer = setTimeout(function() {
+      var el = document.getElementById('status');
+      if (el) htmx.trigger(el, 'refresh');
+    }, 2000);
+  } else if (e.detail.type === 'done') {
+    clearTimeout(_sseStatusTimer);
     ['status', 'stats', 'players', 'backups'].forEach(function(id) {
       var el = document.getElementById(id);
       if (el) htmx.trigger(el, 'refresh');
