@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -49,8 +49,29 @@ async def lifespan(app: FastAPI):
     yield
 
 
+class _GZipExcludeSSE:
+    """GZip middleware that bypasses compression for the SSE stream endpoint.
+
+    Starlette's GZipMiddleware compresses text/event-stream responses when the
+    browser sends Accept-Encoding: gzip (which EventSource always does). Some
+    browsers cannot decode gzip-encoded SSE streams and silently drop all
+    events. The /api/action/stream endpoint must be uncompressed; everything
+    else benefits from normal GZip compression.
+    """
+
+    def __init__(self, app, minimum_size: int = 1024) -> None:
+        self._gzip = _GZipMiddleware(app, minimum_size=minimum_size)
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("path") == "/api/action/stream":
+            await self._app(scope, receive, send)
+        else:
+            await self._gzip(scope, receive, send)
+
+
 app = FastAPI(title="azerothcore-admin", lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+app.add_middleware(_GZipExcludeSSE, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
