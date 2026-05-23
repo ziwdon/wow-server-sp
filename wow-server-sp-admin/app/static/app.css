@@ -13,6 +13,8 @@
   --green:       #88c870;
   --red:         #c85050;
   --blue:        #7ab0e0;
+  --yellow:      #e0c45a;
+  --yellow-bg:   #2a2410;
   --log-bg:      #15130a;
   --input-bg:    #12100a;
 }
@@ -261,8 +263,9 @@ pre.logview {
 /* ── Settings page ── */
 .settings-page {
   flex: 1;
+  height: calc(100vh - 52px);
   display: grid;
-  grid-template-columns: 270px 1fr 420px;
+  grid-template-columns: 270px minmax(0, 1fr) 525px;
   min-height: 0;
   overflow: hidden;
 }
@@ -367,7 +370,7 @@ pre.logview {
 .settings-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
 .key-list-header {
   display: grid;
-  grid-template-columns: 1fr 140px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
   gap: 0.5rem;
   padding: 0.45rem 0.75rem;
   background: var(--sidebar-bg);
@@ -381,17 +384,17 @@ pre.logview {
   position: sticky;
   top: 0;
 }
-.key-list-header.show-meta { grid-template-columns: 1fr 80px 100px 140px; }
+.key-list-header.show-meta { grid-template-columns: minmax(0, 1fr) 80px 100px minmax(240px, 300px); }
 .key-row {
   display: grid;
-  grid-template-columns: 1fr 140px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 300px);
   gap: 0.5rem;
   padding: 0.4rem 0.75rem;
   border-bottom: 1px solid #22201a;
   align-items: center;
   cursor: pointer;
 }
-.key-row.show-meta { grid-template-columns: 1fr 80px 100px 140px; }
+.key-row.show-meta { grid-template-columns: minmax(0, 1fr) 80px 100px minmax(240px, 300px); }
 .key-row:hover { background: #211e12; }
 .key-row.selected { background: #2a2412; border-left: 2px solid var(--gold); }
 .key-row.read-only .key-input { background: var(--sidebar-bg); color: var(--text-dim); cursor: not-allowed; }
@@ -431,6 +434,20 @@ pre.logview {
 }
 .key-input:focus { outline: none; border-color: var(--gold); }
 .key-input.modified { border-color: var(--green); background: #0e1a0a; }
+.key-row-applied .key-name { color: var(--green); }
+.key-row-pending .key-name { color: var(--yellow); }
+.key-input-applied {
+  border-color: #2a6a1a;
+  background: #0e1a0a;
+  color: var(--green);
+}
+.key-input-pending {
+  border-color: var(--yellow);
+  background: var(--yellow-bg);
+  color: var(--yellow);
+}
+.detail-value-applied { color: var(--green); }
+.detail-value-pending { color: var(--yellow); }
 
 /* Settings detail panel */
 .settings-detail {
