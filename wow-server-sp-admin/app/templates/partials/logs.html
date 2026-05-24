@@ -6,13 +6,16 @@
 <div class="log-tabs">
   <button class="log-tab active" onclick="switchLog(this, 'server-log')">Server.log</button>
   <button class="log-tab" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
+  <button class="log-tab{% if errors_size > 0 %} log-tab-dirty{% endif %}" onclick="switchLog(this, 'errors-log')">Errors.log</button>
 </div>
 <div class="log-errors-bar {% if errors_size == 0 %}clean{% else %}dirty{% endif %}">
+  <span class="errors-dot"></span>
   {% if errors_size == 0 %}
-  <span class="errors-dot"></span> Errors.log: {{ errors_size }} bytes (clean)
+  ✔ No runtime errors
   {% else %}
-  <span class="errors-dot"></span> Errors.log: {{ errors_size }} bytes
+  ✘ Runtime errors detected — see Errors.log tab
   {% endif %}
 </div>
 <pre id="server-log" class="logview">{{ server_lines|join('\n') }}</pre>
 <pre id="playerbots-log" class="logview" style="display:none">{{ pb_lines|join('\n') }}</pre>
+<pre id="errors-log" class="logview" style="display:none">{{ errors_lines|join('\n') }}</pre>

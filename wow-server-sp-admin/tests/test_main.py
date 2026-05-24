@@ -43,6 +43,27 @@ def test_api_logs_requests_forty_lines():
         client = TestClient(app)
         resp = client.get("/api/logs")
     assert resp.status_code == 200
-    assert mock_tail.call_count == 2
+    assert mock_tail.call_count == 3  # Server.log, Playerbots.log, Errors.log
     for c in mock_tail.call_args_list:
         assert c.kwargs["n"] == 40
+
+
+def test_api_logs_errors_tab_present_and_dirty_when_errors_exist():
+    with patch("app.main.logs_svc.tail_filtered", return_value=["an error line"]), \
+         patch("app.main.logs_svc.file_size", return_value=172):
+        client = TestClient(app)
+        resp = client.get("/api/logs")
+    assert resp.status_code == 200
+    assert 'id="errors-log"' in resp.text
+    assert "log-tab-dirty" in resp.text
+    assert "Runtime errors detected" in resp.text
+
+
+def test_api_logs_clean_bar_when_errors_log_empty():
+    with patch("app.main.logs_svc.tail_filtered", return_value=[]), \
+         patch("app.main.logs_svc.file_size", return_value=0):
+        client = TestClient(app)
+        resp = client.get("/api/logs")
+    assert resp.status_code == 200
+    assert "No runtime errors" in resp.text
+    assert "log-tab-dirty" not in resp.text
