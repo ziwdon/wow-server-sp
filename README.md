@@ -1,6 +1,6 @@
 # AzerothCore Single Player Server + Web Admin
 
-A Docker-based WoW 3.3.5a private server for solo or small-group play, with AI bots to fill the world, an active auction house, and per-character expansion progression. Comes with a bash installer and a web admin UI.
+A Docker-based AzerothCore installer for solo or small-group play, with AI bots to fill the world, an active auction house, and per-character expansion progression. Includes a web admin UI for managing and tuning the server.
 
 Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that lets you reach the server without exposing any port to the internet.
 
