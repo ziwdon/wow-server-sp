@@ -210,3 +210,19 @@ def test_shared_flat_comment_reaches_all_keys(tmp_path):
         entries["Foo.ForceWhenInZone"].comment
         == entries["Foo.ForceWhenInRadius"].comment
     ), "All keys in a shared flat block should have the same description"
+
+
+def test_flat_comment_does_not_bleed_across_blank_line(tmp_path):
+    """A flat comment should not propagate to KV lines separated by a blank line."""
+    f = tmp_path / "playerbots.conf.dist"
+    f.write_text(
+        "# This comment belongs to KeyA only.\n"
+        "Foo.KeyA = 1\n"
+        "\n"
+        "Foo.KeyB = 2\n"
+    )
+    entries = {e.key: e for e in parse_dist_file(f)}
+    assert "belongs to KeyA" in entries["Foo.KeyA"].comment
+    assert entries["Foo.KeyB"].comment == "", (
+        "KeyB is separated by a blank line and should not inherit KeyA's comment"
+    )
