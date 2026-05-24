@@ -8,33 +8,37 @@
       <input class="search-input" type="text" id="search" placeholder="Key, value, or comment…">
     </div>
 
-    <div class="sidebar-section">
-      <div class="sidebar-label">Source file</div>
-      <div class="check-group">
-        <label class="check-item"><input type="checkbox" value="worldserver.conf.dist" checked> worldserver</label>
-        <label class="check-item"><input type="checkbox" value="playerbots.conf.dist" checked> playerbots</label>
-        <label class="check-item"><input type="checkbox" value="mod_ahbot.conf.dist" checked> mod_ahbot</label>
-        <label class="check-item"><input type="checkbox" value="individualProgression.conf.dist" checked> individualProgression</label>
+    <button class="mobile-filter-toggle" id="mobile-filter-toggle">⚙ Filters ▼</button>
+
+    <div class="mobile-collapsible" id="sidebar-extra">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Source file</div>
+        <div class="check-group">
+          <label class="check-item"><input type="checkbox" value="worldserver.conf.dist" checked> worldserver</label>
+          <label class="check-item"><input type="checkbox" value="playerbots.conf.dist" checked> playerbots</label>
+          <label class="check-item"><input type="checkbox" value="mod_ahbot.conf.dist" checked> mod_ahbot</label>
+          <label class="check-item"><input type="checkbox" value="individualProgression.conf.dist" checked> individualProgression</label>
+        </div>
       </div>
-    </div>
 
-    <div class="sidebar-section">
-      <div class="sidebar-label">Display</div>
-      <label class="toggle-item">
-        <input type="checkbox" id="only-modified" checked>
-        <span class="toggle-label-wrap"><span>Show only modified</span></span>
-      </label>
-      <label class="toggle-item">
-        <input type="checkbox" id="show-meta">
-        <span class="toggle-label-wrap"><span>Show source &amp; flags</span></span>
-      </label>
-      <label class="toggle-item">
-        <input type="checkbox" id="only-pending">
-        <span class="toggle-label-wrap"><span>Show pending changes</span></span>
-      </label>
-    </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">Display</div>
+        <label class="toggle-item">
+          <input type="checkbox" id="only-modified" checked>
+          <span class="toggle-label-wrap"><span>Show only modified</span></span>
+        </label>
+        <label class="toggle-item">
+          <input type="checkbox" id="show-meta">
+          <span class="toggle-label-wrap"><span>Show source &amp; flags</span></span>
+        </label>
+        <label class="toggle-item">
+          <input type="checkbox" id="only-pending">
+          <span class="toggle-label-wrap"><span>Show pending changes</span></span>
+        </label>
+      </div>
 
-    <div id="result-count"></div>
+      <div id="result-count"></div>
+    </div>
 
     <div class="sidebar-actions">
       <button class="btn btn-apply" id="apply-btn" disabled>Apply <span class="pending-badge" id="pending-count">0</span></button>
