@@ -134,6 +134,13 @@ function _render() {
   }
 }
 
+function closeMobileDetail() {
+  document.getElementById('key-detail').classList.remove('mobile-visible');
+  state.selected = null;
+  const prev = document.querySelector('.key-row.selected');
+  if (prev) prev.classList.remove('selected');
+}
+
 function selectKey(k) {
   const prev = document.querySelector('.key-row.selected');
   if (prev) prev.classList.remove('selected');
@@ -153,6 +160,7 @@ function selectKey(k) {
   const valueClass = pending ? ' detail-value-pending' : (applied ? ' detail-value-applied' : '');
   const sourceText = pending ? 'pending, not applied' : `from ${k.source}`;
   detail.innerHTML = `
+    <button class="mobile-back-btn" onclick="closeMobileDetail()">← Back</button>
     <div class="detail-key-name">${esc(k.key)}</div>
     <div class="detail-env-var">${esc(k.env_var)}</div>
     ${readOnlyBadge ? `<div>${readOnlyBadge}</div>` : ''}
@@ -169,6 +177,10 @@ function selectKey(k) {
       <div class="detail-comment">${esc(k.comment || '(no comment)')}</div>
     </div>
   `;
+
+  if (window.innerWidth <= 768) {
+    detail.classList.add('mobile-visible');
+  }
 }
 
 document.addEventListener('input', e => {
@@ -293,6 +305,16 @@ if (showMetaEl) {
       }
     }
     render();
+  });
+}
+
+// Mobile filter toggle
+const mobileFilterToggle = document.getElementById('mobile-filter-toggle');
+const sidebarExtra = document.getElementById('sidebar-extra');
+if (mobileFilterToggle && sidebarExtra) {
+  mobileFilterToggle.addEventListener('click', () => {
+    const isOpen = sidebarExtra.classList.toggle('open');
+    mobileFilterToggle.textContent = isOpen ? '⚙ Filters ▲' : '⚙ Filters ▼';
   });
 }
 
