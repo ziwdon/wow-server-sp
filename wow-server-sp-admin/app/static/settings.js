@@ -109,6 +109,7 @@ function _render() {
     if (readOnly) rowClasses.push('read-only');
     if (pending) rowClasses.push('key-row-pending');
     else if (applied) rowClasses.push('key-row-applied');
+    if (state.selected && k.key === state.selected.key) rowClasses.push('selected');
     row.className = rowClasses.join(' ');
     const value = pending ? state.pending[k.key] : k.effective_value;
     const inputClasses = ['key-input'];
@@ -134,7 +135,14 @@ function _render() {
 }
 
 function selectKey(k) {
+  const prev = document.querySelector('.key-row.selected');
+  if (prev) prev.classList.remove('selected');
+
   state.selected = k;
+
+  const newRow = document.querySelector(`.key-input[data-key="${k.key}"]`)?.closest('.key-row');
+  if (newRow) newRow.classList.add('selected');
+
   const detail = document.getElementById('key-detail');
   const readOnlyBadge = k.read_only
     ? `<span class="key-badge">${esc(k.read_only_reason || 'installer-managed')}</span>`
