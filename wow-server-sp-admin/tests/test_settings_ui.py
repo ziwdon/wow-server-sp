@@ -47,3 +47,16 @@ def test_css_stat_card_equal_height():
 def test_css_btn_block_removed():
     css = _read("app/static/app.css")
     assert ".btn-block" not in css
+
+
+def test_settings_html_has_only_pending_checkbox():
+    html = _read("app/templates/settings.html")
+    assert 'id="only-pending"' in html
+    assert "Show pending changes" in html
+
+
+def test_settings_js_handles_only_pending_filter():
+    script = _read("app/static/settings.js")
+    assert "only-pending" in script
+    assert "pendingOnly" in script
+    assert "No pending changes" in script

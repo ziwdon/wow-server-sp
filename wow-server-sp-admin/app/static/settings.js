@@ -48,8 +48,9 @@ function updatePendingControls() {
   document.getElementById('apply-btn').disabled = pendingCount === 0;
 }
 
-function matches(k, q, files, modifiedOnly) {
+function matches(k, q, files, modifiedOnly, pendingOnly) {
   if (!files.has(k.source_file)) return false;
+  if (pendingOnly && !hasPending(k)) return false;
   if (modifiedOnly && k.source !== 'admin' && k.source !== 'installer' && !hasPending(k)) return false;
   if (!q) return true;
   const hay = (k.key + ' ' + k.default + ' ' + k.comment + ' ' + k.env_var).toLowerCase();
@@ -69,7 +70,8 @@ function _render() {
       .filter(c => c.checked).map(c => c.value)
   );
   const modifiedOnly = document.getElementById('only-modified').checked;
-  const filtered = state.keys.filter(k => matches(k, q, files, modifiedOnly));
+  const pendingOnly = document.getElementById('only-pending').checked;
+  const filtered = state.keys.filter(k => matches(k, q, files, modifiedOnly, pendingOnly));
   document.getElementById('result-count').textContent = `${filtered.length} keys`;
 
   const list = document.getElementById('key-list');
@@ -77,12 +79,21 @@ function _render() {
 
   updatePendingControls();
 
-  if (filtered.length === 0 && modifiedOnly) {
-    const msg = document.createElement('p');
-    msg.className = 'empty-state';
-    msg.textContent = 'No modified configurations — uncheck "Show only modified" to browse all keys.';
-    list.appendChild(msg);
-    return;
+  if (filtered.length === 0) {
+    if (pendingOnly) {
+      const msg = document.createElement('p');
+      msg.className = 'empty-state';
+      msg.textContent = 'No pending changes — edit a value to stage it for apply.';
+      list.appendChild(msg);
+      return;
+    }
+    if (modifiedOnly) {
+      const msg = document.createElement('p');
+      msg.className = 'empty-state';
+      msg.textContent = 'No modified configurations — uncheck "Show only modified" to browse all keys.';
+      list.appendChild(msg);
+      return;
+    }
   }
   filtered.slice(0, 200).forEach(k => {
     const row = document.createElement('div');
@@ -181,7 +192,7 @@ document.addEventListener('input', e => {
   }
 });
 
-['search', 'only-modified'].forEach(id => {
+['search', 'only-modified', 'only-pending'].forEach(id => {
   document.getElementById(id).addEventListener('input', render);
 });
 document.querySelectorAll('.check-group input[type=checkbox][value]')
