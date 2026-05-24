@@ -60,3 +60,10 @@ def test_settings_js_handles_only_pending_filter():
     assert "only-pending" in script
     assert "pendingOnly" in script
     assert "No pending changes" in script
+
+
+def test_settings_js_applies_selected_class_to_row():
+    script = _read("app/static/settings.js")
+    assert "classList.remove('selected')" in script
+    assert "classList.add('selected')" in script
+    assert "'selected'" in script  # pushed to rowClasses in _render
