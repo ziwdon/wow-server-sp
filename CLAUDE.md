@@ -54,6 +54,7 @@ chmod +x scripts/*.sh
 ./scripts/uninstall-azerothcore.sh --yes             # skip confirmation
 
 ./wow-server-sp-admin/scripts/install-azerothcore-admin.sh         # install/upgrade the admin stack
+./wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh        # rebuild+restart after code changes (preserves admin.yml, .env, snapshots)
 ./wow-server-sp-admin/scripts/verify-azerothcore-admin.sh          # post-install admin verification
 ./wow-server-sp-admin/scripts/uninstall-azerothcore-admin.sh       # remove admin stack only (not AC)
 ./wow-server-sp-admin/scripts/uninstall-azerothcore-admin.sh --dry-run
@@ -197,6 +198,8 @@ These are the cross-cutting invariants of `wow-server-sp-admin/` you need to kno
 
 **`config_index.py` comment parsing has two non-obvious rules.** `parse_dist_file()` tracks two kinds of comment associations: (1) *per-key blocks* — `_comments_by_key()` splits a structured comment section into a dict keyed by the SHORT identifier that appears in the comment text (e.g. `"BotActiveAlone"`), NOT the full config key. The lookup therefore does a suffix fallback: if `active_comment_by_key.get(key)` misses and the key contains a `.`, it retries with `key.rsplit(".", 1)[1]`. Do not remove that fallback — it is what makes `AiPlayerbot.BotActiveAlone` find its description. (2) *flat blocks* — when no per-key dict is present, all consecutive KV lines that follow a comment block share it. Sharing stops at a blank line: `had_blank = True` is set on every empty line, and the flat path clears `active_comment` when `had_blank` is true before the current KV. This prevents descriptions from bleeding across blank-line-separated, unrelated config keys.
 
+**`$STACK_DIR/build/dist/` is not in the repo.** The installer creates it at `install-azerothcore-admin.sh:118` (`mkdir -p "$STACK_DIR/build/dist"`). Any script that runs `rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"` will wipe it. Always add `mkdir -p "$STACK_DIR/build/dist"` immediately after the rsync, before copying `.conf.dist` files.
+
 **Mobile responsive layout uses `@media (max-width: 768px)` — desktop is untouched above that breakpoint.** Key conventions: `#last-refresh` is `display: none` on mobile (too narrow). The settings sidebar becomes a sticky compact bar with a collapsible `.mobile-collapsible` section toggled by `#mobile-filter-toggle`; toggle JS lives at the bottom of `settings.js` alongside `load()`. The settings detail panel slides in as a full-screen overlay (`position: fixed; transform: translateX(100%)` → `.mobile-visible` class removes the transform); `selectKey()` adds `mobile-visible` when `window.innerWidth <= 768`. `closeMobileDetail()` is a global function defined in `settings.js` that removes `mobile-visible` and clears `state.selected`; the Back button inside the detail panel calls it via `onclick`. The `#result-count` div must live OUTSIDE the `.mobile-collapsible` wrapper so the key count remains visible when filters are collapsed.
 
 ## Reference docs
@@ -221,6 +224,8 @@ The `docs/` directory contains offline reference material. Consult it whenever y
 When making changes to config keys, reviewing module behaviour, or writing install logic, read the relevant wiki pages and the `.conf.dist` file rather than guessing defaults.
 
 Check `docs/superpowers/plans/` and `docs/superpowers/specs/` before starting non-trivial architectural work — in-flight designs and partially-executed plans live there and may already cover the task, or constrain how it should be approached.
+
+Note: `docs/` is gitignored — specs and plans cannot be committed.
 
 ## Constraints to preserve
 
