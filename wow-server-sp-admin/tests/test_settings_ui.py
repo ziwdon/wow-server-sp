@@ -36,3 +36,42 @@ def test_settings_css_widens_value_and_detail_columns():
     assert "minmax(240px, 300px)" in css
     assert ".key-input-pending" in css
     assert ".key-input-applied" in css
+
+
+def test_css_stat_card_equal_height():
+    css = _read("app/static/app.css")
+    assert ".stat-row > div { min-width: 0; display: flex; flex-direction: column; }" in css
+    assert ".stat-row .stat-card { flex: 1; }" in css
+
+
+def test_css_btn_block_removed():
+    css = _read("app/static/app.css")
+    assert ".btn-block" not in css
+
+
+def test_settings_html_has_only_pending_checkbox():
+    html = _read("app/templates/settings.html")
+    assert 'id="only-pending"' in html
+    assert "Show pending changes" in html
+
+
+def test_settings_js_handles_only_pending_filter():
+    script = _read("app/static/settings.js")
+    assert "only-pending" in script
+    assert "pendingOnly" in script
+    assert "No pending changes" in script
+
+
+def test_settings_js_applies_selected_class_to_row():
+    script = _read("app/static/settings.js")
+    assert "classList.remove('selected')" in script
+    assert "classList.add('selected')" in script
+    assert "'selected'" in script  # pushed to rowClasses in _render
+
+
+def test_settings_js_redirects_to_dashboard_on_success():
+    script = _read("app/static/settings.js")
+    assert "window.location.href = '/'" in script
+    assert "hardError" in script
+    assert "resolve(true)" in script
+    assert "resolve(false)" in script
