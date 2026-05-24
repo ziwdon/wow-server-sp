@@ -156,3 +156,57 @@ def test_build_key_index_fails_when_required_dist_files_are_missing(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="playerbots.conf.dist"):
         build_key_index(tmp_path)
+
+
+def test_grouped_comment_with_dotted_prefix_keys(tmp_path):
+    """Keys like AiPlayerbot.BotActiveAlone get the comment even though the comment
+    block uses the short name BotActiveAlone (without the prefix)."""
+    f = tmp_path / "playerbots.conf.dist"
+    f.write_text(
+        "####################################\n"
+        "# ACTIVITY\n"
+        "#\n"
+        "# BotActiveAlone\n"
+        "# - Controls how many bots are active.\n"
+        "#\n"
+        "# BotActiveAloneDurationSeconds\n"
+        "# - How often the active roster rotates.\n"
+        "#\n"
+        "AiPlayerbot.BotActiveAlone = 10\n"
+        "AiPlayerbot.BotActiveAloneDurationSeconds = 30\n"
+    )
+    entries = {e.key: e for e in parse_dist_file(f)}
+    assert entries["AiPlayerbot.BotActiveAlone"].comment != "", (
+        "BotActiveAlone should get its description via suffix match"
+    )
+    assert "Controls how many bots" in entries["AiPlayerbot.BotActiveAlone"].comment
+    assert "active roster rotates" in entries["AiPlayerbot.BotActiveAloneDurationSeconds"].comment
+
+
+def test_shared_flat_comment_reaches_all_keys(tmp_path):
+    """When multiple KV lines share a single comment block (no per-key split),
+    every key in that group gets the description, not just the first one."""
+    f = tmp_path / "playerbots.conf.dist"
+    f.write_text(
+        "#\n"
+        "# Force-active rules (1 = on, 0 = off)\n"
+        "# InRadius  - A real player is within this many yards.\n"
+        "# InZone    - A real player is in the same zone.\n"
+        "# InGuild   - The bot is in a guild with a real player.\n"
+        "#\n"
+        "Foo.ForceWhenInRadius = 150\n"
+        "Foo.ForceWhenInZone = 1\n"
+        "Foo.ForceWhenInGuild = 1\n"
+    )
+    entries = {e.key: e for e in parse_dist_file(f)}
+    assert entries["Foo.ForceWhenInRadius"].comment != ""
+    assert entries["Foo.ForceWhenInZone"].comment != "", (
+        "Second key in shared block should also get the description"
+    )
+    assert entries["Foo.ForceWhenInGuild"].comment != "", (
+        "Third key in shared block should also get the description"
+    )
+    assert (
+        entries["Foo.ForceWhenInZone"].comment
+        == entries["Foo.ForceWhenInRadius"].comment
+    ), "All keys in a shared flat block should have the same description"

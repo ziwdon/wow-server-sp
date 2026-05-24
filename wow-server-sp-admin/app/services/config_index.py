@@ -164,9 +164,14 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
 
         if active_comment_by_key:
             comment_text = active_comment_by_key.get(key, "")
+            if not comment_text and "." in key:
+                # Comment block used the short name (e.g. "BotActiveAlone") but the
+                # config key has a dotted prefix ("AiPlayerbot.BotActiveAlone").
+                comment_text = active_comment_by_key.get(key.rsplit(".", 1)[1], "")
         else:
             comment_text = "\n".join(active_comment).strip()
-            active_comment = []
+            # Do NOT clear active_comment here. Consecutive KV lines that share
+            # the same flat comment block (no per-key split) should all inherit it.
 
         entries.append(
             KeyEntry(
