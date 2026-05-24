@@ -125,12 +125,14 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
     last_comment_block: list[str] = []
     active_comment: list[str] = []
     active_comment_by_key: dict[str, str] = {}
+    had_blank = False  # True after a blank line; breaks flat-comment inheritance
 
     for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
         line = raw.rstrip()
         stripped = line.lstrip()
 
         if not stripped:
+            had_blank = True
             continue
 
         if stripped.startswith("#"):
@@ -148,6 +150,7 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
             last_comment_block = []
             active_comment = []
             active_comment_by_key = {}
+            had_blank = False
             continue
 
         key, raw_value = match.groups()
@@ -161,6 +164,7 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
             active_comment_by_key = _comments_by_key(active_comment)
             pending_comment = []
             last_comment_block = []
+            had_blank = False
 
         if active_comment_by_key:
             comment_text = active_comment_by_key.get(key, "")
@@ -169,11 +173,12 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
                 # config key has a dotted prefix ("AiPlayerbot.BotActiveAlone").
                 comment_text = active_comment_by_key.get(key.rsplit(".", 1)[1], "")
         else:
+            # Flat comment block: all consecutive KV lines (no blank gap) inherit it.
+            # A blank line between KV entries breaks the inheritance so an unrelated
+            # key cannot accidentally display a previous group's description.
+            if had_blank:
+                active_comment = []
             comment_text = "\n".join(active_comment).strip()
-            # Do NOT clear active_comment here. Consecutive KV lines that share
-            # the same flat comment block (no per-key split) should all inherit it.
-            # active_comment is reset naturally when pending_comment or
-            # last_comment_block fires on the next distinct comment section.
 
         entries.append(
             KeyEntry(
@@ -186,6 +191,7 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
                 env_var=config_key_to_ac_env_var(key),
             )
         )
+        had_blank = False
 
     return entries
 
