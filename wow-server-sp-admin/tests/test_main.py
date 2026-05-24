@@ -35,3 +35,14 @@ def test_api_backups_timestamp_includes_utc():
         resp = client.get("/api/backups")
     assert resp.status_code == 200
     assert "UTC" in resp.text
+
+
+def test_api_logs_requests_forty_lines():
+    with patch("app.main.logs_svc.tail_filtered", return_value=[]) as mock_tail, \
+         patch("app.main.logs_svc.file_size", return_value=0):
+        client = TestClient(app)
+        resp = client.get("/api/logs")
+    assert resp.status_code == 200
+    assert mock_tail.call_count == 2
+    for c in mock_tail.call_args_list:
+        assert c.kwargs["n"] == 40

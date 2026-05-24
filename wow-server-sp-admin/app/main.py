@@ -204,8 +204,8 @@ async def api_logs(request: Request) -> HTMLResponse:
         {
             "request": request,
             "errors_size": logs_svc.file_size(logs_dir / "Errors.log"),
-            "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=20),
-            "pb_lines": logs_svc.tail_filtered(logs_dir / "Playerbots.log", n=20),
+            "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=40),
+            "pb_lines": logs_svc.tail_filtered(logs_dir / "Playerbots.log", n=40),
         },
     )
 

@@ -48,8 +48,9 @@ function updatePendingControls() {
   document.getElementById('apply-btn').disabled = pendingCount === 0;
 }
 
-function matches(k, q, files, modifiedOnly) {
+function matches(k, q, files, modifiedOnly, pendingOnly) {
   if (!files.has(k.source_file)) return false;
+  if (pendingOnly && !hasPending(k)) return false;
   if (modifiedOnly && k.source !== 'admin' && k.source !== 'installer' && !hasPending(k)) return false;
   if (!q) return true;
   const hay = (k.key + ' ' + k.default + ' ' + k.comment + ' ' + k.env_var).toLowerCase();
@@ -69,7 +70,8 @@ function _render() {
       .filter(c => c.checked).map(c => c.value)
   );
   const modifiedOnly = document.getElementById('only-modified').checked;
-  const filtered = state.keys.filter(k => matches(k, q, files, modifiedOnly));
+  const pendingOnly = document.getElementById('only-pending').checked;
+  const filtered = state.keys.filter(k => matches(k, q, files, modifiedOnly, pendingOnly));
   document.getElementById('result-count').textContent = `${filtered.length} keys`;
 
   const list = document.getElementById('key-list');
@@ -77,12 +79,21 @@ function _render() {
 
   updatePendingControls();
 
-  if (filtered.length === 0 && modifiedOnly) {
-    const msg = document.createElement('p');
-    msg.className = 'empty-state';
-    msg.textContent = 'No modified configurations — uncheck "Show only modified" to browse all keys.';
-    list.appendChild(msg);
-    return;
+  if (filtered.length === 0) {
+    if (pendingOnly) {
+      const msg = document.createElement('p');
+      msg.className = 'empty-state';
+      msg.textContent = 'No pending changes — edit a value to stage it for apply.';
+      list.appendChild(msg);
+      return;
+    }
+    if (modifiedOnly) {
+      const msg = document.createElement('p');
+      msg.className = 'empty-state';
+      msg.textContent = 'No modified configurations — uncheck "Show only modified" to browse all keys.';
+      list.appendChild(msg);
+      return;
+    }
   }
   filtered.slice(0, 200).forEach(k => {
     const row = document.createElement('div');
@@ -98,6 +109,7 @@ function _render() {
     if (readOnly) rowClasses.push('read-only');
     if (pending) rowClasses.push('key-row-pending');
     else if (applied) rowClasses.push('key-row-applied');
+    if (state.selected && k.key === state.selected.key) rowClasses.push('selected');
     row.className = rowClasses.join(' ');
     const value = pending ? state.pending[k.key] : k.effective_value;
     const inputClasses = ['key-input'];
@@ -123,7 +135,14 @@ function _render() {
 }
 
 function selectKey(k) {
+  const prev = document.querySelector('.key-row.selected');
+  if (prev) prev.classList.remove('selected');
+
   state.selected = k;
+
+  const newRow = document.querySelector(`.key-input[data-key="${k.key}"]`)?.closest('.key-row');
+  if (newRow) newRow.classList.add('selected');
+
   const detail = document.getElementById('key-detail');
   const readOnlyBadge = k.read_only
     ? `<span class="key-badge">${esc(k.read_only_reason || 'installer-managed')}</span>`
@@ -181,7 +200,7 @@ document.addEventListener('input', e => {
   }
 });
 
-['search', 'only-modified'].forEach(id => {
+['search', 'only-modified', 'only-pending'].forEach(id => {
   document.getElementById(id).addEventListener('input', render);
 });
 document.querySelectorAll('.check-group input[type=checkbox][value]')
@@ -209,12 +228,12 @@ function watchActionUntilDone(id, label) {
       es.close();
       if (/action-error/.test(e.data)) {
         showBanner(`${label} finished with error — see action log.`);
-      } else if (/verify-failed/.test(e.data)) {
-        showBanner(`${label} applied, but some env vars did not bind. See action log.`);
+        resolve(true);
+      } else {
+        resolve(false);
       }
-      resolve();
     });
-    es.addEventListener('idle', () => { es.close(); resolve(); });
+    es.addEventListener('idle', () => { es.close(); resolve(false); });
   });
 }
 
@@ -232,9 +251,13 @@ document.getElementById('apply-confirm').addEventListener('click', async () => {
   const { id } = await r.json();
   state.pending = {};
   await load();
-  await watchActionUntilDone(id, 'Apply');
-  await load();
-  refreshSelectedKey();
+  const hardError = await watchActionUntilDone(id, 'Apply');
+  if (hardError) {
+    await load();
+    refreshSelectedKey();
+  } else {
+    window.location.href = '/';
+  }
 });
 
 document.getElementById('rollback-btn').addEventListener('click', async () => {
@@ -246,9 +269,13 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
   }
   const { id } = await r.json();
   await load();
-  await watchActionUntilDone(id, 'Rollback');
-  await load();
-  refreshSelectedKey();
+  const hardError = await watchActionUntilDone(id, 'Rollback');
+  if (hardError) {
+    await load();
+    refreshSelectedKey();
+  } else {
+    window.location.href = '/';
+  }
 });
 
 const showMetaEl = document.getElementById('show-meta');
