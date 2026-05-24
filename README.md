@@ -1,305 +1,80 @@
-# AzerothCore + Playerbots + AH Bot Plus + Individual Progression — Docker Installer
+# AzerothCore Single Player Server + Web Admin
 
-Bash installer for a private, home-server AzerothCore (WoW 3.3.5a) stack on Docker, bundling:
+A Docker-based WoW 3.3.5a private server for solo or small-group play, with AI bots to fill the world, an active auction house, and per-character expansion progression. Comes with a bash installer and a web admin UI.
 
-- `mod-playerbots` — fill the world with AI players
-- `mod-ah-bot-plus` — keep the auction house populated
-- `mod-individual-progression` — per-character expansion progression (Vanilla → TBC → WotLK)
+Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that lets you reach the server without exposing any port to the internet.
 
-Target setup:
+## What's in the box
 
-- Ubuntu 22.04 LTS (CLI). Ubuntu 24.04 is detected and only allowed after confirmation
-- Installed under `/opt/stacks/azerothcore/`
-- Private play, small number of human players, a few hundred playerbots
-- WoW clients connect over Tailscale only — no public IP, no port forwarding
+**Installer** (`scripts/`)
+- Single bash script — handles everything from Docker setup to first server boot
+- Phase-based checkpointing: auto-resumes after failures, reboots, or SSH disconnects
+
+**Mods**
+- [`mod-playerbots`](https://github.com/liyunfan1223/mod-playerbots) — fill the world with AI players that level, quest, trade, and group
+- [`mod-ah-bot-plus`](https://github.com/ZhengPeiRu21/mod-ah-bot-plus) — keep the auction house stocked and buying
+- [`mod-individual-progression`](https://github.com/ZhengPeiRu21/mod-individual-progression) — per-character expansion gating (Vanilla → TBC → WotLK)
+
+**Web admin** (`wow-server-sp-admin/`)
+- Live stats: server status, players online, active bots, uptime
+- Start / Stop / Restart with a live SSE progress log
+- Settings editor — browse, edit, and apply any server config with live apply + rollback
+- Log viewer and manual backup trigger
 
 ## Prerequisites
 
 - Ubuntu 22.04 LTS, ~50 GB free under `/opt`, `sudo` rights
-- Internet access for apt, GitHub, Docker Hub, and Tailscale
-- A Tailscale account you can authenticate in a browser
+- Internet access (apt, GitHub, Docker Hub, Tailscale)
+- A [Tailscale](https://tailscale.com) account
 
-Anything missing (apt packages, Docker, Tailscale) is installed by the script.
+Missing packages, Docker, and Tailscale are installed automatically by the script.
 
-## Quick start
+## Install
 
 ```bash
-git clone https://github.com/ziwdon/wow-server-sp ~/azerothcore-install
-cd ~/azerothcore-install
+git clone https://github.com/ziwdon/wow-server-sp ~/wow-server-sp
+cd ~/wow-server-sp
 chmod +x scripts/*.sh
 ./scripts/install-azerothcore.sh
 ```
 
-Run as your normal user. **Do not use `sudo`** — the script calls `sudo` itself where needed. Running as root produces wrong ownership, wrong `$HOME`, wrong crontab, and broken Docker UID/GID.
+Run as your normal user — **do not use `sudo`**. The script calls `sudo` internally where needed.
 
-## What the installer prompts for
+> **Heads up:** the install includes 3 manual pauses — Tailscale authentication, account creation via the worldserver console, and AH bot character setup. The script guides you through each one.
 
-Answers are persisted to `~/.azerothcore-install-config` (mode `600`) so the install can resume, and shredded on success.
+## Admin
 
-- DB root password (or Enter to auto-generate)
-- GM account username and password
-- AHBOT account password
-- Random playerbot count (applied to both MIN and MAX)
-- Server XP/progression rate (`x1`, `x3`, `x5`, `x7`)
-- Realm type — PvP (default) or PvE/Normal
-- InnoDB buffer pool size (`1G`–`32G`)
-- Map update threads (1–16)
-- AH bot character count (1 or 2)
-- Whether to install/enable UFW
-- Whether to enable systemd auto-start
-
-Manual passwords are restricted to shell-safe characters: `letters, numbers, . _ @ % + = , : -`. This is so the saved config can be safely sourced on resume.
-
-## Manual pauses
-
-The installer stops three times for steps that can't be automated.
-
-**1. Tailscale auth (Phase 0.4)** — `sudo tailscale up` runs and prints a URL. Open it in a browser, authenticate, return to the terminal. The script polls for a Tailscale IPv4 and continues.
-
-**2. Account creation** — after first server start and DB init, attach to the worldserver from a second terminal:
+Install the web admin after the server is running:
 
 ```bash
-docker attach ac-worldserver
+./wow-server-sp-admin/scripts/install-azerothcore-admin.sh
 ```
 
-Run the account commands the installer prints, then detach with `Ctrl+P` then `Ctrl+Q`. **Do not use `Ctrl+C`** — that stops the container. Real passwords are kept out of the install log; the terminal still shows them during this step.
+Then open `http://<tailscale-ip>:8765` in a browser.
 
-**3. AH bot character creation** — log in with the `AHBOT` account in the WoW 3.3.5a client, create the configured number of characters, log out. The installer detects their GUIDs and writes them into `mod_ahbot.conf`.
-
-## What it changes outside the stack directory
-
-Most files live under `/opt/stacks/azerothcore/`. The installer also touches:
-
-- apt packages (installs what's missing)
-- Docker (installs if missing, adds your user to the `docker` group)
-- Tailscale (installs and authenticates if missing)
-- `~/.azerothcore-install-state` (phase checkpoint)
-- `~/.azerothcore-install-config` (prompt answers, shredded on success)
-- `/tmp/ac-build.log` and `/tmp/azerothcore-install-*.log` (relocated/cleaned later)
-- A backup cron entry
-- UFW rules (only if opted in)
-- `/etc/systemd/system/azerothcore.service` (only if opted in)
-
-## Resume after failure or interruption
+Verify it's working:
 
 ```bash
-./scripts/install-azerothcore.sh                     # auto-resume from last checkpoint
-./scripts/install-azerothcore.sh --resume-from=2.5   # force re-run from a phase
-./scripts/install-azerothcore.sh --force-from=2.5    # alias of --resume-from
-./scripts/install-azerothcore.sh --help              # list phases
+./wow-server-sp-admin/scripts/verify-azerothcore-admin.sh
 ```
 
-Use this after a failure, reboot, SSH disconnect, or after logging out/in for Docker group membership to take effect.
+## Operations
 
-## Adopt an existing install
+| Command | What it does |
+|---|---|
+| `./scripts/install-azerothcore.sh` | Auto-resume from last checkpoint |
+| `./scripts/install-azerothcore.sh --resume-from=<phase>` | Re-run from a specific phase |
+| `./scripts/install-azerothcore.sh --adopt` | Adopt an existing install with no state file |
+| `./scripts/install-azerothcore.sh --force-fresh` | Wipe state and start over (asks for confirmation) |
+| `./scripts/install-azerothcore.sh --help` | List all phases |
+| `./scripts/verify-azerothcore.sh` | Post-install health check (exits 0 = pass) |
+| `./scripts/uninstall-azerothcore.sh --dry-run` | Preview what uninstall would remove |
+| `./scripts/uninstall-azerothcore.sh` | Full teardown |
 
-If the stack directory exists but the state file is missing:
+## Configuration
 
-```bash
-./scripts/install-azerothcore.sh --adopt
-```
+AzerothCore reads settings from its `.conf` files, but the installer uses `AC_*` environment variables in `docker-compose.override.yml` to override them — no editing config files directly. This covers everything from XP rates and bot counts to game type, respawn rates, and mail delay.
 
-Adopt mode verifies the install before marking phases complete, and aborts if checks fail.
+The easiest way to change settings after install is the admin's **Settings** page: search for any config key, edit its value, and Apply — the admin writes the override and restarts the server automatically.
 
-## Wipe and start over
-
-```bash
-./scripts/install-azerothcore.sh --force-fresh
-```
-
-Removes the installer state, the stack directory, and the saved config. Asks for explicit `WIPE` confirmation. Use this when you just want to restart the install flow; use `uninstall-azerothcore.sh` for a full teardown.
-
-## Verify
-
-```bash
-./scripts/verify-azerothcore.sh
-```
-
-Exits `0` on pass, `1` on failure. Checks containers, databases, MySQL tuning, realmlist vs Tailscale IP, image tags, AH bot GUIDs, playerbots config, backup script + cron, and (if opted in) the systemd unit.
-
-## Uninstall
-
-```bash
-./scripts/uninstall-azerothcore.sh --dry-run   # preview
-./scripts/uninstall-azerothcore.sh             # run
-./scripts/uninstall-azerothcore.sh --yes       # skip confirmation
-```
-
-Removes the stack directory, installer state and config, matching backup cron lines, the optional systemd unit, known AzerothCore containers (`ac-database`, `ac-authserver`, `ac-worldserver`, `ac-db-import`, `ac-client-data-init`), and known temp installer files under `/tmp`.
-
-Does **not** remove Docker, Tailscale, UFW, apt packages it installed, unrelated containers/images, unrelated cron/firewall rules, or your Docker group membership. Compose cleanup is project-scoped (`docker compose -p azerothcore down`); `--remove-orphans` is intentionally avoided so unrelated containers can't be removed by mistake.
-
-## Key paths
-
-| Path | Purpose |
-|------|---------|
-| `/opt/stacks/azerothcore/` | Stack root |
-| `/opt/stacks/azerothcore/.env` | DB credentials and image tags — do not publish |
-| `/opt/stacks/azerothcore/configs/modules/` | `mod_ahbot.conf`, `playerbots.conf`, `individualProgression.conf` |
-| `/opt/stacks/azerothcore/configs/mysql/custom.cnf` | MySQL tuning |
-| `/opt/stacks/azerothcore/logs/install-<ts>.log` | Main install log |
-| `/opt/stacks/azerothcore/logs/backup.log` | Backup history |
-| `/tmp/ac-build.log` | Docker build log (safe to delete after install) |
-
-## Installer-applied configuration
-
-Every setting the installer writes is listed below. **Prompted** entries show the prompt default; the user can change them during an interactive install. **Fixed** entries are always written with the value shown. **Derived** means computed from a prompted value, not settable independently.
-
-Post-install AC tuning lives in `docker-compose.override.yml` under `ac-worldserver.environment:`. MySQL tuning lives in `configs/mysql/custom.cnf`. See [Post-install tuning](#post-install-tuning) below.
-
-### AC env vars (`docker-compose.override.yml`)
-
-| `AC_*` env var | Value | Source | Notes |
-|---|---|---|---|
-| `AC_PLAYERBOTS_DATABASE_INFO` | `ac-database;3306;root;<password>;acore_playerbots` | Derived | Playerbots DB connection string; password comes from `.env` |
-| `AC_AI_PLAYERBOT_ENABLED` | `1` | Fixed | Enables mod-playerbots |
-| `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` | `1` | Fixed | Starts random bot login management |
-| `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES` | `1` | Fixed | Lets mod-playerbots initialize/update `acore_playerbots` |
-| `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` | `1000` | Prompted | Default bot count; installer writes the chosen value |
-| `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | `1000` | Prompted | Same chosen value as min |
-| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE` | `0` | Fixed | Turns off background AI when no real player is nearby |
-| `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER` | `1` | Fixed | Keeps the realm cheap when nobody is online |
-| `AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE` | `1` | Fixed | Rotates which bots are logged in |
-| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND` | `1` | Fixed | Activates a bot when a real player is on its friend list |
-| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD` | `0` | Fixed | Same-guild alone does not force activation |
-| `AC_PLAYERBOTS_DATABASE_SYNCH_THREADS` | `2` | Fixed | Conservative Playerbots DB synchronization |
-| `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` | `true` | Fixed | Enables AH bot auction population |
-| `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED` | `true` | Fixed | Enables AH bot buying from players |
-| `AC_MAP_UPDATE_THREADS` | `4` | Prompted | Default for 6 physical cores / 12 threads |
-| `AC_MAP_UPDATE_INTERVAL` | `10` | Fixed | Worldserver update pacing |
-| `AC_MIN_WORLD_UPDATE_TIME` | `1` | Fixed | Keeps update timing diagnostics active |
-| `AC_PRELOAD_ALL_NON_INSTANCED_MAP_GRIDS` | `0` | Fixed | Avoids preloading all world grids |
-| `AC_DONT_CACHE_RANDOM_MOVEMENT_PATHS` | `0` | Fixed | Keeps default path caching behavior |
-| `AC_QUESTS_IGNORE_AUTO_ACCEPT` | `1` | Fixed | Avoids automatic quest acceptance |
-| `AC_PLAYER_LIMIT` | `0` | Fixed | Unlimited player limit |
-| `AC_LEAVE_GROUP_ON_LOGOUT_ENABLED` | `1` | Fixed | Cleans up groups on logout |
-| `AC_GAME_TYPE` | `1` (PvP) / `0` (PvE) | Prompted | Default PvP |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_AUCTION` | `1` | Fixed | Shared auction behavior |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_CHAT` | `1` | Fixed | Cross-faction chat |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_CALENDAR` | `0` | Fixed | Faction-locked calendar invites |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_CHANNEL` | `0` | Fixed | Faction-locked custom channels |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_GROUP` | `0` | Fixed | Faction-locked groups |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_GUILD` | `0` | Fixed | Faction-locked guilds |
-| `AC_ALLOW_TWO_SIDE_INTERACTION_ARENA` | `0` | Fixed | Faction-locked arena teams |
-| `AC_UPDATES_ENABLE_DATABASES` | `7` | Fixed | Lets module DB updaters run |
-| `AC_ENABLE_PLAYER_SETTINGS` | `1` | Fixed | Required by mod-individual-progression |
-| `AC_MAIL_DELIVERY_DELAY` | `10` | Fixed | Mail arrives after 10 seconds instead of 1 hour |
-| `AC_CHAR_DELETE_METHOD` | `1` | Fixed | Soft-delete characters so GUID references remain restorable |
-| `AC_RESPAWN_DYNAMIC_RATE_CREATURE` | `10` | Fixed | Prevents near-zero creature respawns in bot-heavy zones |
-| `AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT` | `20` | Fixed | Prevents near-zero gathering node respawns |
-| `AC_RATE_XP_QUEST` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
-| `AC_RATE_XP_KILL` | `x3: 3`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
-| `AC_RATE_XP_EXPLORE` | `x3: 3`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
-| `AC_RATE_DROP_MONEY` | `x3: 2`, `x5: 3`, `x7: 3` | Prompted | Omitted for `x1` |
-| `AC_RATE_REPUTATION_GAIN` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
-| `AC_RATE_SKILL_DISCOVERY` | `x3: 2`, `x5: 3`, `x7: 3` | Prompted | Omitted for `x1` |
-| `AC_RATE_DROP_ITEM_NORMAL` | `x3: 1`, `x5: 1`, `x7: 1.5` | Prompted | Omitted for `x1` |
-| `AC_RATE_DROP_ITEM_UNCOMMON` | `x3: 1`, `x5: 1`, `x7: 1.5` | Prompted | Omitted for `x1` |
-| `AC_SKILL_GAIN_CRAFTING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
-| `AC_SKILL_GAIN_GATHERING` | `x3: 2`, `x5: 3`, `x7: 5` | Prompted | Omitted for `x1` |
-| `AC_SKILL_GAIN_WEAPON` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
-| `AC_SKILL_GAIN_DEFENSE` | `x3: 3`, `x5: 5`, `x7: 7` | Prompted | Omitted for `x1` |
-
-`AuctionHouseBot.GUIDs` is the only `.conf`-side value the installer writes: Phase 6.1.4 stores the runtime-discovered AH bot character GUIDs in `configs/modules/mod_ahbot.conf`.
-
-To translate dotted config keys to env vars, prefix with `AC_`, replace periods with underscores, insert underscores at lowercase-to-uppercase boundaries, then uppercase the result. Examples: `AiPlayerbot.BotActiveAlone` -> `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE`; `Respawn.DynamicRateGameObject` -> `AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT`; `SkillGain.Crafting` -> `AC_SKILL_GAIN_CRAFTING`. Unknown or misspelled vars are silently ignored, so verify the target key exists in the relevant `.conf.dist` before adding a new one.
-
-### MySQL (`configs/mysql/custom.cnf`)
-
-| Key | Value | Source |
-|---|---|---|
-| `innodb_buffer_pool_size` | `6G` | Prompted |
-| `innodb_buffer_pool_instances` | `= size in GB` | Derived |
-| `innodb_io_capacity` | `500` | Fixed |
-| `innodb_io_capacity_max` | `2500` | Fixed |
-| `innodb_use_fdatasync` | `ON` | Fixed |
-| `innodb_log_buffer_size` | `32M` | Fixed |
-| `innodb_flush_log_at_trx_commit` | `2` | Fixed |
-
-`innodb_buffer_pool_instances` is computed as `buffer_pool_size / 1G` (e.g., `6G` → `6`). Changing `innodb_buffer_pool_size` requires a database restart to take effect.
-
-## Post-install tuning
-
-All edits happen on the host; the containers see them via bind mounts.
-
-**Worldserver** — `worldserver.conf` is baked into the image and is **not** bind-mounted, so you don't edit it on the host. Override its values via environment variables in `docker-compose.override.yml` under `ac-worldserver.environment:` — this is exactly the mechanism the installer already uses for every worldserver setting it touches.
-
-Env vars beat `.conf` values at startup (see `docs/wikis/azerothcore-wiki/docs/config-overrides-with-env-var.md`). Convert config keys with the same rule shown above: `GameType` -> `AC_GAME_TYPE`, `Rate.XP.Quest` -> `AC_RATE_XP_QUEST`, `SkillGain.Crafting` -> `AC_SKILL_GAIN_CRAFTING`. **Unknown vars are silently ignored**, so verify the target key exists in `docs/configs/worldserver.conf.dist` (the upstream defaults reference) before adding a new one.
-
-```bash
-cd /opt/stacks/azerothcore
-# edit docker-compose.override.yml — add or change an AC_* line under ac-worldserver
-docker compose restart ac-worldserver
-```
-
-For ad-hoc in-game testing without a restart, log in as GM and run `.reload config`. Not all settings honor reload (some are read once at startup, some apply only to new objects/maps), and an `AC_*` override in compose will always win on next restart — use the override file for anything you want to keep.
-
-**AH bot** — `AuctionHouseBot.GUIDs` lives in `configs/modules/mod_ahbot.conf`; simple non-env AH bot tweaks can also be edited there, then reloaded in-game as GM with `.ahbot reload`. Installer-managed seller/buyer switches live in `docker-compose.override.yml` as `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` and `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED`.
-
-**Playerbots** — installer-managed playerbot tuning lives in `docker-compose.override.yml` as `AC_*` env vars. For module options that are not overridden by env vars, edit `configs/modules/playerbots.conf`, then:
-
-```bash
-cd /opt/stacks/azerothcore && docker compose restart ac-worldserver
-```
-
-**Individual Progression** — edit `configs/modules/individualProgression.conf`, then restart the worldserver as above. See `docs/wikis/mod-individual-progression-wiki/` for tier descriptions and changes.
-
-**MySQL** — edit `configs/mysql/custom.cnf`, then:
-
-```bash
-cd /opt/stacks/azerothcore && docker compose restart ac-database
-```
-
-`innodb_buffer_pool_size` only takes effect after a database restart.
-
-## Restart and shutdown safely
-
-The worldserver should always be told to save state before it goes down. The canonical pattern (see `docs/wikis/azerothcore-wiki/docs/exitcodes.md` and `docs/wikis/azerothcore-wiki/docs/gm-commands.md`) is to drive shutdown from the worldserver console, not from `docker compose restart`:
-
-```bash
-docker attach ac-worldserver
-```
-
-Then at the worldserver prompt:
-
-```text
-saveall              # write all character data to the DB
-server restart 30    # warn players, kick gracefully after 30s, exit code 2
-```
-
-Detach with `Ctrl+P` then `Ctrl+Q` — **never `Ctrl+C`**, which kills the container.
-
-The upstream `docker-compose.yml` sets `restart: unless-stopped` on `ac-worldserver`, so when worldserver exits cleanly Docker brings it back automatically. No `docker` command needed for a restart.
-
-Variants of the in-game restart command:
-
-- `server idlerestart 30` — same kick, but only fires if no players are connected. Useful for scheduled maintenance.
-- `server restart cancel` — abort an in-flight countdown.
-
-### Shut down and keep it down
-
-Don't use `server shutdown` for this — it exits cleanly, but `unless-stopped` will bring the container right back up. Instead, save first and let Docker drive the stop:
-
-```bash
-docker attach ac-worldserver
-```
-
-At the worldserver prompt:
-```text
-notify Server going down for maintenance — please log out.
-saveall
-```
-
-Detach with `Ctrl+P` then `Ctrl+Q`, then:
-```bash
-cd /opt/stacks/azerothcore && docker compose stop ac-worldserver
-```
-
-`docker compose stop` marks the container as user-stopped (which `unless-stopped` honors), sends `SIGTERM`, and the worldserver's signal handler flushes a save before exiting. Connected players are simply disconnected — there's no in-game countdown — so this is the right tool for "no humans online" maintenance.
-
-To bring it back later:
-```bash
-cd /opt/stacks/azerothcore && docker compose start ac-worldserver
-```
-
-If you really need to bypass the in-game flow entirely (worldserver unresponsive, can't attach, etc.), `docker compose restart ac-worldserver` sends `SIGTERM` and the same signal handler flushes a save — but in-game players get no warning. Prefer the `saveall` + `server restart` path whenever the console is reachable.
+For manual edits, add or change `AC_*` lines under `ac-worldserver.environment:` in `/opt/stacks/azerothcore/docker-compose.override.yml`, then restart the worldserver. See `CLAUDE.md` for the full reference, the key-to-env-var conversion rule, and the MySQL tuning options.
