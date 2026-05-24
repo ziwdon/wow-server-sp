@@ -228,12 +228,12 @@ function watchActionUntilDone(id, label) {
       es.close();
       if (/action-error/.test(e.data)) {
         showBanner(`${label} finished with error — see action log.`);
-      } else if (/verify-failed/.test(e.data)) {
-        showBanner(`${label} applied, but some env vars did not bind. See action log.`);
+        resolve(true);
+      } else {
+        resolve(false);
       }
-      resolve();
     });
-    es.addEventListener('idle', () => { es.close(); resolve(); });
+    es.addEventListener('idle', () => { es.close(); resolve(false); });
   });
 }
 
@@ -251,9 +251,13 @@ document.getElementById('apply-confirm').addEventListener('click', async () => {
   const { id } = await r.json();
   state.pending = {};
   await load();
-  await watchActionUntilDone(id, 'Apply');
-  await load();
-  refreshSelectedKey();
+  const hardError = await watchActionUntilDone(id, 'Apply');
+  if (hardError) {
+    await load();
+    refreshSelectedKey();
+  } else {
+    window.location.href = '/';
+  }
 });
 
 document.getElementById('rollback-btn').addEventListener('click', async () => {
@@ -265,9 +269,13 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
   }
   const { id } = await r.json();
   await load();
-  await watchActionUntilDone(id, 'Rollback');
-  await load();
-  refreshSelectedKey();
+  const hardError = await watchActionUntilDone(id, 'Rollback');
+  if (hardError) {
+    await load();
+    refreshSelectedKey();
+  } else {
+    window.location.href = '/';
+  }
 });
 
 const showMetaEl = document.getElementById('show-meta');

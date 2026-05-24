@@ -67,3 +67,11 @@ def test_settings_js_applies_selected_class_to_row():
     assert "classList.remove('selected')" in script
     assert "classList.add('selected')" in script
     assert "'selected'" in script  # pushed to rowClasses in _render
+
+
+def test_settings_js_redirects_to_dashboard_on_success():
+    script = _read("app/static/settings.js")
+    assert "window.location.href = '/'" in script
+    assert "hardError" in script
+    assert "resolve(true)" in script
+    assert "resolve(false)" in script
