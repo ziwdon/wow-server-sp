@@ -4,7 +4,7 @@
   {% if started_at_human != "—" %}
   <div class="stat-sub">Started: {{ started_at_human }}</div>
   {% endif %}
-  {% if exit_code is not none %}
+  {% if exit_code is not none and status != "running" %}
   <div class="stat-sub">Last exit: {{ exit_code }}</div>
   {% endif %}
 </div>

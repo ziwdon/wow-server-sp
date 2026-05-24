@@ -129,7 +129,11 @@ class ActionRunner:
                 record.status = result.value
             except Exception as e:  # noqa: BLE001
                 record.status = "error"
-                on_progress("exception", str(e))
+                # Call _commit directly (we're on the event loop here); using
+                # on_progress → call_soon_threadsafe would queue _commit after
+                # the finally block's _broadcast("done"), so live SSE clients
+                # would see "done" before the exception step.
+                _commit("exception", str(e))
             finally:
                 record._done = True
                 record._broadcast(("done", record.status, ""))
