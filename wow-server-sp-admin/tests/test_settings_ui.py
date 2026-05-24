@@ -36,3 +36,14 @@ def test_settings_css_widens_value_and_detail_columns():
     assert "minmax(240px, 300px)" in css
     assert ".key-input-pending" in css
     assert ".key-input-applied" in css
+
+
+def test_css_stat_card_equal_height():
+    css = _read("app/static/app.css")
+    assert ".stat-row > div { min-width: 0; display: flex; flex-direction: column; }" in css
+    assert ".stat-row .stat-card { flex: 1; }" in css
+
+
+def test_css_btn_block_removed():
+    css = _read("app/static/app.css")
+    assert ".btn-block" not in css
