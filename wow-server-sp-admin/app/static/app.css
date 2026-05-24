@@ -512,3 +512,141 @@ pre.logview {
 .verify-failed { margin: 0.5rem 0; padding-left: 1.5rem; color: var(--red); }
 .verify-failed code { font-family: 'Consolas', 'Menlo', monospace; }
 .vf-key { color: var(--text-muted); font-size: 0.8rem; }
+
+/* ── Mobile-only elements (hidden on desktop) ── */
+.mobile-filter-toggle { display: none; }
+.mobile-back-btn { display: none; }
+
+/* ── Mobile responsive (≤768px) ── */
+@media (max-width: 768px) {
+  /* Nav */
+  #last-refresh { display: none; }
+  .nav-brand { margin-right: 1rem; font-size: 0.95rem; }
+  .nav-link { padding: 0 0.6rem; font-size: 0.85rem; }
+
+  /* Dashboard: remove fixed viewport height, let page scroll */
+  .dashboard-content {
+    height: auto;
+    overflow: visible;
+    padding: 0.75rem;
+  }
+
+  /* Stat cards: 2×2 grid instead of 4 across */
+  .stat-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* Action bar: wrap onto multiple lines if needed */
+  .action-bar { flex-wrap: wrap; }
+
+  /* Lower grid: single column, panels stack */
+  .lower-grid {
+    grid-template-columns: 1fr;
+    overflow: visible;
+  }
+  .lower-grid > .panel {
+    height: auto;
+    min-height: 200px;
+    overflow: visible;
+  }
+  .lower-grid > .panel .panel-body {
+    overflow-y: auto;
+    max-height: 280px;
+  }
+  pre.logview { max-height: 240px; }
+
+  /* Settings page: single column */
+  .settings-page {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+
+  /* Sidebar: reflow to top strip */
+  .settings-sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0.5rem 0.75rem;
+    gap: 0.5rem;
+    overflow-y: visible;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .settings-sidebar .sidebar-section:first-child {
+    gap: 0.25rem;
+  }
+
+  /* Mobile filter toggle button */
+  .mobile-filter-toggle {
+    display: block;
+    align-self: flex-start;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-warm);
+    font-size: 0.82rem;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .mobile-filter-toggle:hover { border-color: var(--gold); color: var(--gold); }
+
+  /* Collapsible filters panel */
+  .mobile-collapsible {
+    display: none;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-dark);
+  }
+  .mobile-collapsible.open { display: flex; }
+
+  /* Sidebar actions: reset margin-top:auto so buttons sit below the toggle */
+  .sidebar-actions { margin-top: 0; }
+
+  /* Settings list: let it scroll naturally */
+  .settings-list-wrapper { overflow: visible; min-height: 300px; }
+  .settings-list { overflow-y: visible; }
+  /* On mobile the page scrolls, not .settings-list, so sticky top:0 would
+     overlap the sidebar. Let the header scroll with the content instead. */
+  .key-list-header { position: static; }
+
+  /* Detail panel: full-screen slide-in overlay */
+  .settings-detail {
+    position: fixed;
+    top: 52px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    z-index: 100;
+    border-left: none;
+    overflow-y: auto;
+  }
+  .settings-detail.mobile-visible {
+    transform: translateX(0);
+  }
+
+  /* Back button inside detail panel */
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--gold);
+    font-size: 0.9rem;
+    cursor: pointer;
+    padding: 0 0 0.75rem 0;
+    margin-bottom: 0.75rem;
+    width: 100%;
+    text-align: left;
+  }
+  .mobile-back-btn:hover { color: var(--gold-bright); }
+
+  /* Apply dialog: full width on mobile */
+  #apply-dialog { min-width: unset; width: calc(100vw - 2rem); }
+}
