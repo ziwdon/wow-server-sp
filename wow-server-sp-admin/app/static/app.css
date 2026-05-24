@@ -608,7 +608,9 @@ pre.logview {
   /* Settings list: let it scroll naturally */
   .settings-list-wrapper { overflow: visible; min-height: 300px; }
   .settings-list { overflow-y: visible; }
-  .key-list-header { position: sticky; top: 0; z-index: 5; }
+  /* On mobile the page scrolls, not .settings-list, so sticky top:0 would
+     overlap the sidebar. Let the header scroll with the content instead. */
+  .key-list-header { position: static; }
 
   /* Detail panel: full-screen slide-in overlay */
   .settings-detail {
