@@ -27,6 +27,8 @@ docker rmi -f azerothcore-admin:local 2>/dev/null || true
 echo "==> Syncing code..."
 rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
 
+mkdir -p "$STACK_DIR/build/dist"
+
 echo "==> Copying dist configs..."
 cp "$REPO_DIR/../docs/configs/"*.conf.dist "$STACK_DIR/build/dist/"
 
