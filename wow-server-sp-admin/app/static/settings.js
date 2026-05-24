@@ -238,7 +238,7 @@ function watchActionUntilDone(id, label) {
     const es = new EventSource(`/api/action/stream?id=${encodeURIComponent(id)}`);
     es.addEventListener('done', (e) => {
       es.close();
-      if (/action-error/.test(e.data)) {
+      if (/data-status="error"/.test(e.data)) {
         showBanner(`${label} finished with error — see action log.`);
         resolve(true);
       } else {

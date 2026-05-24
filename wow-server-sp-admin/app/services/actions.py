@@ -35,10 +35,14 @@ class ActionResult(str, enum.Enum):
 
 
 def _wait_for_status(target: str, timeout: int, on_progress: ProgressCb) -> bool:
+    # A missing container is also a valid terminal state when stopping:
+    # if the container was removed (manual docker rm, daemon restart) while
+    # we were waiting, treating it as hung would waste the full timeout.
+    terminal = {target, "missing"} if target == "exited" else {target}
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         info = inspect_worldserver()
-        if info.status == target:
+        if info.status in terminal:
             return True
         time.sleep(2)
     on_progress("wait_exit", f"timeout waiting for status={target}")

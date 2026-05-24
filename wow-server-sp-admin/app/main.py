@@ -275,7 +275,7 @@ def _render_done(record: ActionRecord) -> str:
             )
         verify_html = f'<ul class="verify-failed">{"".join(items)}</ul>'
     return (
-        f'<div class="action-done action-{css}">'
+        f'<div class="action-done action-{css}" data-status="{_esc(record.status)}">'
         f"action <b>{_esc(record.name)}</b> finished: <b>{_esc(record.status)}</b>"
         f"{verify_html}"
         f"</div>"
