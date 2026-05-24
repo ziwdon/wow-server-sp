@@ -43,6 +43,25 @@ docker compose -f "$STACK_DIR/docker-compose.yml" \
 echo "==> Starting admin container..."
 docker compose -f "$STACK_DIR/docker-compose.yml" --env-file "$STACK_DIR/.env" up -d
 
+echo "==> Waiting for container to be healthy..."
+timeout=60
+elapsed=0
+while [ "$elapsed" -lt "$timeout" ]; do
+    health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' azerothcore-admin 2>/dev/null || echo missing)"
+    if [ "$health" = "healthy" ]; then
+        echo "    healthy after ${elapsed}s"
+        break
+    elif [ "$health" = "unhealthy" ]; then
+        echo "    container is unhealthy after ${elapsed}s -- proceeding to verify for diagnostics"
+        break
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+done
+if [ "$elapsed" -ge "$timeout" ]; then
+    echo "    timed out waiting for healthy state -- proceeding to verify for diagnostics"
+fi
+
 echo ""
 "$SCRIPT_DIR/verify-azerothcore-admin.sh"
 
