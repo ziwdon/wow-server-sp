@@ -172,6 +172,8 @@ def parse_dist_file(path: Path) -> list[KeyEntry]:
             comment_text = "\n".join(active_comment).strip()
             # Do NOT clear active_comment here. Consecutive KV lines that share
             # the same flat comment block (no per-key split) should all inherit it.
+            # active_comment is reset naturally when pending_comment or
+            # last_comment_block fires on the next distinct comment section.
 
         entries.append(
             KeyEntry(
