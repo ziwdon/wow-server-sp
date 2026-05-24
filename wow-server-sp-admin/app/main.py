@@ -2,6 +2,7 @@ from app.logging_config import configure as _configure_logging
 _configure_logging()
 
 import asyncio
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -26,6 +27,14 @@ APP_DIR = Path(__file__).resolve().parent
 _AC_STACK = Path(os.environ.get("AC_STACK_DIR", "/ac"))
 _SNAPSHOTS = Path(os.environ.get("ADMIN_SNAPSHOTS_DIR", "/admin-snapshots"))
 log = logging.getLogger(__name__)
+
+
+def _file_hash(rel: str) -> str:
+    """Return an 8-char MD5 fingerprint of a static file for cache-busting."""
+    try:
+        return hashlib.md5((APP_DIR / "static" / rel).read_bytes()).hexdigest()[:8]
+    except OSError:
+        return "0"
 
 
 @asynccontextmanager
@@ -74,6 +83,8 @@ app = FastAPI(title="azerothcore-admin", lifespan=lifespan)
 app.add_middleware(_GZipExcludeSSE, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+templates.env.globals["css_ver"] = _file_hash("app.css")
+templates.env.globals["js_ver"] = _file_hash("settings.js")
 
 
 @app.exception_handler(HTTPException)
