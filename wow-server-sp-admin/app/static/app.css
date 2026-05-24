@@ -209,6 +209,8 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   margin-bottom: -1px;
 }
 .log-tab.active { color: var(--gold-bright); border-bottom-color: var(--gold); }
+.log-tab-dirty { border-bottom-color: var(--red); color: var(--red); }
+.log-tab-dirty.active { border-bottom-color: var(--red); color: var(--red); }
 .log-errors-bar {
   padding: 0.4rem 1rem;
   border-bottom: 1px solid var(--border);
@@ -521,8 +523,11 @@ pre.logview {
 @media (max-width: 768px) {
   /* Nav */
   #last-refresh { display: none; }
-  .nav-brand { margin-right: 1rem; font-size: 0.95rem; }
-  .nav-link { padding: 0 0.6rem; font-size: 0.85rem; }
+  nav.topnav { flex-wrap: wrap; height: auto; padding: 0.5rem 0.75rem; }
+  .nav-brand { flex: 1; order: 1; margin-right: 0; font-size: 0.95rem; }
+  .nav-right { order: 2; }
+  .nav-links { order: 3; width: 100%; border-top: 1px solid var(--border-dark); padding: 0.25rem 0; }
+  .nav-link { height: auto; padding: 0.3rem 0.6rem; font-size: 0.85rem; }
 
   /* Dashboard: remove fixed viewport height, let page scroll */
   .dashboard-content {
@@ -547,13 +552,13 @@ pre.logview {
   .lower-grid > .panel {
     height: auto;
     min-height: 200px;
-    overflow: visible;
+    overflow: hidden;
   }
   .lower-grid > .panel .panel-body {
     overflow-y: auto;
     max-height: 280px;
   }
-  pre.logview { max-height: 240px; }
+  pre.logview { max-height: 240px; word-break: break-all; }
 
   /* Settings page: single column */
   .settings-page {
@@ -612,10 +617,19 @@ pre.logview {
      overlap the sidebar. Let the header scroll with the content instead. */
   .key-list-header { position: static; }
 
+  /* Settings columns: 5fr/2fr so keys stay readable on narrow screens */
+  .key-list-header,
+  .key-row { grid-template-columns: minmax(0, 5fr) minmax(0, 2fr); }
+  /* show-meta has 2-class specificity — without this override the desktop 4-column rule wins on mobile */
+  .key-list-header.show-meta,
+  .key-row.show-meta { grid-template-columns: minmax(0, 5fr) minmax(0, 2fr); }
+  .key-row.show-meta .key-source,
+  .key-row.show-meta .key-flags { display: none; }
+
   /* Detail panel: full-screen slide-in overlay */
   .settings-detail {
     position: fixed;
-    top: 52px;
+    top: 88px; /* 2-row mobile nav: ~row1 37px + row2 22px + 1px border + buffer */
     left: 0;
     right: 0;
     bottom: 0;
