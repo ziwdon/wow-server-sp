@@ -75,7 +75,7 @@ chmod +x scripts/*.sh
 
 **`scripts/uninstall-azerothcore.sh`** — uses `docker compose -p azerothcore down` plus explicit named-container cleanup to avoid touching unrelated Docker containers (no `--remove-orphans`).
 
-**`.claude/skills/`** — currently unused; only `references/` exists as a placeholder for reference material (phases, config options, error patterns) that future skill files could link to. No active skills live here yet.
+**`.claude/skills/wow-server-sp-gamemaster/`** — the active Game Master skill. Invoke it with the `Skill` tool (or it auto-triggers on any question about installation, GM commands, playerbots, AH bot, individual progression, admin app, or troubleshooting). `SKILL.md` routes each topic to one of 15 reference files under `references/`, covering: install phases, client setup, GM commands, worldserver.conf/AC_* env vars, playerbot commands and raid strategies, AH bot, individual progression tiers, admin app usage, troubleshooting, and SQL queries.
 
 ## Install phases
 
