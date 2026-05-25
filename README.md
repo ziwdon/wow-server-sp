@@ -21,6 +21,11 @@ Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that 
 - Settings editor — browse, edit, and apply any server config with live apply + rollback
 - Log viewer and manual backup trigger
 
+**Claude Code skill** (`.claude/skills/wow-server-sp-gamemaster/`)
+- Auto-invoked by Claude Code for any question about this stack
+- Covers GM commands, playerbot control, raid strategies, AH bot, individual progression, admin app, troubleshooting, and useful SQL
+- 15 reference files backed by the local wikis and `.conf.dist` files
+
 ## Prerequisites
 
 - Ubuntu 22.04 LTS, ~50 GB free under `/opt`, `sudo` rights
