@@ -97,6 +97,29 @@ docker attach ac-worldserver
 - If something seems like it should work but doesn't, check `Errors.log` and `docker logs ac-worldserver` first.
 - The upstream playerbot fork is `mod-playerbots/azerothcore-wotlk` on branch `Playerbot`, NOT the canonical `azerothcore/azerothcore-wotlk`.
 
+## Troubleshooting Escalation: GitHub Issue Search
+
+When the reference files and local wikis don't resolve an issue (or the error is ambiguous), escalate to a **GitHub issue search as a fallback** — never as a first step.
+
+**Decision gate:** Only search GitHub if all three conditions hold:
+1. The relevant reference file has been read
+2. The local `docs/wikis/` pages don't cover the problem
+3. The error is genuinely ambiguous or unresolved
+
+**Repo routing:**
+
+| Error context | Repo |
+|--------------|------|
+| Core server, authserver, DB, maps, DBC, general errors | `azerothcore/azerothcore-wotlk` |
+| Playerbot behaviour, commands, AI | `mod-playerbots/mod-playerbots` |
+| Auction House Bot | `azerothcore/mod-ah-bot` |
+| Individual Progression tiers | `ZhengPeiRu21/mod-individual-progression` |
+| Unclear origin | Start with `azerothcore/azerothcore-wotlk`; broaden if no results |
+
+**Before searching:** strip local noise from the error. Remove file paths, port numbers, IP addresses, line numbers, UUIDs/GUIDs, and timestamps. Keep exception class, function name, error code, message text, table/column names.
+
+**Full search procedure** — see `references/ref-troubleshooting.md` → "GitHub Issue Search (Fallback)"
+
 ## Adapting to the User's Actual Setup
 
 Configuration values like bot count, player count, and hardware vary per installation. The installer defaults (250 bots, 4 map threads, etc.) are starting points — the user may have configured very different values.

@@ -199,3 +199,84 @@ When running `shellcheck scripts/*.sh`:
 - **SC2016 on `escape_regex_metachars`** (~line 775): Single quotes in `sed 's/[.[\*^$()+?{}|]/\\&/g'` are intentional — `\&` is sed's back-reference; double quotes would break it.
 - **SC2001 on multi-line `sed 's/^/    - /'`**: Correct tool for adding per-line prefix to multi-line strings.
 - **SC2012 on `ls modules/mod-…/ | head -10`** (~lines 2414-2416): Informational stdout only; safe in this context.
+
+---
+
+## GitHub Issue Search (Fallback)
+
+Use this **only** after reading the relevant reference file and local wikis haven't resolved the issue.
+
+### Step 1: Strip local noise from the error
+
+Remove everything installation-specific before composing a search query:
+- File paths (`/opt/stacks/…`, `/home/…`)
+- Port numbers, IP addresses, Tailscale addresses
+- Line numbers (`line 42`, `:3477`)
+- UUIDs and character GUIDs
+- Timestamps and dates
+
+Keep: exception class, function/module name, error code, error message text, table or column names.
+
+**Example:**
+```
+Raw:    [ERROR] /opt/stacks/azerothcore/data/dbc/Spell.dbc: Cannot open file (Error 2)
+Search: Cannot open file dbc Spell.dbc Error 2
+```
+
+### Step 2: Choose the repo
+
+| Error context | Repo |
+|--------------|------|
+| Core server, authserver, DB, maps, DBC | `azerothcore/azerothcore-wotlk` |
+| Playerbot behaviour, AI, commands | `mod-playerbots/mod-playerbots` |
+| Auction House Bot | `azerothcore/mod-ah-bot` |
+| Individual Progression | `ZhengPeiRu21/mod-individual-progression` |
+| Unclear | Start with `azerothcore/azerothcore-wotlk`, then broaden |
+
+### Step 3: Search open AND closed issues
+
+```bash
+# Preferred — gh CLI (searches both open and closed in one shot):
+gh issue list --repo azerothcore/azerothcore-wotlk \
+    --search "your search terms here" --state all --limit 10
+
+# Fallback — curl (if gh is not authenticated or not installed):
+curl -s "https://api.github.com/search/issues?q=your+search+terms+repo:azerothcore/azerothcore-wotlk&per_page=10" \
+    | python3 -c "
+import sys, json
+for i in json.load(sys.stdin).get('items', []):
+    print(f\"#{i['number']} [{i['state']}] {i['title']}\")
+    print(f\"  {i['html_url']}\")
+    print()
+"
+```
+
+Substitute `azerothcore/azerothcore-wotlk` with the appropriate repo from Step 2.
+
+### Step 4: Summarise findings
+
+For each relevant result report:
+- Issue title, number, state (open/closed), URL
+- Whether a fix is confirmed: an accepted answer, a linked PR, or a maintainer comment saying "fixed in…"
+
+If no useful results in the first repo, repeat with the next most likely repo.
+
+### Step 5: If a closed issue links a PR or commit, fetch the fix
+
+```bash
+# With gh CLI:
+gh pr view {number} --repo {owner}/{repo} --json title,state,mergedAt,body
+
+# With curl:
+curl -s "https://api.github.com/repos/{owner}/{repo}/pulls/{number}" \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d['title'], '—', d['state'])
+print(d['html_url'])
+print()
+print((d['body'] or '(no description)')[:800])
+"
+```
+
+Summarise: what the PR changed, whether it was merged, and whether the fix applies to this installation's version.
