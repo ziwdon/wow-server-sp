@@ -1,16 +1,34 @@
 # Troubleshooting Reference
 
+## Log Locations
+
+All runtime logs are written to `/opt/stacks/azerothcore/logs/` on the host (bind-mounted from `./logs` inside `ac-worldserver` at `/azerothcore/env/dist/logs/`).
+
+| File | Purpose | Notes |
+|------|---------|-------|
+| `Errors.log` | Runtime errors only | Mode `w` (truncated on each boot). **0 bytes = clean.** Authoritative signal. |
+| `Server.log` | Boot / init output | Mode `w` (truncated on each boot). Quiet after `WORLD: World Initialized`. |
+| `Playerbots.log` | Bot activity | Mode `w` (truncated on each boot). Chatty; see benign-noise section below. |
+| `backup.log` | Nightly cron backup output | Appended by cron (`>>`); grows over time. |
+| `install-<unix-ts>.log` | Full install transcript | Written to `/tmp/` first; relocated here once the dir exists. |
+
+Live stdout (not written to any file on disk):
+- `docker logs ac-worldserver` — worldserver stdout; authoritative for the bot stats block
+- `docker logs ac-authserver` — authserver connection events
+- `docker logs ac-database` — MySQL startup and errors
+
 ## Triage Order
 
 1. **Check `Errors.log` size first:**
    ```bash
    ls -la /opt/stacks/azerothcore/logs/Errors.log
-   # 0 bytes = no runtime errors. If non-zero, read it.
+   # 0 bytes = no runtime errors. If non-zero, read it:
+   tail -100 /opt/stacks/azerothcore/logs/Errors.log
    ```
 
 2. **Check live worldserver output:**
    ```bash
-   docker logs --tail 50 ac-worldserver
+   docker logs --tail 100 ac-worldserver
    docker logs --follow ac-worldserver   # Stream in real time
    ```
 
@@ -22,8 +40,26 @@
 
 4. **Check Server.log** (for boot issues only):
    ```bash
-   tail -50 /opt/stacks/azerothcore/logs/Server.log
+   tail -100 /opt/stacks/azerothcore/logs/Server.log
    # Note: frozen mtime after "World Initialized" is NORMAL
+   ```
+
+5. **Check Playerbots.log** (for bot-related issues):
+   ```bash
+   tail -200 /opt/stacks/azerothcore/logs/Playerbots.log
+   ```
+
+6. **Check backup.log** (for backup failures):
+   ```bash
+   cat /opt/stacks/azerothcore/logs/backup.log
+   ```
+
+7. **Check install log** (for install or phase failures):
+   ```bash
+   # After relocation to the stack logs dir:
+   ls -t /opt/stacks/azerothcore/logs/install-*.log 2>/dev/null | head -1 | xargs tail -100
+   # Or still in /tmp/ (install running or never relocated):
+   ls -t /tmp/azerothcore-install-*.log 2>/dev/null | head -1 | xargs tail -100
    ```
 
 ---

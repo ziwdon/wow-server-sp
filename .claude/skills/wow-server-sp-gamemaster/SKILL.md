@@ -23,6 +23,8 @@ admin web app.
 ## How to Use This Skill
 
 1. **Identify the domain** from the user's question (see table below).
+   For troubleshooting, error, or "why is X happening" questions: **read the logs first** (see
+   "Troubleshooting: Read Logs First" below) before consulting the reference files.
 2. **Read the relevant reference file** before answering.
 3. **Be precise** — always cite the correct config key, command syntax, or file path.
 4. **Be honest about uncertainty** — if something is not in the reference files, say so clearly
@@ -89,6 +91,51 @@ docker attach ac-worldserver
 | `/opt/stacks/azerothcore-admin/` | Admin app stack root |
 | `~/.azerothcore-install-state` | Install phase checkpoint |
 | `~/.azerothcore-install-config` | Installer prompt answers (deleted on success) |
+
+## Troubleshooting: Read Logs First
+
+When the user reports an error or unexpected behaviour, **proactively read the available logs before consulting reference files or suggesting fixes.** The logs are the ground truth; the reference files tell you what they mean.
+
+All runtime logs are written to `/opt/stacks/azerothcore/logs/` on the host (mounted from `./logs` inside `ac-worldserver`). Attempt to read them in this order:
+
+**1. Errors.log** — authoritative runtime error channel; 0 bytes = clean
+```bash
+ls -la /opt/stacks/azerothcore/logs/Errors.log
+# If non-zero:
+tail -100 /opt/stacks/azerothcore/logs/Errors.log
+```
+
+**2. Live worldserver stdout** — most recent runtime activity and bot stats
+```bash
+docker logs --tail 100 ac-worldserver
+```
+
+**3. Server.log** — boot and init output only (quiet after `WORLD: World Initialized`)
+```bash
+tail -100 /opt/stacks/azerothcore/logs/Server.log
+```
+
+**4. Playerbots.log** — if the issue involves bots or playerbot behaviour
+```bash
+tail -200 /opt/stacks/azerothcore/logs/Playerbots.log
+```
+
+**5. backup.log** — if the issue involves failed or missing backups
+```bash
+cat /opt/stacks/azerothcore/logs/backup.log
+```
+
+**6. Install log** — if the issue involves a failed or partial install
+```bash
+# After relocation to the stack logs dir:
+ls -t /opt/stacks/azerothcore/logs/install-*.log 2>/dev/null | head -1 | xargs tail -100
+# Or still in /tmp/ (install running or never relocated):
+ls -t /tmp/azerothcore-install-*.log 2>/dev/null | head -1 | xargs tail -100
+```
+
+**When logs are unavailable** (containers not running, pre-install state): note it and proceed with the reference files.
+
+**Before flagging log patterns as errors:** cross-reference with the "Known-Benign Log Noise" section in `references/ref-troubleshooting.md` — many high-volume patterns are expected and harmless.
 
 ## Epistemic Guardrails
 
