@@ -53,6 +53,21 @@ def _make_archive(tmp_path: Path) -> Path:
     return archive
 
 
+def _make_traversal_archive(tmp_path: Path) -> Path:
+    stage = tmp_path / "bad"
+    stage.mkdir()
+    (stage / "manifest.json").write_text(json.dumps({"format_version": 1}))
+    archive = tmp_path / "azerothcore-backup-manual-bad.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(stage / "manifest.json", arcname="manifest.json")
+        info = tarfile.TarInfo("../outside.txt")
+        payload = b"outside"
+        info.size = len(payload)
+        import io
+        tf.addfile(info, io.BytesIO(payload))
+    return archive
+
+
 def _stack(tmp_path: Path) -> Path:
     stack = tmp_path / "stack"
     (stack / "configs" / "mysql").mkdir(parents=True)
@@ -147,6 +162,25 @@ def test_dr_restore_aborts_before_copying_configs_when_realmlist_capture_fails(t
     calls = logf.read_text()
     assert "stop ac-worldserver" not in calls
     assert "DROP DATABASE IF EXISTS" not in calls
+
+
+def test_dr_restore_rejects_archive_path_traversal_before_extract(tmp_path):
+    stack = _stack(tmp_path)
+    archive = _make_traversal_archive(tmp_path)
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _make_stub(bind / "docker", (
+        '#!/bin/bash\n'
+        'echo "$@" >> "$DOCKER_CALLS_LOG"\n'
+        'exit 0\n'
+    ))
+
+    r = _run(stack, archive, bind, logf)
+
+    assert r.returncode == 1
+    assert "Unsafe archive member" in r.stderr
+    assert not (tmp_path / "outside.txt").exists()
+    assert not logf.exists()
 
 
 def test_dr_restore_aborts_before_copying_configs_when_realmlist_capture_is_empty(tmp_path):

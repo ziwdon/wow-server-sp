@@ -44,6 +44,37 @@ def test_run_restore_rejects_unknown_db_in_manifest(tmp_path, monkeypatch):
 @patch("app.services.actions.run_start", return_value=ActionResult.OK)
 @patch("app.services.actions.run_stop", return_value=ActionResult.OK)
 @patch("app.services.backup.run_backup")
+@patch("app.services.actions.db_credentials", return_value={"password": "pw"})
+def test_run_restore_aborts_if_manifest_db_sql_is_missing(
+    mock_creds, mock_backup, mock_stop, mock_start, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    mock_backup.return_value = type("R", (), {"ok": True, "archive": "safety", "output": ""})()
+    archive = _make_archive(tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", ["acore_auth"])
+    with tarfile.open(archive, "r:gz") as src:
+        members = [
+            (m, src.extractfile(m).read() if m.isfile() else None)
+            for m in src.getmembers()
+            if m.name != "sql/acore_auth.sql"
+        ]
+    with tarfile.open(archive, "w:gz") as dst:
+        for member, data in members:
+            if data is None:
+                dst.addfile(member)
+            else:
+                import io
+                dst.addfile(member, io.BytesIO(data))
+
+    r = actions.run_restore("azerothcore-backup-manual-x.tar.gz", on_progress=lambda *a: None)
+
+    assert r == ActionResult.ERROR
+    mock_stop.assert_called_once()
+    mock_start.assert_called_once()
+
+
+@patch("app.services.actions.run_start", return_value=ActionResult.OK)
+@patch("app.services.actions.run_stop", return_value=ActionResult.OK)
+@patch("app.services.backup.run_backup")
 @patch("app.services.actions.subprocess.run")
 @patch("app.services.actions.db_credentials", return_value={"password": "pw"})
 def test_run_restore_happy_path_imports_and_takes_safety_backup(

@@ -194,11 +194,16 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
                 _restart_after_restore_failure(on_progress)
                 return ActionResult.ERROR
             tf.extractall(stage, filter="data")
+        missing_sql = [
+            db for db in selected
+            if not (stage / "sql" / f"{db}.sql").is_file()
+        ]
+        if missing_sql:
+            on_progress("restore", f"archive missing SQL dumps for: {missing_sql}")
+            _restart_after_restore_failure(on_progress)
+            return ActionResult.ERROR
         for db in selected:
             sql_path = stage / "sql" / f"{db}.sql"
-            if not sql_path.is_file():
-                on_progress("restore", f"{db}: sql missing in archive; skipping")
-                continue
             if not _import_db(db, sql_path, password, on_progress):
                 _restart_after_restore_failure(on_progress)
                 return ActionResult.ERROR

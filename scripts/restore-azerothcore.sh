@@ -95,6 +95,28 @@ log() {
     echo "[$(date '+%F %T')] $*"
 }
 
+validate_archive_members() {
+    local listing member
+    if ! listing="$(tar -tzf "$ARCHIVE" 2>&1)"; then
+        if printf '%s\n' "$listing" | grep -q "Member name contains '..'"; then
+            echo "ERROR: Unsafe archive member in $ARCHIVE" >&2
+        else
+            echo "ERROR: Could not read archive member list from $ARCHIVE" >&2
+            printf '%s\n' "$listing" >&2
+        fi
+        return 1
+    fi
+    while IFS= read -r member; do
+        [ -n "$member" ] || continue
+        case "$member" in
+            /*|..|../*|*/..|*/../*)
+                echo "ERROR: Unsafe archive member: $member" >&2
+                return 1
+                ;;
+        esac
+    done <<< "$listing"
+}
+
 if [ -z "${DOCKER_DB_ROOT_PASSWORD:-}" ]; then
     echo "ERROR: DOCKER_DB_ROOT_PASSWORD is not set in ${STACK_DIR}/.env" >&2
     exit 1
@@ -103,6 +125,7 @@ fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 
+validate_archive_members
 tar -xzf "$ARCHIVE" -C "$STAGE"
 
 if [ ! -f "${STAGE}/manifest.json" ]; then
