@@ -42,8 +42,10 @@ document.addEventListener('htmx:afterRequest', function (e) {
 });
 document.addEventListener('htmx:sseMessage', function (e) {
   if (e.detail && e.detail.type === 'done') {
-    var el = document.getElementById('backups-list');
-    if (el) htmx.trigger(el, 'refresh');
+    ['backups-summary', 'backups-list'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) htmx.trigger(el, 'refresh');
+    });
     window.selectedBackup = null;
     var btn = document.getElementById('restore-btn');
     if (btn) btn.disabled = true;

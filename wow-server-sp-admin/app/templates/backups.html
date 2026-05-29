@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block main %}
-<div class="dashboard-content">
+<div class="dashboard-content backups-page">
 
-  <div id="backups-list" class="backups-wrap"
-       hx-get="/api/backups/list" hx-trigger="load, refresh">
-    <div class="stat-card"><div class="stat-label">Backups</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+  <div id="backups-summary" hx-get="/api/backups/summary" hx-trigger="load, refresh">
+    <div class="stat-row">
+      <div class="stat-card"><div class="stat-label">Backups</div><div class="stat-value" style="color:var(--text-muted)">Loading…</div></div>
+    </div>
   </div>
 
   <div class="action-bar">
@@ -17,10 +18,16 @@
             hx-swap="none">⟲ Restore selected</button>
   </div>
 
-  <div class="panel">
-    <div class="panel-header"><span class="panel-title">Activity</span></div>
-    <div class="panel-body" hx-ext="sse" sse-connect="/api/action/stream">
-      <ul id="action-log" sse-swap="progress,done" hx-swap="beforeend"></ul>
+  <div class="backups-grid">
+    <div id="backups-list" class="panel" hx-get="/api/backups/list" hx-trigger="load, refresh">
+      <div class="panel-body"><p class="empty-state">Loading…</p></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">Activity</span></div>
+      <div class="panel-body" hx-ext="sse" sse-connect="/api/action/stream">
+        <ul id="action-log" sse-swap="progress,done" hx-swap="beforeend"></ul>
+      </div>
     </div>
   </div>
 

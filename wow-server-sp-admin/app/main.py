@@ -259,17 +259,30 @@ def _humanize_gb(num_bytes: int) -> str:
     return f"{num_bytes / (1024 ** 3):.1f}"
 
 
-@app.get("/api/backups/list", response_class=HTMLResponse)
-async def api_backups_list(request: Request) -> HTMLResponse:
+@app.get("/api/backups/summary", response_class=HTMLResponse)
+async def api_backups_summary(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    backups_dir = ac / "backups"
-    rows = backups_svc.list_backups(backups_dir=backups_dir)
-    summary = backups_svc.backups_summary(backups_dir=backups_dir)
+    summary = backups_svc.backups_summary(backups_dir=ac / "backups")
     last_human = None
     if summary.last_backup_unix:
         last_human = dt.datetime.fromtimestamp(
             summary.last_backup_unix, tz=dt.timezone.utc
         ).strftime("%Y-%m-%d %H:%M UTC")
+    return templates.TemplateResponse(
+        request,
+        "partials/backups_summary.html",
+        {
+            "total_count": summary.total_count,
+            "disk_gb": _humanize_gb(summary.disk_used_bytes),
+            "last_human": last_human,
+        },
+    )
+
+
+@app.get("/api/backups/list", response_class=HTMLResponse)
+async def api_backups_list(request: Request) -> HTMLResponse:
+    ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
+    rows = backups_svc.list_backups(backups_dir=ac / "backups")
     return templates.TemplateResponse(
         request,
         "partials/backups_list.html",
@@ -283,9 +296,6 @@ async def api_backups_list(request: Request) -> HTMLResponse:
                 }
                 for r in rows
             ],
-            "total_count": summary.total_count,
-            "disk_gb": _humanize_gb(summary.disk_used_bytes),
-            "last_human": last_human,
         },
     )
 

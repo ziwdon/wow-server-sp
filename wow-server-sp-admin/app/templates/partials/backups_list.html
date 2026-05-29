@@ -1,40 +1,22 @@
-<div class="stat-row">
-  <div class="stat-card">
-    <div class="stat-label">Last Backup</div>
-    {% if last_human %}<div class="stat-value">{{ last_human }}</div>
-    {% else %}<div class="stat-value" style="color:var(--text-muted)">None</div>{% endif %}
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Total Backups</div>
-    <div class="stat-value">{{ total_count }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Disk Used</div>
-    <div class="stat-value">{{ disk_gb }} GB</div>
-  </div>
+<div class="panel-header"><span class="panel-title">Backups</span></div>
+<div class="panel-body backups-scroll">
+  {% if rows %}
+  <ul class="backups-list">
+  {% for row in rows %}
+    <li class="backup-row" data-archive="{{ row.filename }}" onclick="selectBackup(this)">
+      <span class="backup-time">{{ row.created }}</span>
+      <span class="backup-badge badge-{{ row.label }}">{{ row.label|capitalize }}</span>
+      <span class="backup-size">{{ row.size_mb }} MB</span>
+    </li>
+  {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">No backups yet. Use “Create backup” to make one.</p>
+  {% endif %}
 </div>
-
-<div class="panel">
-  <div class="panel-header"><span class="panel-title">Backups</span></div>
-  <div class="panel-body backups-scroll">
-    {% if rows %}
-    <ul class="backups-list">
-    {% for row in rows %}
-      <li class="backup-row" data-archive="{{ row.filename }}" onclick="selectBackup(this)">
-        <span class="backup-time">{{ row.created }}</span>
-        <span class="backup-badge badge-{{ row.label }}">{{ row.label|capitalize }}</span>
-        <span class="backup-size">{{ row.size_mb }} MB</span>
-      </li>
-    {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty-state">No backups yet. Use “Create backup” to make one.</p>
-    {% endif %}
-  </div>
-  <p class="backups-disclaimer">
-    ⚠ Backups are automatically deleted after 7 days — to keep one longer, copy its
-    file from <code>/opt/stacks/azerothcore/backups/</code>.
-    <strong>Archives contain database contents and configuration secrets (including
-    DB passwords) — store and transfer them securely.</strong>
-  </p>
-</div>
+<p class="backups-disclaimer">
+  ⚠ Backups are automatically deleted after 7 days — to keep one longer, copy its
+  file from <code>/opt/stacks/azerothcore/backups/</code>.
+  <strong>Archives contain database contents and configuration secrets (including
+  DB passwords) — store and transfer them securely.</strong>
+</p>

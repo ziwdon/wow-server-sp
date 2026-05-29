@@ -666,7 +666,20 @@ pre.logview {
 }
 
 /* --- Backups page --- */
-.backups-scroll { max-height: 420px; overflow-y: auto; }
+/* 3 summary cards span the full width; the action bar sits below them. */
+.backups-page .stat-row { grid-template-columns: repeat(3, 1fr); }
+/* Backups list | Activity, side by side, filling the remaining height —
+   mirrors the dashboard's .lower-grid so each panel scrolls internally. */
+.backups-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 1rem;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.backups-grid > .panel { min-height: 0; }
+.backups-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .backups-list { list-style: none; margin: 0; padding: 0; }
 .backup-row {
   display: flex; align-items: center; gap: 1rem;
@@ -686,5 +699,8 @@ pre.logview {
   padding: 0.75rem; border-top: 1px solid var(--border, #2a2a2a);
 }
 @media (max-width: 768px) {
-  .backups-scroll { max-height: 300px; }
+  .backups-page .stat-row { grid-template-columns: repeat(2, 1fr); }
+  .backups-grid { grid-template-columns: 1fr; overflow: visible; }
+  .backups-grid > .panel { height: auto; min-height: 200px; overflow: hidden; }
+  .backups-grid > .panel .panel-body { overflow-y: auto; max-height: 280px; }
 }

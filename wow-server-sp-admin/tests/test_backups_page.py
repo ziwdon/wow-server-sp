@@ -1,3 +1,5 @@
+import datetime as dt
+import os
 from pathlib import Path
 
 import pytest
@@ -49,9 +51,21 @@ def test_backups_list_endpoint(client):
     assert r.status_code == 200
 
 
+def test_backups_summary_endpoint(client):
+    r = client.get("/api/backups/summary")
+    assert r.status_code == 200
+    assert "Last Backup" in r.text
+    assert "Total Backups" in r.text
+    assert "Disk Used" in r.text
+
+
 def test_backups_list_renders_rows_and_disclaimer(client, tmp_path):
     archive = tmp_path / "backups" / "azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"
     archive.write_bytes(b"backup archive")
+    # The list now shows the archive's real write time (mtime), not the filename
+    # stamp. Pin a known mtime so the rendered time is deterministic.
+    when = dt.datetime(2026, 5, 29, 14, 3, 10, tzinfo=dt.timezone.utc).timestamp()
+    os.utime(archive, (when, when))
 
     r = client.get("/api/backups/list")
 

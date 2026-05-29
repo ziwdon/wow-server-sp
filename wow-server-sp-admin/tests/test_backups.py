@@ -52,20 +52,31 @@ def test_returns_none_error_when_log_has_no_errors(tmp_path):
     assert s.last_error is None
 
 
-def test_list_backups_parses_label_and_time(tmp_path):
+def test_list_backups_uses_file_mtime_newest_first(tmp_path):
     b = tmp_path / "backups"
     b.mkdir()
-    _touch(b / "azerothcore-backup-daily-2026-05-29.tar.gz")
-    _touch(b / "azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz")
-    _touch(b / "azerothcore-backup-prerestore-2026-05-28T09-00-00.tar.gz")
+    daily = b / "azerothcore-backup-daily-2026-05-29.tar.gz"
+    manual = b / "azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"
+    pre = b / "azerothcore-backup-prerestore-2026-05-28T09-00-00.tar.gz"
+    for p in (daily, manual, pre):
+        _touch(p)
     _touch(b / "not-a-backup.txt")  # ignored
+
+    # Distinct mtimes (oldest -> newest): prerestore, manual, daily.
+    now = time.time()
+    os.utime(pre, (now - 200, now - 200))
+    os.utime(manual, (now - 100, now - 100))
+    os.utime(daily, (now, now))
 
     rows = list_backups(backups_dir=b)
     assert len(rows) == 3
-    labels = {r.label for r in rows}
-    assert labels == {"daily", "manual", "prerestore"}
-    # Newest first.
-    assert rows[0].created >= rows[1].created >= rows[2].created
+    assert {r.label for r in rows} == {"daily", "manual", "prerestore"}
+    # Sorted newest-first by mtime, NOT by the date-only filename stamp
+    # (which would otherwise sort the daily archive to 00:00 UTC).
+    assert [r.label for r in rows] == ["daily", "manual", "prerestore"]
+    # The daily row reflects its real write time (mtime), not the date-only
+    # 00:00 UTC filename stamp. (Tolerance: datetime truncates to microseconds.)
+    assert abs(rows[0].created.timestamp() - daily.stat().st_mtime) < 1
 
 
 def test_backups_summary(tmp_path):

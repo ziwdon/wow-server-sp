@@ -1,0 +1,15 @@
+<div class="stat-row">
+  <div class="stat-card">
+    <div class="stat-label">Last Backup</div>
+    {% if last_human %}<div class="stat-value">{{ last_human }}</div>
+    {% else %}<div class="stat-value" style="color:var(--text-muted)">None</div>{% endif %}
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Total Backups</div>
+    <div class="stat-value">{{ total_count }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Disk Used</div>
+    <div class="stat-value">{{ disk_gb }} GB</div>
+  </div>
+</div>

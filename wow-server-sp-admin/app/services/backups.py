@@ -56,17 +56,15 @@ class BackupsSummary:
     disk_used_bytes: int
 
 
-def _parse_stamp(stamp: str, fallback_mtime: float) -> _dt.datetime:
-    for fmt in ("%Y-%m-%dT%H-%M-%S", "%Y-%m-%d"):
-        try:
-            return _dt.datetime.strptime(stamp, fmt).replace(tzinfo=_dt.timezone.utc)
-        except ValueError:
-            continue
-    return _dt.datetime.fromtimestamp(fallback_mtime, tz=_dt.timezone.utc)
-
-
 def list_backups(*, backups_dir: _Path) -> list[BackupInfo]:
-    """Single-archive backups, newest first. Filename-only parse (no tar open)."""
+    """Single-archive backups, newest first.
+
+    The displayed time is the archive's mtime — the actual moment backup.sh
+    wrote it — not the filename stamp. `daily` archives are stamped date-only by
+    design (one per calendar day), so the stamp alone renders as 00:00 UTC;
+    mtime is accurate to the second and matches the dashboard's "Last Backup"
+    card. The filename is still parsed, but only for the label.
+    """
     if not backups_dir.exists():
         return []
     out: list[BackupInfo] = []
@@ -79,7 +77,7 @@ def list_backups(*, backups_dir: _Path) -> list[BackupInfo]:
             BackupInfo(
                 filename=p.name,
                 label=m.group(1),
-                created=_parse_stamp(m.group(2), st.st_mtime),
+                created=_dt.datetime.fromtimestamp(st.st_mtime, tz=_dt.timezone.utc),
                 size_bytes=st.st_size,
             )
         )
