@@ -13,6 +13,7 @@ from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 import datetime as dt
 import re
@@ -244,6 +245,50 @@ async def api_backups(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/backups", response_class=HTMLResponse)
+async def backups_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "backups.html",
+        {"title": "azerothcore-admin · backups"},
+    )
+
+
+def _humanize_gb(num_bytes: int) -> str:
+    return f"{num_bytes / (1024 ** 3):.1f}"
+
+
+@app.get("/api/backups/list", response_class=HTMLResponse)
+async def api_backups_list(request: Request) -> HTMLResponse:
+    ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
+    backups_dir = ac / "backups"
+    rows = backups_svc.list_backups(backups_dir=backups_dir)
+    summary = backups_svc.backups_summary(backups_dir=backups_dir)
+    last_human = None
+    if summary.last_backup_unix:
+        last_human = dt.datetime.fromtimestamp(
+            summary.last_backup_unix, tz=dt.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
+    return templates.TemplateResponse(
+        request,
+        "partials/backups_list.html",
+        {
+            "rows": [
+                {
+                    "filename": r.filename,
+                    "label": r.label,
+                    "created": r.created.strftime("%Y-%m-%d %H:%M UTC"),
+                    "size_mb": round(r.size_bytes / (1024 * 1024)),
+                }
+                for r in rows
+            ],
+            "total_count": summary.total_count,
+            "disk_gb": _humanize_gb(summary.disk_used_bytes),
+            "last_human": last_human,
+        },
+    )
+
+
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.actions import run_force_stop, run_restart, run_start, run_stop, verify_env_vars_bound, ActionResult
@@ -340,6 +385,34 @@ async def post_force_stop():
     return {"id": record.id, "status": "running"}
 
 
+@app.post("/api/action/backup")
+async def post_backup():
+    from app.services.actions import run_backup_manual
+
+    record = _kick("backup", lambda cb: run_backup_manual(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+class RestorePayload(BaseModel):
+    archive: str
+
+
+@app.post("/api/action/restore")
+async def post_restore(payload: RestorePayload):
+    from app.services.actions import run_restore
+
+    name = payload.archive
+    if (
+        "/" in name
+        or ".." in name
+        or not name.startswith("azerothcore-backup-")
+        or not name.endswith(".tar.gz")
+    ):
+        raise HTTPException(status_code=400, detail="invalid archive name")
+    record = _kick("restore", lambda cb: run_restore(name, on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
 @app.get("/api/action/stream")
 async def stream_action(id: str | None = None):
     """Subscribe to progress for an action.
@@ -386,8 +459,6 @@ async def settings_page(request: Request) -> HTMLResponse:
         },
     )
 
-
-from pydantic import BaseModel
 
 class ApplyPayload(BaseModel):
     pending: dict[str, str]

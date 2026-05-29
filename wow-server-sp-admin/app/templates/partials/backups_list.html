@@ -1,0 +1,32 @@
+<div class="stat-card">
+  <div class="stat-label">Backups</div>
+  <div class="stat-value">{{ total_count }}</div>
+  <div class="stat-sub">
+    {{ disk_gb }} GB used{% if last_human %} · last {{ last_human }}{% endif %}
+  </div>
+</div>
+
+{% if rows %}
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Archive</th>
+      <th>Label</th>
+      <th>Created</th>
+      <th>Size</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.filename }}</td>
+      <td>{{ row.label }}</td>
+      <td>{{ row.created }}</td>
+      <td>{{ row.size_mb }} MB</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="idle">No backups found.</p>
+{% endif %}

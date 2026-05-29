@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="dashboard-content">
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Backups</span>
+    </div>
+    <div class="panel-body" id="backups-list" hx-get="/api/backups/list" hx-trigger="load">
+      <div class="stat-card">
+        <div class="stat-label">Backups</div>
+        <div class="stat-value" style="color:var(--text-muted)">Loading...</div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
