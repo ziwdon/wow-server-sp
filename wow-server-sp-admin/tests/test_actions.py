@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+from app.services import actions
 from app.services.actions import ActionResult, run_stop
 
 
@@ -26,7 +27,6 @@ def test_stop_runs_console_commands_then_docker_stop(
     progress: list[str] = []
     result = run_stop(
         on_progress=lambda step, msg: progress.append(step),
-        run_backup=False,  # skip backup in unit test
         grace_seconds=30,
     )
 
@@ -62,7 +62,7 @@ def test_stop_skips_when_already_stopped(mock_inspect):
     mock_inspect.return_value = ContainerInfo(
         status="exited", started_at=None, exit_code=0, image=None,
     )
-    result = run_stop(on_progress=lambda *_: None, run_backup=False, grace_seconds=30)
+    result = run_stop(on_progress=lambda *_: None, grace_seconds=30)
     assert result == ActionResult.OK
 
 
@@ -162,3 +162,24 @@ def test_wait_for_world_init_ignores_stale_prior_boot_line(tmp_path, monkeypatch
     # No file mutation during wait -> must time out.
     monkeypatch.setattr("app.services.actions.time.sleep", lambda _s: None)
     assert _wait_for_world_init(timeout=0, on_progress=lambda *_: None) is False
+
+
+@patch("app.services.actions.subprocess.run")
+@patch("app.services.actions._wait_for_status", return_value=True)
+@patch("app.services.actions.WorldserverConsole")
+@patch("app.services.actions.inspect_worldserver")
+def test_run_stop_does_not_take_a_backup(mock_inspect, mock_console, mock_wait, mock_run):
+    mock_inspect.return_value = type("I", (), {"status": "running", "started_at": None, "exit_code": None})()
+    mock_console.return_value.__enter__.return_value = mock_console.return_value
+    with patch("app.services.backup.run_backup") as mock_backup:
+        result = actions.run_stop(on_progress=lambda *a: None, grace_seconds=0)
+        mock_backup.assert_not_called()
+    assert result == ActionResult.OK
+
+
+@patch("app.services.backup.run_backup")
+def test_run_backup_manual_uses_manual_label(mock_backup):
+    mock_backup.return_value = type("R", (), {"ok": True, "archive": "x", "output": ""})()
+    result = actions.run_backup_manual(on_progress=lambda *a: None)
+    assert result == ActionResult.OK
+    assert mock_backup.call_args.args[0] == "manual"

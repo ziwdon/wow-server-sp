@@ -49,36 +49,22 @@ def _wait_for_status(target: str, timeout: int, on_progress: ProgressCb) -> bool
     return False
 
 
-def _run_backup(on_progress: ProgressCb) -> bool:
-    """Run the in-process backup. We do NOT shell out to /ac/backup.sh —
-    that script hardcodes STACK_DIR=/opt/stacks/azerothcore (no env
-    override) and writes via the host filesystem, neither of which work
-    from inside the admin container. See app/services/backup_runner.py."""
-    from app.services.backup_runner import run_full_backup
-    from app.state import db_credentials
-
-    on_progress("backup", "running in-process backup")
-    ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    creds = db_credentials()
-    result = run_full_backup(
-        backups_dir=ac_stack / "backups",
-        stack_dir=ac_stack,
-        db_password=str(creds["password"]),
-    )
+def run_backup_manual(*, on_progress: ProgressCb) -> ActionResult:
+    """Create a single on-demand archive via the bundled backup.sh."""
+    from app.services.backup import run_backup
+    on_progress("backup", "creating manual backup")
+    result = run_backup("manual", on_progress=on_progress)
     if not result.ok:
-        on_progress("backup", f"backup FAILED: {result.error}")
-        log.error("backup failed: %s", result.error)
-        return False
-    summary = f"dumped={result.dumped}; skipped={result.skipped}"
-    on_progress("backup", f"backup OK ({summary})")
-    return True
+        on_progress("backup", "backup FAILED")
+        return ActionResult.ERROR
+    on_progress("done", f"backup OK: {result.archive}")
+    return ActionResult.OK
 
 
 def run_stop(
     *,
     on_progress: ProgressCb,
     grace_seconds: int = 30,
-    run_backup: bool = True,
 ) -> ActionResult:
     """Safe stop.
 
@@ -95,16 +81,12 @@ def run_stop(
             5-15 s, but with ~2500 bot characters the save can stretch
             to 30-45 s; 60 s avoids a Docker-initiated SIGKILL while
             the save is mid-flight.
-      then  in-process backup_runner (if run_backup=True)
-
     We do NOT use `server shutdown N` — its countdown is collapsed by
     the SIGTERM `docker stop` sends, defeating its purpose.
     """
     info = inspect_worldserver()
     if info.status in ("exited", "missing"):
         on_progress("inspect", f"already {info.status}")
-        if run_backup:
-            return ActionResult.OK if _run_backup(on_progress) else ActionResult.ERROR
         return ActionResult.OK
 
     # Compute the two sub-windows: most of the grace, then a final 10s.
@@ -147,10 +129,7 @@ def run_stop(
     if not _wait_for_status("exited", timeout=120, on_progress=on_progress):
         return ActionResult.TIMEOUT
 
-    if run_backup and not _run_backup(on_progress):
-        return ActionResult.ERROR
-
-    on_progress("done", "stopped + backup OK")
+    on_progress("done", "stopped")
     return ActionResult.OK
 
 
@@ -293,7 +272,6 @@ def run_restart(
     stop_result = run_stop(
         on_progress=on_progress,
         grace_seconds=grace_seconds,
-        run_backup=True,
     )
     if stop_result not in (ActionResult.OK, ActionResult.ALREADY):
         return stop_result
