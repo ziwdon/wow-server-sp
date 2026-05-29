@@ -7,10 +7,14 @@ HTTP route can stream updates via SSE.
 from __future__ import annotations
 
 import enum
+import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tarfile
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,9 +26,11 @@ import docker.errors
 from app.services.console import WorldserverConsole
 from app.services.docker_client import WORLDSERVER, inspect_worldserver
 from app.services.env_var import config_key_to_ac_env_var
+from app.state import db_credentials
 
 ProgressCb = Callable[[str, str], None]
 log = logging.getLogger(__name__)
+KNOWN_DBS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
 
 
 class ActionResult(str, enum.Enum):
@@ -49,36 +55,185 @@ def _wait_for_status(target: str, timeout: int, on_progress: ProgressCb) -> bool
     return False
 
 
-def _run_backup(on_progress: ProgressCb) -> bool:
-    """Run the in-process backup. We do NOT shell out to /ac/backup.sh —
-    that script hardcodes STACK_DIR=/opt/stacks/azerothcore (no env
-    override) and writes via the host filesystem, neither of which work
-    from inside the admin container. See app/services/backup_runner.py."""
-    from app.services.backup_runner import run_full_backup
-    from app.state import db_credentials
-
-    on_progress("backup", "running in-process backup")
-    ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    creds = db_credentials()
-    result = run_full_backup(
-        backups_dir=ac_stack / "backups",
-        stack_dir=ac_stack,
-        db_password=str(creds["password"]),
-    )
+def run_backup_manual(*, on_progress: ProgressCb) -> ActionResult:
+    """Create a single on-demand archive via the bundled backup.sh."""
+    from app.services.backup import run_backup
+    on_progress("backup", "creating manual backup")
+    result = run_backup("manual", on_progress=on_progress)
     if not result.ok:
-        on_progress("backup", f"backup FAILED: {result.error}")
-        log.error("backup failed: %s", result.error)
+        on_progress("backup", "backup FAILED")
+        return ActionResult.ERROR
+    on_progress("done", f"backup OK: {result.archive}")
+    return ActionResult.OK
+
+
+def read_manifest(archive: Path) -> dict | None:
+    """Extract and parse manifest.json from a backup archive; None on failure."""
+    try:
+        with tarfile.open(archive, "r:gz") as tf:
+            member = tf.extractfile("manifest.json")
+            if member is None:
+                return None
+            return json.loads(member.read())
+    except (tarfile.TarError, KeyError, OSError, json.JSONDecodeError) as e:
+        log.error("could not read manifest from %s: %s", archive, e)
+        return None
+
+
+def _import_db(db: str, sql_path: Path, password: str, on_progress: ProgressCb) -> bool:
+    on_progress("restore", f"restoring {db}")
+    drop = subprocess.run(
+        [
+            "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
+            "-e", f"DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db};",
+        ],
+        capture_output=True, text=True,
+    )
+    if drop.returncode != 0:
+        on_progress("restore", f"{db}: drop/create failed: {drop.stderr.strip()}")
         return False
-    summary = f"dumped={result.dumped}; skipped={result.skipped}"
-    on_progress("backup", f"backup OK ({summary})")
+    with sql_path.open("rb") as fh:
+        imp = subprocess.run(
+            ["docker", "exec", "-i", "ac-database", "mysql", "-uroot", f"-p{password}", db],
+            stdin=fh, capture_output=True, text=True,
+        )
+    if imp.returncode != 0:
+        on_progress("restore", f"{db}: import failed: {imp.stderr.strip()}")
+        return False
     return True
+
+
+def _archive_has_unsafe_member(archive: tarfile.TarFile, target_dir: Path) -> bool:
+    root = target_dir.resolve()
+    for member in archive.getmembers():
+        member_path = (target_dir / member.name).resolve()
+        try:
+            member_path.relative_to(root)
+        except ValueError:
+            return True
+    return False
+
+
+def _restore_admin_yml(admin_yml: Path, ac_stack: Path) -> None:
+    from app.state import get_state
+
+    try:
+        state = get_state()
+    except RuntimeError:
+        target = ac_stack / "docker-compose.admin.yml"
+        target.write_text(admin_yml.read_text())
+        return
+    state.admin.snapshot()
+    with state.admin.path.open("w", encoding="utf-8") as f:
+        f.write(admin_yml.read_text())
+
+
+def _restart_after_restore_failure(on_progress: ProgressCb) -> None:
+    try:
+        run_start(on_progress=on_progress)
+    except Exception as e:  # noqa: BLE001
+        log.error("failed to restart after restore failure: %s", e)
+        on_progress("start", f"restart after restore failure failed: {e}")
+
+
+def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
+    """In-app restore: DB(s) + admin.yml. Same-machine rollback. See spec §9."""
+    from app.services.backup import run_backup as create_backup
+
+    ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
+    backups_dir = ac_stack / "backups"
+
+    # 1. Validate the filename (no traversal) + existence.
+    if (
+        "/" in archive_name
+        or ".." in archive_name
+        or not archive_name.startswith("azerothcore-backup-")
+        or not archive_name.endswith(".tar.gz")
+    ):
+        on_progress("validate", "invalid archive name")
+        return ActionResult.ERROR
+    archive = backups_dir / archive_name
+    if not archive.is_file():
+        on_progress("validate", "archive not found")
+        return ActionResult.ERROR
+
+    # 2. Manifest + DB-set validation.
+    manifest = read_manifest(archive)
+    if manifest is None or manifest.get("format_version") != 1:
+        on_progress("validate", "unsupported or missing manifest")
+        return ActionResult.ERROR
+    dbs = manifest.get("databases", [])
+    unknown = [d for d in dbs if d not in KNOWN_DBS]
+    if unknown:
+        on_progress("validate", f"rejecting unknown DBs: {unknown}")
+        return ActionResult.ERROR
+    selected = [d for d in dbs if d in KNOWN_DBS]
+    on_progress("validate", f"will restore: {selected}")
+
+    # 3. Stop worldserver (no backup on stop anymore).
+    stop = run_stop(on_progress=on_progress)
+    if stop not in (ActionResult.OK, ActionResult.ALREADY):
+        return stop
+
+    stage: Path | None = None
+    try:
+        # 4. Pre-restore safety backup — abort (and restart) if it fails.
+        on_progress("safety", "taking pre-restore safety backup")
+        safety = create_backup("prerestore", on_progress=on_progress)
+        if not safety.ok:
+            on_progress("safety", "pre-restore backup FAILED; aborting and restarting")
+            _restart_after_restore_failure(on_progress)
+            return ActionResult.ERROR
+
+        # 5. Extract + import.
+        password = str(db_credentials()["password"])
+        stage = Path(tempfile.mkdtemp(prefix="restore-"))
+        with tarfile.open(archive, "r:gz") as tf:
+            if _archive_has_unsafe_member(tf, stage):
+                on_progress("validate", "archive contains unsafe paths")
+                _restart_after_restore_failure(on_progress)
+                return ActionResult.ERROR
+            tf.extractall(stage, filter="data")
+        missing_sql = [
+            db for db in selected
+            if not (stage / "sql" / f"{db}.sql").is_file()
+        ]
+        if missing_sql:
+            on_progress("restore", f"archive missing SQL dumps for: {missing_sql}")
+            _restart_after_restore_failure(on_progress)
+            return ActionResult.ERROR
+        for db in selected:
+            sql_path = stage / "sql" / f"{db}.sql"
+            if not _import_db(db, sql_path, password, on_progress):
+                _restart_after_restore_failure(on_progress)
+                return ActionResult.ERROR
+
+        # 6. Restore admin.yml if present (the one config the admin may write).
+        admin_yml = stage / "config" / "docker-compose.admin.yml"
+        if admin_yml.is_file():
+            on_progress("restore", "restoring docker-compose.admin.yml")
+            _restore_admin_yml(admin_yml, ac_stack)
+    except Exception as e:  # noqa: BLE001
+        log.exception("restore failed after worldserver stop")
+        on_progress("restore", f"restore failed: {e}")
+        _restart_after_restore_failure(on_progress)
+        return ActionResult.ERROR
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    # 7. Start.
+    start = run_start(on_progress=on_progress)
+    if start not in (ActionResult.OK, ActionResult.ALREADY):
+        return start
+    on_progress("done", "restore complete")
+    return ActionResult.OK
 
 
 def run_stop(
     *,
     on_progress: ProgressCb,
     grace_seconds: int = 30,
-    run_backup: bool = True,
 ) -> ActionResult:
     """Safe stop.
 
@@ -95,16 +250,12 @@ def run_stop(
             5-15 s, but with ~2500 bot characters the save can stretch
             to 30-45 s; 60 s avoids a Docker-initiated SIGKILL while
             the save is mid-flight.
-      then  in-process backup_runner (if run_backup=True)
-
     We do NOT use `server shutdown N` — its countdown is collapsed by
     the SIGTERM `docker stop` sends, defeating its purpose.
     """
     info = inspect_worldserver()
     if info.status in ("exited", "missing"):
         on_progress("inspect", f"already {info.status}")
-        if run_backup:
-            return ActionResult.OK if _run_backup(on_progress) else ActionResult.ERROR
         return ActionResult.OK
 
     # Compute the two sub-windows: most of the grace, then a final 10s.
@@ -147,10 +298,7 @@ def run_stop(
     if not _wait_for_status("exited", timeout=120, on_progress=on_progress):
         return ActionResult.TIMEOUT
 
-    if run_backup and not _run_backup(on_progress):
-        return ActionResult.ERROR
-
-    on_progress("done", "stopped + backup OK")
+    on_progress("done", "stopped")
     return ActionResult.OK
 
 
@@ -293,7 +441,6 @@ def run_restart(
     stop_result = run_stop(
         on_progress=on_progress,
         grace_seconds=grace_seconds,
-        run_backup=True,
     )
     if stop_result not in (ActionResult.OK, ActionResult.ALREADY):
         return stop_result

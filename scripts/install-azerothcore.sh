@@ -23,6 +23,7 @@ fi
 # ============================================================================
 
 STACK_DIR="/opt/stacks/azerothcore"
+SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_FILE="${HOME}/.azerothcore-install-state"
 CONFIG_FILE="${HOME}/.azerothcore-install-config"
 
@@ -3665,7 +3666,7 @@ fi
 
 # ============================================================================
 # PHASE 7 — Backup script + cron
-# backup.sh heredoc is fixed content; no substitutions.
+# backup.sh is copied from the canonical repo script.
 # ============================================================================
 if should_run_phase "7"; then
     banner "7" "Backup script + cron"
@@ -3677,73 +3678,11 @@ if should_run_phase "7"; then
         cp -a "${STACK_DIR}/backup.sh" "${STACK_DIR}/backup.sh.bak.${UNIX_TS}"
     fi
 
-    cat > "${STACK_DIR}/backup.sh" <<'SCRIPT'
-#!/bin/bash
-set -euo pipefail
-umask 077
-
-STACK_DIR=/opt/stacks/azerothcore
-BACKUP_DIR="${STACK_DIR}/backups"
-DATE=$(date +%F)
-
-# Load secrets — required for MySQL authentication.
-source "${STACK_DIR}/.env"
-
-mkdir -p "${BACKUP_DIR}"
-chmod 700 "${BACKUP_DIR}"
-
-echo "[$(date)] Starting AzerothCore backup..."
-
-if ! docker inspect ac-database >/dev/null 2>&1; then
-    echo "[$(date)] ERROR: ac-database container does not exist."
-    exit 1
-fi
-
-for DB in acore_auth acore_characters acore_world acore_playerbots; do
-    if docker exec ac-database mysql \
-        -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
-        -e "USE ${DB};" >/dev/null 2>&1; then
-
-        docker exec ac-database mysqldump \
-            -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
-            --single-transaction --routines --triggers --events "${DB}" \
-            > "${BACKUP_DIR}/${DB}-${DATE}.sql"
-
-        chmod 600 "${BACKUP_DIR}/${DB}-${DATE}.sql"
-        echo "[$(date)] Backed up ${DB}"
-    else
-        echo "[$(date)] WARNING: Database ${DB} does not exist or is inaccessible; skipping."
+    if [ ! -f "${SCRIPT_SOURCE_DIR}/backup.sh" ]; then
+        echo "ERROR: canonical backup.sh not found at ${SCRIPT_SOURCE_DIR}/backup.sh" >&2
+        exit 1
     fi
-done
-
-# Back up configuration and revision metadata. These are required for a clean restore.
-# --warning=no-file-changed suppresses the legitimate noise of files being touched during
-# the tar, but a real failure (disk full, permission, archive corruption) is still raised.
-if ! tar -czf "${BACKUP_DIR}/azerothcore-config-${DATE}.tar.gz" \
-        -C "${STACK_DIR}" \
-        .env docker-compose.override.yml configs \
-        --warning=no-file-changed
-then
-    echo "[$(date)] ERROR: config tar failed."
-    exit 1
-fi
-chmod 600 "${BACKUP_DIR}/azerothcore-config-${DATE}.tar.gz"
-
-{
-    echo "core $(cd "${STACK_DIR}" && git rev-parse HEAD 2>/dev/null || echo unknown)"
-    echo "mod-playerbots $(cd "${STACK_DIR}/modules/mod-playerbots" && git rev-parse HEAD 2>/dev/null || echo unknown)"
-    echo "mod-ah-bot-plus $(cd "${STACK_DIR}/modules/mod-ah-bot-plus" && git rev-parse HEAD 2>/dev/null || echo unknown)"
-} > "${BACKUP_DIR}/git-revisions-${DATE}.txt"
-chmod 600 "${BACKUP_DIR}/git-revisions-${DATE}.txt"
-
-# Rotate: keep 7 days only. Increase this if the server matters long-term.
-find "${BACKUP_DIR}" -name "*.sql" -mtime +7 -delete
-find "${BACKUP_DIR}" -name "azerothcore-config-*.tar.gz" -mtime +7 -delete
-find "${BACKUP_DIR}" -name "git-revisions-*.txt" -mtime +7 -delete
-
-echo "[$(date)] Backup complete."
-ls -lh "${BACKUP_DIR}"
-SCRIPT
+    cp "${SCRIPT_SOURCE_DIR}/backup.sh" "${STACK_DIR}/backup.sh"
 
     chmod +x "${STACK_DIR}/backup.sh"
 

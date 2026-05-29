@@ -28,6 +28,8 @@ echo "==> Syncing code..."
 rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
 
 mkdir -p "$STACK_DIR/build/dist"
+# Stage the canonical backup script into the build context (Dockerfile COPYs it).
+cp "$REPO_DIR/../scripts/backup.sh" "$STACK_DIR/build/backup.sh"
 
 echo "==> Copying dist configs..."
 cp "$REPO_DIR/../docs/configs/"*.conf.dist "$STACK_DIR/build/dist/"

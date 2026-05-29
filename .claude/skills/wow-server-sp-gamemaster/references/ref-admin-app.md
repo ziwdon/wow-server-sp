@@ -6,7 +6,7 @@
 
 - **Access:** `http://<tailscale-ip>:<admin-port>/` (port set during install)
 - **Stack:** Separate from AC's Docker stack — admin can manage AC without being affected by AC restarts
-- **Writes:** Only writes `docker-compose.admin.yml` and files in `backups/` inside `/opt/stacks/azerothcore/`
+- **Filesystem writes:** Inside `/opt/stacks/azerothcore/`, the admin only writes `docker-compose.admin.yml` and files in `backups/`. In-app Restore also mutates AzerothCore databases via `docker exec`, as documented below.
 
 ## Installation / Management Scripts
 
@@ -41,10 +41,10 @@ Three log views accessible via tab switcher:
 ### Actions (Dashboard)
 - **Restart** — graceful restart (announce → saveall → stop → wait → start)
 - **Stop** — graceful stop with configurable countdown
-- **Backup** — triggers an in-process backup (same format as nightly cron)
+- **Backup** — triggers a manual backup through the same bundled `backup.sh` used by nightly cron
 
 ### Backup Status
-Shows list of available backups in `/opt/stacks/azerothcore/backups/`.
+Shows the latest backup status from `/opt/stacks/azerothcore/backups/`.
 
 ### Players Panel
 Shows online real players with basic info.
@@ -73,6 +73,14 @@ The Settings page allows browsing and modifying AzerothCore configuration via `A
 
 ### Rollback
 If something breaks after Apply, use the Rollback button to restore the most recent snapshot.
+
+## Backups & Restore
+
+The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first.
+
+Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers daily, manual, and prerestore archives. To keep a backup longer, copy the archive off the server from `/opt/stacks/azerothcore/backups/`.
+
+For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: reinstall AzerothCore first, copy the chosen archive to the new host, then run `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz`.
 
 ### Blocked Keys
 `AuctionHouseBot.GUIDs` is blocked — it's installer-managed and cannot be set via the admin UI.
@@ -104,14 +112,15 @@ If something breaks after Apply, use the Rollback button to restore the most rec
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime vars (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
-| `/opt/stacks/azerothcore/backups/` | Admin-created backups (same format as nightly cron) |
+| `/opt/stacks/azerothcore/backups/` | Consolidated daily, manual, and prerestore backup archives |
 
 ## Backup Format
 
-Admin-created backups match the nightly cron format:
-- `<db>-<date>.sql` — mysqldump for each database
-- `azerothcore-config-<date>.tar.gz` — `.env`, `docker-compose.override.yml`, `configs/`
-- `git-revisions-<date>.txt` — snapshot of module git hashes
+Admin-created backups and nightly cron backups use the same single-archive format:
+- `azerothcore-backup-<label>-<stamp>.tar.gz` — consolidated archive
+- `manifest.json` — format version, label, database list, git revisions, image tag
+- `sql/*.sql` — mysqldump output for each backed-up database
+- `config/` — staged config files included for restore/DR workflows
 
 ## Viewing Admin Logs
 

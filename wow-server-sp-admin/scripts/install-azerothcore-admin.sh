@@ -117,6 +117,8 @@ rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
 # Stage .conf.dist files under build/ so the Dockerfile can `COPY dist/`.
 mkdir -p "$STACK_DIR/build/dist"
 cp "$REPO_DIR/../docs/configs/"*.conf.dist "$STACK_DIR/build/dist/"
+# Stage the canonical backup script into the build context (Dockerfile COPYs it).
+cp "$REPO_DIR/../scripts/backup.sh" "$STACK_DIR/build/backup.sh"
 
 # Vendor HTMX core + the SSE extension (one-time fetch). Both are referenced
 # in base.html from Task 4 -- vendoring both up-front means base.html never

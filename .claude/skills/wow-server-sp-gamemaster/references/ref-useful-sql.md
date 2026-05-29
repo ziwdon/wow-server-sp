@@ -214,39 +214,50 @@ ORDER BY bandate DESC;
 
 ## Backup / Restore
 
-### Manual database backup (same format as nightly cron)
+The canonical backup mechanism is the shared `scripts/backup.sh` (run by the nightly
+cron and bundled into the admin image for the **Backups** page). Each run produces ONE
+consolidated archive: `azerothcore-backup-<label>-<stamp>.tar.gz` containing
+`manifest.json`, all four DB dumps under `sql/`, and staged configs under `config/`.
+Labels: `daily` (cron), `manual` (Backups page), `prerestore` (auto-taken before an
+in-app restore). The nightly daily run prunes every archive older than 7 days.
+
+### Create a backup
 ```bash
-DATE=$(date +%Y-%m-%d)
-docker exec ac-database mysqldump -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
-    acore_auth > /opt/stacks/azerothcore/backups/acore_auth-$DATE.sql
-docker exec ac-database mysqldump -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
-    acore_characters > /opt/stacks/azerothcore/backups/acore_characters-$DATE.sql
-docker exec ac-database mysqldump -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
-    acore_world > /opt/stacks/azerothcore/backups/acore_world-$DATE.sql
-docker exec ac-database mysqldump -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
-    acore_playerbots > /opt/stacks/azerothcore/backups/acore_playerbots-$DATE.sql
+# Host (daily mode — exactly what the cron runs; also prunes >7-day-old archives):
+/opt/stacks/azerothcore/backup.sh
+# Or: admin Backups page -> "Create backup" (manual label).
 ```
 
-### Restore from backup
+### Restore a backup
+- **Same machine (rollback):** admin **Backups** page -> select an archive -> "Restore
+  selected". Imports the DBs via `docker exec`, restores `docker-compose.admin.yml`, and
+  takes a `prerestore` safety backup first.
+- **Fresh machine (disaster recovery):** reinstall AzerothCore, copy the archive over,
+  then `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz` (preserves the fresh
+  `.env` + `configs/mysql/custom.cnf` and re-fixes realmlist; see
+  `docs/runbooks/disaster-recovery.md`).
+
+### Ad-hoc single-database dump (one-off — NOT the cron/admin format)
+For a quick throwaway dump of a single DB (e.g. before a destructive query below), not a
+full backup. Write it outside `backups/` so the daily prune doesn't sweep it:
 ```bash
+docker exec ac-database mysqldump -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
+    acore_characters > /tmp/acore_characters-$(date +%F).sql
+# Restore that single DB:
 docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
-    acore_characters < /opt/stacks/azerothcore/backups/acore_characters-2026-05-20.sql
+    acore_characters < /tmp/acore_characters-2026-05-20.sql
 ```
-
-> **Note:** The admin app's Backup button creates the same format automatically.
-> Nightly cron also runs these — backups older than 7 days are auto-deleted.
 
 ---
 
 ## Rndbot Reset (DESTRUCTIVE)
 
-> **WARNING:** The queries below permanently delete all rndbot accounts and characters and all associated data (items, mail, guilds, groups, etc.). Run a backup first. After running, the server must be restarted and will regenerate the bot pool from scratch — this takes time.
+> **WARNING:** The queries below permanently delete all rndbot accounts and characters and all associated data (items, mail, guilds, groups, etc.). Take a full backup first (admin **Backups** page, or `/opt/stacks/azerothcore/backup.sh`). After running, the server must be restarted and will regenerate the bot pool from scratch — this takes time.
 >
 > Use this when: you want to change the bot count significantly, the bot pool is corrupted, or you need a clean slate.
 
 ```sql
--- Backup first:
--- docker exec ac-database mysqldump -uroot -p"$PWD" acore_characters > chars_backup.sql
+-- Back up first (full archive): /opt/stacks/azerothcore/backup.sh
 
 USE `acore_playerbots`;
 DELETE FROM `playerbots_random_bots`;

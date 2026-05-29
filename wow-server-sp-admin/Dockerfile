@@ -6,7 +6,7 @@ ARG HOST_GID=1000
 # Docker CE CLI + Compose v2 plugin so the admin app can shell out to
 # `docker compose ...` against the bind-mounted host socket.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg && \
+        ca-certificates curl gnupg git && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg | \
         gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
@@ -27,6 +27,11 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY dist/ /app/dist/
 
 COPY app/ /app/app/
+
+# Canonical backup script — single source of truth shared with the host cron.
+# Staged into the build context as ./backup.sh by the install/redeploy scripts.
+COPY backup.sh /app/scripts/backup.sh
+RUN chmod +x /app/scripts/backup.sh
 
 # Match host UID/GID so writes to bind-mounted docker-compose.admin.yml
 # keep installer-friendly ownership.

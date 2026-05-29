@@ -87,7 +87,7 @@ docker attach ac-worldserver
 | `/opt/stacks/azerothcore/logs/Server.log` | Boot/init log (quiet after init) |
 | `/opt/stacks/azerothcore/logs/Playerbots.log` | Bot activity (chatty; mostly benign) |
 | `/opt/stacks/azerothcore/configs/modules/mod_ahbot.conf` | AH bot GUIDs (only file edited post-install) |
-| `/opt/stacks/azerothcore/backups/` | Nightly mysqldumps + config tarballs |
+| `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (`azerothcore-backup-<label>-<stamp>.tar.gz`) |
 | `/opt/stacks/azerothcore-admin/` | Admin app stack root |
 | `~/.azerothcore-install-state` | Install phase checkpoint |
 | `~/.azerothcore-install-config` | Installer prompt answers (deleted on success) |
