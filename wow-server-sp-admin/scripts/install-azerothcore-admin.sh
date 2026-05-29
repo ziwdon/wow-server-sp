@@ -168,15 +168,18 @@ case "${answer:-y}" in
         sudo tee /etc/systemd/system/azerothcore-admin.service <<'UNIT' >/dev/null
 [Unit]
 Description=AzerothCore Admin (Docker Compose)
-After=docker.service
-Requires=docker.service
+Requires=docker.service tailscaled.service
+Wants=network-online.target
+After=docker.service tailscaled.service network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/stacks/azerothcore-admin
+ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TAILSCALE_IP" && exit 0; echo "Waiting for Tailscale IP $TAILSCALE_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TAILSCALE_IP not assigned"; exit 1'
 ExecStart=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env up -d
 ExecStop=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env down
+TimeoutStartSec=300
 User=REPLACE_WITH_YOUR_USERNAME
 
 [Install]
