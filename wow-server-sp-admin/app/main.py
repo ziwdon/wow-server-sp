@@ -86,6 +86,7 @@ app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 templates.env.globals["css_ver"] = _file_hash("app.css")
 templates.env.globals["js_ver"] = _file_hash("settings.js")
+templates.env.globals["backups_js_ver"] = _file_hash("backups.js")
 
 
 @app.exception_handler(HTTPException)

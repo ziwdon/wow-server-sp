@@ -33,6 +33,10 @@ def test_backups_page_renders(client):
     r = client.get("/backups")
     assert r.status_code == 200
     assert "Backups" in r.text
+    assert 'hx-post="/api/action/backup"' in r.text
+    assert 'id="restore-btn"' in r.text
+    assert "Restore selected" in r.text
+    assert "/static/backups.js?v=" in r.text
 
 
 def test_nav_has_backups_link(client):
@@ -43,6 +47,21 @@ def test_nav_has_backups_link(client):
 def test_backups_list_endpoint(client):
     r = client.get("/api/backups/list")
     assert r.status_code == 200
+
+
+def test_backups_list_renders_rows_and_disclaimer(client, tmp_path):
+    archive = tmp_path / "backups" / "azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"
+    archive.write_bytes(b"backup archive")
+
+    r = client.get("/api/backups/list")
+
+    assert r.status_code == 200
+    assert 'class="backup-row"' in r.text
+    assert 'data-archive="azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"' in r.text
+    assert "2026-05-29 14:03 UTC" in r.text
+    assert "Manual" in r.text
+    assert "Backups are automatically deleted after 7 days" in r.text
+    assert "configuration secrets" in r.text
 
 
 def test_restore_rejects_bad_filename(client):

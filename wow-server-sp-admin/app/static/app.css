@@ -664,3 +664,27 @@ pre.logview {
   /* Apply dialog: full width on mobile */
   #apply-dialog { min-width: unset; width: calc(100vw - 2rem); }
 }
+
+/* --- Backups page --- */
+.backups-scroll { max-height: 420px; overflow-y: auto; }
+.backups-list { list-style: none; margin: 0; padding: 0; }
+.backup-row {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border, #2a2a2a);
+  cursor: pointer;
+}
+.backup-row:hover { background: var(--row-hover, rgba(255,255,255,0.04)); }
+.backup-row.selected { background: var(--row-selected, rgba(212,175,55,0.18)); }
+.backup-time { flex: 1; font-variant-numeric: tabular-nums; }
+.backup-size { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.backup-badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 4px; }
+.badge-daily { background: #2d4a63; }
+.badge-manual { background: #3a5a3a; }
+.badge-prerestore { background: #63482d; }
+.backups-disclaimer {
+  font-size: 0.8rem; color: var(--text-muted);
+  padding: 0.75rem; border-top: 1px solid var(--border, #2a2a2a);
+}
+@media (max-width: 768px) {
+  .backups-scroll { max-height: 300px; }
+}
