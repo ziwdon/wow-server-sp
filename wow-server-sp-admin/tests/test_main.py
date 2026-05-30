@@ -112,3 +112,23 @@ def test_existing_resources_card_endpoint_still_works():
         client = TestClient(app)
         resp = client.get("/api/stats")
     assert resp.status_code == 200
+
+
+def test_reset_bots_route_kicks_action():
+    with patch("app.main.runner.start") as mock_start:
+        mock_start.return_value = type("R", (), {"id": "abc"})()
+        client = TestClient(app)
+        resp = client.post("/api/action/reset-bots")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "abc"
+    assert mock_start.call_args.args[0] == "reset_bots"
+
+
+def test_clear_bots_route_kicks_action():
+    with patch("app.main.runner.start") as mock_start:
+        mock_start.return_value = type("R", (), {"id": "def"})()
+        client = TestClient(app)
+        resp = client.post("/api/action/clear-bots")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "def"
+    assert mock_start.call_args.args[0] == "clear_bots"

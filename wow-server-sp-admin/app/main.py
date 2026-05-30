@@ -344,7 +344,7 @@ async def api_backups_list(request: Request) -> HTMLResponse:
 
 from sse_starlette.sse import EventSourceResponse
 
-from app.services.actions import run_force_stop, run_restart, run_start, run_stop, verify_env_vars_bound, ActionResult
+from app.services.actions import run_clear_bots, run_force_stop, run_restart, run_reset_bots, run_start, run_stop, verify_env_vars_bound, ActionResult
 from app.services.config_policy import BLOCKED_KEYS
 from app.services.runner import ActionRecord, runner
 
@@ -435,6 +435,18 @@ async def post_restart():
 @app.post("/api/action/force-stop")
 async def post_force_stop():
     record = _kick("force_stop", lambda cb: run_force_stop(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.post("/api/action/reset-bots")
+async def post_reset_bots():
+    record = _kick("reset_bots", lambda cb: run_reset_bots(on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.post("/api/action/clear-bots")
+async def post_clear_bots():
+    record = _kick("clear_bots", lambda cb: run_clear_bots(on_progress=cb))
     return {"id": record.id, "status": "running"}
 
 
