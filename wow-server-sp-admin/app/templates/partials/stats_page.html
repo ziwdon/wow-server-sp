@@ -1,4 +1,24 @@
 {# Macro: one labelled block of CSS bar rows. #}
+{% macro stacked_bars(title, buckets) %}
+<div class="stats-block">
+  <div class="stats-block-title">{{ title }}</div>
+  {% if buckets %}
+  {% set maxc = buckets|map(attribute='total')|max %}
+  {% for b in buckets %}
+  <div class="bar-row">
+    <span class="bar-label">{{ b.label }}</span>
+    <span class="bar-track bar-track--stacked">
+      {% for seg in b.segments %}{% if seg.count > 0 %}<span class="bar-fill" style="width: {{ ((100 * seg.count / maxc)|round(2)) if maxc else 0 }}%; background: {{ seg.color }};"></span>{% endif %}{% endfor %}
+    </span>
+    <span class="bar-count">{{ b.total }}</span>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="empty-state">No data.</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
 {% macro bars(title, buckets) %}
 <div class="stats-block">
   <div class="stats-block-title">{{ title }}</div>
@@ -27,16 +47,23 @@
     <div class="stat-card"><div class="stat-label">Players</div>
       <div class="stat-value">{{ snap.players_online }} online · {{ snap.players_total }} total</div></div>
     <div class="stat-card"><div class="stat-label">AH bot</div>
-      <div class="stat-value">{{ snap.ahbot_online }} online · {{ snap.ahbot_total }} total</div></div>
+      <div class="stat-value">{{ snap.ahbot_total }} total</div></div>
     <div class="stat-card"><div class="stat-label">Snapshot</div>
       <div class="stat-value">{{ last_refreshed or "never" }}</div></div>
   </div>
 
   <div class="stats-grid">
+    <div class="panel"><div class="panel-header"><span class="panel-title">Online now</span></div>
+      <div class="panel-body">
+        {{ bars("By level", snap.online_by_bracket) }}
+        {{ bars("By class", snap.online_by_class) }}
+        {{ bars("By faction", snap.online_by_faction) }}
+        {{ bars("By zone", snap.online_by_zone) }}
+      </div></div>
     <div class="panel"><div class="panel-header"><span class="panel-title">Bot pool</span></div>
       <div class="panel-body">
         {{ bars("Bot breakdown", snap.bots_pool_breakdown) }}
-        {{ bars("By level", snap.bots_by_bracket) }}
+        {{ stacked_bars("By level", snap.bots_by_bracket_stacked) }}
         {{ bars("By class", snap.bots_by_class) }}
         {{ bars("By race", snap.bots_by_race) }}
       </div></div>
@@ -45,13 +72,6 @@
         {{ bars("By level", snap.players_by_bracket) }}
         {{ bars("By class", snap.players_by_class) }}
         {{ bars("By race", snap.players_by_race) }}
-      </div></div>
-    <div class="panel"><div class="panel-header"><span class="panel-title">Online now</span></div>
-      <div class="panel-body">
-        {{ bars("By level", snap.online_by_bracket) }}
-        {{ bars("By class", snap.online_by_class) }}
-        {{ bars("By faction", snap.online_by_faction) }}
-        {{ bars("By zone", snap.online_by_zone) }}
       </div></div>
     <div class="panel"><div class="panel-header"><span class="panel-title">Faction</span></div>
       <div class="panel-body">

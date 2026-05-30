@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from app.services import stats
-from app.services.stats import Bucket, bracket_label, rows_to_buckets
+from app.services.stats import Bucket, StackedBucket, StackedSegment, bracket_label, brackets_from_level_rows_stacked, rows_to_buckets
 
 
 def test_bracket_label_math():
@@ -29,6 +29,47 @@ def test_brackets_from_level_rows_groups_and_orders():
     assert out == [Bucket("1-10", 4), Bucket("11-20", 4), Bucket("71-80", 9)]
 
 
+def test_brackets_from_level_rows_stacked_aggregates_by_type_and_online():
+    # (level, account_type, online, count):
+    #   type 1 online  → active   (#88c870)
+    #   type 1 offline → idle     (#888070)
+    #   type 2 any     → summon   (#7ab0e0)
+    rows = [
+        (5,  1, 1, 100),  # level 5, RNDbot, online → active
+        (5,  1, 0, 300),  # level 5, RNDbot, offline → idle
+        (5,  2, 0,  50),  # level 5, AddClass → summon
+        (15, 1, 0, 200),  # level 15, RNDbot, offline → idle
+    ]
+    out = brackets_from_level_rows_stacked(rows)
+    assert len(out) == 2
+
+    b1 = next(b for b in out if b.label == "1-10")
+    assert b1.total == 450
+    segs = {s.color: s.count for s in b1.segments}
+    assert segs["#88c870"] == 100   # active
+    assert segs["#888070"] == 300   # idle
+    assert segs["#7ab0e0"] == 50    # summon
+
+    b2 = next(b for b in out if b.label == "11-20")
+    assert b2.total == 200
+    segs2 = {s.color: s.count for s in b2.segments}
+    assert segs2["#888070"] == 200
+    assert segs2["#88c870"] == 0
+    assert segs2["#7ab0e0"] == 0
+
+
+def test_brackets_from_level_rows_stacked_empty():
+    assert brackets_from_level_rows_stacked([]) == []
+
+
+def test_stacked_bucket_segments_sum_to_total():
+    rows = [(10, 1, 1, 80), (10, 1, 0, 120), (10, 2, 0, 50)]
+    out = brackets_from_level_rows_stacked(rows)
+    assert len(out) == 1
+    b = out[0]
+    assert b.total == sum(s.count for s in b.segments)
+
+
 @patch("app.services.stats.mysql.connector.connect")
 def test_collect_stats_builds_snapshot(mock_connect):
     cur = MagicMock()
@@ -37,7 +78,8 @@ def test_collect_stats_builds_snapshot(mock_connect):
         (2500, 200, 3, 1, 4, 0),  # headline: bots_total/online, players_total/online, ahbot_total/online
     ]
     cur.fetchall.side_effect = [
-        [(5, 1000), (40, 1500)],  # bots by level
+        # bots by level stacked: (level, account_type, online, count)
+        [(5, 1, 1, 800), (5, 1, 0, 200), (40, 1, 1, 100), (40, 1, 0, 1400)],
         [(1, 1200), (8, 1300)],  # bots by class
         [(1, 1250), (2, 1250)],  # bots by race
         [(40, 3)],  # players by level
@@ -65,3 +107,11 @@ def test_collect_stats_builds_snapshot(mock_connect):
     assert snap.online_by_zone[0].count >= snap.online_by_zone[-1].count
     assert {b.label for b in snap.faction_totals} <= {"Alliance", "Horde", "Unknown"}
     assert snap.fetched_at > 0
+    # Stacked bot brackets: 2 brackets from the mock data
+    assert len(snap.bots_by_bracket_stacked) == 2
+    b1 = next(b for b in snap.bots_by_bracket_stacked if b.label == "1-10")
+    assert b1.total == 1000
+    segs = {s.color: s.count for s in b1.segments}
+    assert segs["#88c870"] == 800   # active
+    assert segs["#888070"] == 200   # idle
+    assert segs["#7ab0e0"] == 0     # summon (none in mock)
