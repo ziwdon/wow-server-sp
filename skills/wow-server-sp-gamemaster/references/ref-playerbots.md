@@ -12,9 +12,11 @@ The rndbot pool size is configured at install time and varies per installation. 
 ```bash
 grep -E "AC_AI_PLAYERBOT_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
 ```
-Pool = `RNDBOT*` accounts × up to 10 characters each. The installer default is 250 accounts (≈2500 characters), but the user may have chosen a different number.
+Pool = `RNDBOT*` accounts × up to 10 characters each (one per class). The installer default is 250 accounts (≈2500 characters), but the user may have chosen a different number.
 
 **Key default behavior:** `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1` — rndbots are disabled when no real player is logged in. When you log in, the engine ramps bots toward `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS`.
+
+**Pool inflation from disabled classes:** If a class is blocked from logging in (e.g. `AC_AI_PLAYERBOT_DISABLE_DEATH_KNIGHT_LOGIN=1`), the module compensates by creating more accounts so it can still reach `MaxRandomBots` online. Each account effectively contributes only 9 usable characters instead of 10, so the module needs `ceil(MaxRandomBots / 9)` accounts rather than `ceil(MaxRandomBots / 10)`. The disabled-class characters (one per account) are created in the DB but remain permanently offline. This means the total character count in the DB will exceed `MaxRandomBots` by more than just the AddClass pool — the gap includes one permanently offline DK per rndbot account plus a small rounding slack. For example, with `MaxRandomBots=1500` and DKs disabled: 167 accounts are created (vs 150 without the restriction), yielding 167 offline DKs + 3 non-DK rounding slack = 170 offline rndbot chars, for a rndbot pool total of 1,670.
 
 ---
 
