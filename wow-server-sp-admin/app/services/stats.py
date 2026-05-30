@@ -35,6 +35,24 @@ class Bucket:
     color: str = ""
 
 
+_COLOR_ACTIVE = "#88c870"
+_COLOR_IDLE   = "#888070"
+_COLOR_SUMMON = "#7ab0e0"
+
+
+@dataclass(frozen=True)
+class StackedSegment:
+    color: str
+    count: int
+
+
+@dataclass(frozen=True)
+class StackedBucket:
+    label: str
+    total: int
+    segments: tuple[StackedSegment, ...]
+
+
 @dataclass(frozen=True)
 class StatsSnapshot:
     fetched_at: float
@@ -49,6 +67,7 @@ class StatsSnapshot:
     bots_idle: int = 0           # type-1 RNDbot chars offline
     bots_summon_reserve: int = 0 # type-2 AddClass chars (all)
     bots_by_bracket: list[Bucket] = field(default_factory=list)
+    bots_by_bracket_stacked: list[StackedBucket] = field(default_factory=list)
     bots_by_class: list[Bucket] = field(default_factory=list)
     bots_by_race: list[Bucket] = field(default_factory=list)
     players_by_bracket: list[Bucket] = field(default_factory=list)
@@ -93,6 +112,36 @@ def brackets_from_level_rows(rows, *, fill_zeros: bool = False) -> list[Bucket]:
         for lo in range(1, 80, 10):
             agg.setdefault(lo, 0)
     return [Bucket(f"{lo}-{lo + 9}", agg[lo]) for lo in sorted(agg)]
+
+
+def brackets_from_level_rows_stacked(rows) -> list[StackedBucket]:
+    """Aggregate (level, account_type, online, count) rows into stacked bracket buckets.
+
+    account_type 1 (RNDbot): online=1 → active, online=0 → idle
+    account_type 2 (AddClass): any → summon reserve
+    """
+    agg: dict[int, dict[str, int]] = defaultdict(lambda: {"active": 0, "idle": 0, "summon": 0})
+    for level, account_type, online, count in rows:
+        lo = ((int(level) - 1) // 10) * 10 + 1
+        if account_type == _RNDBOT_ACCOUNT_TYPE_RNDBOT:
+            if online:
+                agg[lo]["active"] += int(count)
+            else:
+                agg[lo]["idle"] += int(count)
+        elif account_type == _RNDBOT_ACCOUNT_TYPE_ADDCLASS:
+            agg[lo]["summon"] += int(count)
+    return [
+        StackedBucket(
+            label=f"{lo}-{lo + 9}",
+            total=agg[lo]["active"] + agg[lo]["idle"] + agg[lo]["summon"],
+            segments=(
+                StackedSegment(_COLOR_ACTIVE, agg[lo]["active"]),
+                StackedSegment(_COLOR_IDLE,   agg[lo]["idle"]),
+                StackedSegment(_COLOR_SUMMON, agg[lo]["summon"]),
+            ),
+        )
+        for lo in sorted(agg)
+    ]
 
 
 def faction_from_race_rows(
@@ -158,7 +207,15 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
                 cur.execute(f"SELECT c.{col}, COUNT(*) {_JOIN} WHERE {where} GROUP BY c.{col}")
                 return cur.fetchall()
 
-            bots_lvl  = grp(_BOT, "level")
+            cur.execute(
+                "SELECT c.level, pat.account_type, c.online, COUNT(*) "
+                "FROM acore_characters.characters c "
+                "JOIN acore_auth.account a ON a.id = c.account "
+                "JOIN acore_playerbots.playerbots_account_type pat ON pat.account_id = c.account "
+                f"WHERE {_BOT} "
+                "GROUP BY c.level, pat.account_type, c.online"
+            )
+            bots_lvl_stacked = cur.fetchall()
             bots_cls  = grp(_BOT, "class")
             bots_race = grp(_BOT, "race")
             pl_lvl    = grp(_PLAYER, "level")
@@ -195,10 +252,12 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
                 bots_summon_reserve = int((online_n or 0) + (offline_n or 0))
 
         bots_pool_breakdown = [
-            Bucket("Active (online)",  bots_active,          "#88c870"),
-            Bucket("Idle (pool slack)", bots_idle,            "#888070"),
-            Bucket("Summon reserve",   bots_summon_reserve,  "#7ab0e0"),
+            Bucket("Active (online)",  bots_active,          _COLOR_ACTIVE),
+            Bucket("Idle (pool slack)", bots_idle,            _COLOR_IDLE),
+            Bucket("Summon reserve",   bots_summon_reserve,  _COLOR_SUMMON),
         ]
+
+        bots_by_bracket_stacked = brackets_from_level_rows_stacked(bots_lvl_stacked)
 
         online_by_class_raw = rows_to_buckets(
             on_cls, label_fn=wr.class_name, color_fn=wr.class_color
@@ -216,7 +275,8 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
             bots_active=bots_active,
             bots_idle=bots_idle,
             bots_summon_reserve=bots_summon_reserve,
-            bots_by_bracket=brackets_from_level_rows(bots_lvl),
+            bots_by_bracket=[Bucket(b.label, b.total) for b in bots_by_bracket_stacked],
+            bots_by_bracket_stacked=bots_by_bracket_stacked,
             bots_by_class=rows_to_buckets(bots_cls, label_fn=wr.class_name, color_fn=wr.class_color),
             bots_by_race=rows_to_buckets(bots_race, label_fn=wr.race_name),
             players_by_bracket=brackets_from_level_rows(pl_lvl),

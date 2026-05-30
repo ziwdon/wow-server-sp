@@ -740,6 +740,7 @@ pre.logview {
 }
 .bar-label { color: var(--text-warm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-track { background: var(--input-bg); border-radius: 3px; height: 12px; overflow: hidden; }
+.bar-track--stacked { display: flex; }
 .bar-fill { display: block; height: 100%; background: var(--gold); min-width: 1px; }
 .bar-count { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
 
