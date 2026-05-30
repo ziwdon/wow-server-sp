@@ -1,9 +1,13 @@
 """Population stats via cheap GROUP BY queries over acore_characters.
 
-One connection, ~13 read-only queries. Cohorts:
+One connection, ~15 read-only queries. Cohorts:
   bot    = username LIKE 'RNDBOT%'
   ahbot  = username = 'ahbot'
   player = username NOT LIKE 'RNDBOT%' AND username <> 'ahbot'
+
+playerbots_account_type values:
+  1 = RNDbot  (random roaming bots, driven by AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS)
+  2 = AddClass (summon reserve — only spawned via .playerbots bot addclass)
 """
 
 from __future__ import annotations
@@ -17,11 +21,18 @@ import mysql.connector
 
 from app.services import wow_reference as wr
 
+_RNDBOT_ACCOUNT_TYPE_RNDBOT   = 1
+_RNDBOT_ACCOUNT_TYPE_ADDCLASS = 2
+
+# All WotLK level brackets (1-10 … 71-80).
+_ALL_BRACKETS: list[str] = [f"{lo}-{lo + 9}" for lo in range(1, 80, 10)]
+
 
 @dataclass(frozen=True)
 class Bucket:
     label: str
     count: int
+    color: str = ""
 
 
 @dataclass(frozen=True)
@@ -33,6 +44,10 @@ class StatsSnapshot:
     players_online: int
     ahbot_total: int
     ahbot_online: int
+    # Bot pool breakdown (account_type split)
+    bots_active: int = 0         # type-1 RNDbot chars online
+    bots_idle: int = 0           # type-1 RNDbot chars offline
+    bots_summon_reserve: int = 0 # type-2 AddClass chars (all)
     bots_by_bracket: list[Bucket] = field(default_factory=list)
     bots_by_class: list[Bucket] = field(default_factory=list)
     bots_by_race: list[Bucket] = field(default_factory=list)
@@ -41,10 +56,12 @@ class StatsSnapshot:
     players_by_race: list[Bucket] = field(default_factory=list)
     online_by_bracket: list[Bucket] = field(default_factory=list)
     online_by_class: list[Bucket] = field(default_factory=list)
+    online_by_faction: list[Bucket] = field(default_factory=list)
     online_by_zone: list[Bucket] = field(default_factory=list)
     faction_totals: list[Bucket] = field(default_factory=list)
     faction_bots: list[Bucket] = field(default_factory=list)
     faction_players: list[Bucket] = field(default_factory=list)
+    bots_pool_breakdown: list[Bucket] = field(default_factory=list)
 
 
 def bracket_label(level: int) -> str:
@@ -52,26 +69,61 @@ def bracket_label(level: int) -> str:
     return f"{lo}-{lo + 9}"
 
 
-def rows_to_buckets(rows, *, label_fn: Callable[[int], str]) -> list[Bucket]:
-    out = [Bucket(label_fn(int(k)), int(c)) for k, c in rows]
+def rows_to_buckets(
+    rows,
+    *,
+    label_fn: Callable[[int], str],
+    color_fn: Callable[[str], str] | None = None,
+) -> list[Bucket]:
+    out = []
+    for k, c in rows:
+        label = label_fn(int(k))
+        color = color_fn(label) if color_fn else ""
+        out.append(Bucket(label, int(c), color))
     out.sort(key=lambda b: b.count, reverse=True)
     return out
 
 
-def brackets_from_level_rows(rows) -> list[Bucket]:
+def brackets_from_level_rows(rows, *, fill_zeros: bool = False) -> list[Bucket]:
     agg: dict[int, int] = defaultdict(int)
     for level, count in rows:
         lo = ((int(level) - 1) // 10) * 10 + 1
         agg[lo] += int(count)
+    if fill_zeros:
+        for lo in range(1, 80, 10):
+            agg.setdefault(lo, 0)
     return [Bucket(f"{lo}-{lo + 9}", agg[lo]) for lo in sorted(agg)]
 
 
-def faction_from_race_rows(rows) -> list[Bucket]:
+def faction_from_race_rows(
+    rows,
+    *,
+    color_fn: Callable[[str], str] | None = None,
+) -> list[Bucket]:
     agg: dict[str, int] = defaultdict(int)
     for race_id, count in rows:
         agg[wr.faction(int(race_id))] += int(count)
     order = {"Alliance": 0, "Horde": 1, "Unknown": 2}
-    return [Bucket(k, agg[k]) for k in sorted(agg, key=lambda x: order.get(x, 9))]
+    return [
+        Bucket(k, agg[k], color_fn(k) if color_fn else "")
+        for k in sorted(agg, key=lambda x: order.get(x, 9))
+    ]
+
+
+def _fill_all_classes(buckets: list[Bucket]) -> list[Bucket]:
+    """Return buckets for every known class, adding zero-count entries for missing ones."""
+    existing = {b.label: b for b in buckets}
+    result: list[Bucket] = []
+    for cls_name in wr.CLASSES.values():
+        color = wr.class_color(cls_name)
+        if cls_name in existing:
+            b = existing[cls_name]
+            result.append(Bucket(b.label, b.count, b.color or color))
+        else:
+            result.append(Bucket(cls_name, 0, color))
+    # Non-zero first (count desc), then zeros alphabetical
+    result.sort(key=lambda b: (-b.count, b.label))
+    return result
 
 
 _BOT = "a.username LIKE 'RNDBOT%%'"
@@ -106,18 +158,52 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
                 cur.execute(f"SELECT c.{col}, COUNT(*) {_JOIN} WHERE {where} GROUP BY c.{col}")
                 return cur.fetchall()
 
-            bots_lvl = grp(_BOT, "level")
-            bots_cls = grp(_BOT, "class")
+            bots_lvl  = grp(_BOT, "level")
+            bots_cls  = grp(_BOT, "class")
             bots_race = grp(_BOT, "race")
-            pl_lvl = grp(_PLAYER, "level")
-            pl_cls = grp(_PLAYER, "class")
-            pl_race = grp(_PLAYER, "race")
-            on_lvl = grp("c.online=1 AND a.username <> 'ahbot'", "level")
-            on_cls = grp("c.online=1 AND a.username <> 'ahbot'", "class")
-            on_zone = grp("c.online=1 AND a.username <> 'ahbot'", "zone")
-            fac_all = grp("a.username <> 'ahbot'", "race")
-            fac_bots = grp(_BOT, "race")
-            fac_pl = grp(_PLAYER, "race")
+            pl_lvl    = grp(_PLAYER, "level")
+            pl_cls    = grp(_PLAYER, "class")
+            pl_race   = grp(_PLAYER, "race")
+            on_lvl    = grp("c.online=1 AND a.username <> 'ahbot'", "level")
+            on_cls    = grp("c.online=1 AND a.username <> 'ahbot'", "class")
+            on_race   = grp("c.online=1 AND a.username <> 'ahbot'", "race")
+            on_zone   = grp("c.online=1 AND a.username <> 'ahbot'", "zone")
+            fac_all   = grp("a.username <> 'ahbot'", "race")
+            fac_bots  = grp(_BOT, "race")
+            fac_pl    = grp(_PLAYER, "race")
+
+            # Bot pool breakdown by account_type (RNDbot=1, AddClass=2).
+            # LEFT JOIN so this doesn't fail if acore_playerbots is absent.
+            cur.execute(
+                "SELECT pat.account_type, "
+                "SUM(CASE WHEN c.online=1 THEN 1 ELSE 0 END) AS online_n, "
+                "SUM(CASE WHEN c.online=0 THEN 1 ELSE 0 END) AS offline_n "
+                "FROM acore_playerbots.playerbots_account_type pat "
+                "JOIN acore_auth.account a ON a.id = pat.account_id "
+                "JOIN acore_characters.characters c ON c.account = pat.account_id "
+                "WHERE a.username LIKE 'RNDBOT%%' "
+                "GROUP BY pat.account_type"
+            )
+            pool_rows = cur.fetchall()
+
+        bots_active = bots_idle = bots_summon_reserve = 0
+        for acct_type, online_n, offline_n in pool_rows:
+            if acct_type == _RNDBOT_ACCOUNT_TYPE_RNDBOT:
+                bots_active = int(online_n or 0)
+                bots_idle   = int(offline_n or 0)
+            elif acct_type == _RNDBOT_ACCOUNT_TYPE_ADDCLASS:
+                bots_summon_reserve = int((online_n or 0) + (offline_n or 0))
+
+        bots_pool_breakdown = [
+            Bucket("Active (online)",  bots_active,          "#88c870"),
+            Bucket("Idle (pool slack)", bots_idle,            "#888070"),
+            Bucket("Summon reserve",   bots_summon_reserve,  "#7ab0e0"),
+        ]
+
+        online_by_class_raw = rows_to_buckets(
+            on_cls, label_fn=wr.class_name, color_fn=wr.class_color
+        )
+        online_by_class_filled = _fill_all_classes(online_by_class_raw)
 
         return StatsSnapshot(
             fetched_at=time.time(),
@@ -127,18 +213,23 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
             players_online=int(h[3] or 0),
             ahbot_total=int(h[4] or 0),
             ahbot_online=int(h[5] or 0),
+            bots_active=bots_active,
+            bots_idle=bots_idle,
+            bots_summon_reserve=bots_summon_reserve,
             bots_by_bracket=brackets_from_level_rows(bots_lvl),
-            bots_by_class=rows_to_buckets(bots_cls, label_fn=wr.class_name),
+            bots_by_class=rows_to_buckets(bots_cls, label_fn=wr.class_name, color_fn=wr.class_color),
             bots_by_race=rows_to_buckets(bots_race, label_fn=wr.race_name),
             players_by_bracket=brackets_from_level_rows(pl_lvl),
-            players_by_class=rows_to_buckets(pl_cls, label_fn=wr.class_name),
+            players_by_class=rows_to_buckets(pl_cls, label_fn=wr.class_name, color_fn=wr.class_color),
             players_by_race=rows_to_buckets(pl_race, label_fn=wr.race_name),
-            online_by_bracket=brackets_from_level_rows(on_lvl),
-            online_by_class=rows_to_buckets(on_cls, label_fn=wr.class_name),
+            online_by_bracket=brackets_from_level_rows(on_lvl, fill_zeros=True),
+            online_by_class=online_by_class_filled,
+            online_by_faction=faction_from_race_rows(on_race, color_fn=wr.faction_color),
             online_by_zone=rows_to_buckets(on_zone, label_fn=wr.zone_name),
-            faction_totals=faction_from_race_rows(fac_all),
-            faction_bots=faction_from_race_rows(fac_bots),
-            faction_players=faction_from_race_rows(fac_pl),
+            faction_totals=faction_from_race_rows(fac_all, color_fn=wr.faction_color),
+            faction_bots=faction_from_race_rows(fac_bots, color_fn=wr.faction_color),
+            faction_players=faction_from_race_rows(fac_pl, color_fn=wr.faction_color),
+            bots_pool_breakdown=bots_pool_breakdown,
         )
     finally:
         try:

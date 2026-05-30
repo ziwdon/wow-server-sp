@@ -39,6 +39,25 @@ RACE_FACTION = {
     11: "Alliance",
 }
 
+CLASS_COLORS = {
+    "Death Knight": "#C41E3A",
+    "Druid":        "#FF7C0A",
+    "Hunter":       "#AAD372",
+    "Mage":         "#3FC7EB",
+    "Paladin":      "#F48CBA",
+    "Priest":       "#D2C8B4",
+    "Rogue":        "#FFF468",
+    "Shaman":       "#0070DD",
+    "Warlock":      "#8788EE",
+    "Warrior":      "#C69B6D",
+}
+
+FACTION_COLORS = {
+    "Alliance": "#4080C0",
+    "Horde":    "#C03030",
+    "Unknown":  "#C8B020",
+}
+
 ZONES = {
     1: "Dun Morogh",
     3: "Badlands",
@@ -112,6 +131,7 @@ ZONES = {
     2017: "Stratholme",
     2037: "Quel'Thalas",
     2057: "Scholomance",
+    2100: "Maraudon",
     2159: "Onyxia's Lair",
     2437: "Ragefire Chasm",
     2557: "Dire Maul",
@@ -213,3 +233,11 @@ def zone_name(i: int) -> str:
 
 def faction(race_id: int) -> str:
     return RACE_FACTION.get(race_id, "Unknown")
+
+
+def class_color(name: str) -> str:
+    return CLASS_COLORS.get(name, "")
+
+
+def faction_color(name: str) -> str:
+    return FACTION_COLORS.get(name, "")

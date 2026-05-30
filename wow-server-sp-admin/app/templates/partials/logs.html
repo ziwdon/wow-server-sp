@@ -1,7 +1,6 @@
 <div class="panel-header">
   <span class="panel-title">Logs</span>
-  <button class="btn btn-sm"
-          hx-get="/api/logs" hx-target="#logs" hx-swap="innerHTML">Refresh</button>
+  <button class="btn btn-sm" onclick="refreshLogsPreservingTab()">Refresh</button>
 </div>
 <div class="log-tabs">
   <button class="log-tab active" onclick="switchLog(this, 'server-log')">Server.log</button>

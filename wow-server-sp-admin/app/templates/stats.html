@@ -11,18 +11,18 @@
     <button class="btn btn-danger" id="clear-bots-btn">Clear bots</button>
   </div>
 
-  <div id="stats-data"
-       hx-get="/api/stats/data"
-       hx-trigger="load"
-       hx-swap="innerHTML">
-    <p class="loading">Loading stats…</p>
-  </div>
-
   <div class="panel stats-activity">
     <div class="panel-header"><span class="panel-title">Activity</span></div>
     <div class="panel-body" hx-ext="sse" sse-connect="/api/action/stream">
       <ul id="action-log" sse-swap="progress,done" hx-swap="beforeend"></ul>
     </div>
+  </div>
+
+  <div id="stats-data"
+       hx-get="/api/stats/data"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading stats…</p>
   </div>
 
 </div>
