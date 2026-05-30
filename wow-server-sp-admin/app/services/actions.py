@@ -581,3 +581,24 @@ def verify_env_vars_bound(
     if not failures:
         on_progress("verify", "all env vars bound correctly")
     return failures
+
+
+def run_reset_bots(*, on_progress: ProgressCb) -> ActionResult:
+    """Re-roll the existing rndbot pool via the worldserver console.
+
+    Fire-and-forget: we confirm dispatch, not completion. The re-roll
+    runs server-side for some time after the command is sent.
+    """
+    info = inspect_worldserver()
+    if info.status != "running":
+        on_progress("inspect", f"server must be running (is {info.status})")
+        return ActionResult.ERROR
+    on_progress("attach", "attaching to worldserver stdin")
+    try:
+        with WorldserverConsole(WORLDSERVER) as console:
+            console.send("playerbot rndbot init")
+    except Exception as e:  # noqa: BLE001
+        on_progress("attach", f"console error: {e}")
+        return ActionResult.ERROR
+    on_progress("done", "Command sent. Re-roll continues inside the worldserver.")
+    return ActionResult.OK
