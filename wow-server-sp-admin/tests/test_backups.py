@@ -92,3 +92,12 @@ def test_backups_summary(tmp_path):
 
 def test_list_backups_empty_dir(tmp_path):
     assert list_backups(backups_dir=tmp_path / "nope") == []
+
+
+def test_list_backups_includes_preclear_label(tmp_path):
+    b = tmp_path / "backups"
+    b.mkdir()
+    _touch(b / "azerothcore-backup-preclear-2026-05-30T10-00-00.tar.gz")
+    rows = list_backups(backups_dir=b)
+    assert len(rows) == 1
+    assert rows[0].label == "preclear"

@@ -23,8 +23,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$LABEL" in
-    daily|manual|prerestore) ;;
-    *) echo "Invalid --label: $LABEL (expected daily|manual|prerestore)" >&2; exit 2 ;;
+    daily|manual|prerestore|preclear) ;;
+    *) echo "Invalid --label: $LABEL (expected daily|manual|prerestore|preclear)" >&2; exit 2 ;;
 esac
 
 if [ "$LABEL" = "daily" ]; then
