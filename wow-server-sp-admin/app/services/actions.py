@@ -31,6 +31,9 @@ from app.state import db_credentials
 ProgressCb = Callable[[str, str], None]
 log = logging.getLogger(__name__)
 KNOWN_DBS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+CLEAR_SQL = Path(
+    os.environ.get("CLEAR_RNDBOTS_SQL", "/app/app/data/clear_rndbots.sql")
+)
 
 
 class ActionResult(str, enum.Enum):
@@ -134,6 +137,96 @@ def _restart_after_restore_failure(on_progress: ProgressCb) -> None:
     except Exception as e:  # noqa: BLE001
         log.error("failed to restart after restore failure: %s", e)
         on_progress("start", f"restart after restore failure failed: {e}")
+
+
+def _count_query(sql: str, password: str) -> int:
+    """Run a single COUNT(*) via docker exec; return -1 on error."""
+    try:
+        r = subprocess.run(
+            [
+                "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
+                "-N", "-s", "-e", sql,
+            ],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return -1
+    if r.returncode != 0:
+        return -1
+    try:
+        return int(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return -1
+
+
+def run_clear_bots(*, on_progress: ProgressCb) -> ActionResult:
+    """Destructively wipe the rndbot pool. stop → preclear backup → SQL → start.
+
+    Mirrors run_restore's safety machinery. The pool regenerates on the
+    next worldserver boot ramp.
+    """
+    from app.services.backup import run_backup as create_backup
+
+    # 1. Stop (deleting under a live worldserver risks crashes + re-save races).
+    stop = run_stop(on_progress=on_progress)
+    if stop not in (ActionResult.OK, ActionResult.ALREADY):
+        return stop
+
+    try:
+        # 2. Pre-clear safety backup — abort (and restart) if it fails.
+        on_progress("safety", "taking pre-clear safety backup")
+        safety = create_backup("preclear", on_progress=on_progress)
+        if not safety.ok:
+            on_progress("safety", "pre-clear backup FAILED; aborting and restarting")
+            _restart_after_restore_failure(on_progress)
+            return ActionResult.ERROR
+
+        # 3. Pipe the bundled SQL to a single root mysql invocation.
+        password = str(db_credentials()["password"])
+        on_progress("clear", "running clear_rndbots.sql")
+        with CLEAR_SQL.open("rb") as fh:
+            imp = subprocess.run(
+                [
+                    "docker", "exec", "-i", "ac-database", "mysql", "-uroot",
+                    f"-p{password}",
+                ],
+                stdin=fh, capture_output=True, text=True,
+            )
+        if imp.returncode != 0:
+            on_progress("clear", f"clear SQL FAILED: {imp.stderr.strip()}")
+            _restart_after_restore_failure(on_progress)
+            return ActionResult.ERROR
+
+        # 4. Informational post-clear verification (never fails the action).
+        acc = _count_query(
+            "SELECT COUNT(*) FROM acore_auth.account WHERE username LIKE 'RNDBOT%'",
+            password)
+        chars = _count_query(
+            "SELECT COUNT(*) FROM acore_characters.characters c "
+            "JOIN acore_auth.account a ON a.id=c.account "
+            "WHERE a.username LIKE 'RNDBOT%'", password)
+        rb = _count_query(
+            "SELECT COUNT(*) FROM acore_playerbots.playerbots_random_bots", password)
+        at = _count_query(
+            "SELECT COUNT(*) FROM acore_playerbots.playerbots_account_type", password)
+        on_progress(
+            "verify",
+            f"remaining — accounts:{acc} chars:{chars} random_bots:{rb} account_type:{at}",
+        )
+        if any(n not in (0, -1) for n in (acc, chars, rb, at)):
+            on_progress("verify", "WARNING: non-zero remaining rndbot rows after clear")
+    except Exception as e:  # noqa: BLE001
+        log.exception("clear-bots failed after stop")
+        on_progress("clear", f"clear failed: {e}")
+        _restart_after_restore_failure(on_progress)
+        return ActionResult.ERROR
+
+    # 5. Start.
+    start = run_start(on_progress=on_progress)
+    if start not in (ActionResult.OK, ActionResult.ALREADY):
+        return start
+    on_progress("done", "bot pool cleared — regenerates on boot ramp")
+    return ActionResult.OK
 
 
 def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
@@ -581,3 +674,24 @@ def verify_env_vars_bound(
     if not failures:
         on_progress("verify", "all env vars bound correctly")
     return failures
+
+
+def run_reset_bots(*, on_progress: ProgressCb) -> ActionResult:
+    """Re-roll the existing rndbot pool via the worldserver console.
+
+    Fire-and-forget: we confirm dispatch, not completion. The re-roll
+    runs server-side for some time after the command is sent.
+    """
+    info = inspect_worldserver()
+    if info.status != "running":
+        on_progress("inspect", f"server must be running (is {info.status})")
+        return ActionResult.ERROR
+    on_progress("attach", "attaching to worldserver stdin")
+    try:
+        with WorldserverConsole(WORLDSERVER) as console:
+            console.send("playerbot rndbot init")
+    except Exception as e:  # noqa: BLE001
+        on_progress("attach", f"console error: {e}")
+        return ActionResult.ERROR
+    on_progress("done", "Command sent. Re-roll continues inside the worldserver.")
+    return ActionResult.OK

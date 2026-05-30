@@ -10,7 +10,7 @@ from pathlib import Path as _Path
 
 
 _ARCHIVE_RE = re.compile(
-    r"^azerothcore-backup-(daily|manual|prerestore)-(.+)\.tar\.gz$"
+    r"^azerothcore-backup-(daily|manual|prerestore|preclear)-(.+)\.tar\.gz$"
 )
 
 
