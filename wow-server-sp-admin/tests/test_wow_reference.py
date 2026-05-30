@@ -37,3 +37,27 @@ def test_some_common_zone_names_present():
     assert wr.zone_name(12) == "Elwynn Forest"
     assert wr.zone_name(1637) == "Orgrimmar"
     assert wr.zone_name(1519) == "Stormwind City"
+
+
+def test_newly_mapped_accessible_zones():
+    # Zones confirmed reachable by bots or otherwise present in the DBC
+    # as normal in-world areas that were missing from the original mapping.
+    assert wr.zone_name(25)   == "Blackrock Mountain"
+    assert wr.zone_name(616)  == "Hyjal"
+    assert wr.zone_name(1941) == "Caverns of Time"
+    assert wr.zone_name(2257) == "Deeprun Tram"
+    assert wr.zone_name(3455) == "The North Sea"
+    assert wr.zone_name(3535) == "Hellfire Citadel"
+    assert wr.zone_name(3605) == "Hyjal Past"
+    assert wr.zone_name(3917) == "Auchindoun"
+    assert wr.zone_name(4742) == "Hrothgar's Landing"
+    assert wr.zone_name(4896) == "The Frozen Throne"
+
+
+def test_newly_mapped_inaccessible_zones():
+    # Dev/test/unused zones from the DBC — should display with (inaccessible)
+    # so admins know where a bot ended up rather than seeing a bare zone ID.
+    assert wr.zone_name(22)   == "Programmer Isle (inaccessible)"
+    assert wr.zone_name(876)  == "GM Island (inaccessible)"
+    assert wr.zone_name(3540) == "Twisting Nether (inaccessible)"
+    assert wr.zone_name(3817) == "Testing (inaccessible)"
