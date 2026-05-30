@@ -1,0 +1,64 @@
+{# Macro: one labelled block of CSS bar rows. #}
+{% macro bars(title, buckets) %}
+<div class="stats-block">
+  <div class="stats-block-title">{{ title }}</div>
+  {% if buckets %}
+  {% set maxc = buckets|map(attribute='count')|max %}
+  {% for b in buckets %}
+  <div class="bar-row">
+    <span class="bar-label">{{ b.label }}</span>
+    <span class="bar-track"><span class="bar-fill" style="width: {{ (100 * b.count / maxc) if maxc else 0 }}%"></span></span>
+    <span class="bar-count">{{ b.count }}</span>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="empty-state">No data.</p>
+  {% endif %}
+</div>
+{% endmacro %}
+
+<div id="stats-data-inner" data-status="{{ status }}">
+  {% if error %}<div class="banner error">Last refresh failed: {{ error }}</div>{% endif %}
+
+  {% if snap %}
+  <div class="stat-row stats-headline">
+    <div class="stat-card"><div class="stat-label">Bots</div>
+      <div class="stat-value">{{ snap.bots_online }} online · {{ snap.bots_total }} total</div></div>
+    <div class="stat-card"><div class="stat-label">Players</div>
+      <div class="stat-value">{{ snap.players_online }} online · {{ snap.players_total }} total</div></div>
+    <div class="stat-card"><div class="stat-label">AH bot</div>
+      <div class="stat-value">{{ snap.ahbot_online }} online · {{ snap.ahbot_total }} total</div></div>
+    <div class="stat-card"><div class="stat-label">Snapshot</div>
+      <div class="stat-value">{{ last_refreshed or "never" }}</div></div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="panel"><div class="panel-header"><span class="panel-title">Bot pool</span></div>
+      <div class="panel-body">
+        {{ bars("By level", snap.bots_by_bracket) }}
+        {{ bars("By class", snap.bots_by_class) }}
+        {{ bars("By race", snap.bots_by_race) }}
+      </div></div>
+    <div class="panel"><div class="panel-header"><span class="panel-title">Player pool</span></div>
+      <div class="panel-body">
+        {{ bars("By level", snap.players_by_bracket) }}
+        {{ bars("By class", snap.players_by_class) }}
+        {{ bars("By race", snap.players_by_race) }}
+      </div></div>
+    <div class="panel"><div class="panel-header"><span class="panel-title">Online now</span></div>
+      <div class="panel-body">
+        {{ bars("By level", snap.online_by_bracket) }}
+        {{ bars("By class", snap.online_by_class) }}
+        {{ bars("By zone", snap.online_by_zone) }}
+      </div></div>
+    <div class="panel"><div class="panel-header"><span class="panel-title">Faction</span></div>
+      <div class="panel-body">
+        {{ bars("Total (bots + players)", snap.faction_totals) }}
+        {{ bars("Bots", snap.faction_bots) }}
+        {{ bars("Players", snap.faction_players) }}
+      </div></div>
+  </div>
+  {% else %}
+  <p class="empty-state">No snapshot yet — click Refresh to pull the latest stats.</p>
+  {% endif %}
+</div>
