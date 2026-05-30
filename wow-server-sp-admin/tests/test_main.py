@@ -67,3 +67,48 @@ def test_api_logs_clean_bar_when_errors_log_empty():
     assert resp.status_code == 200
     assert "No runtime errors" in resp.text
     assert "log-tab-dirty" not in resp.text
+
+
+def test_stats_page_renders_and_nav_between_dashboard_and_settings():
+    client = TestClient(app)
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    body = resp.text
+    # Nav order: Dashboard, Stats, Settings.
+    assert body.index('href="/stats"') < body.index('href="/settings"')
+    assert body.index('href="/"') < body.index('href="/stats"')
+
+
+def test_api_stats_refresh_returns_immediately():
+    with patch("app.main.stats_refresher.refresh_async", return_value=True) as mock_ref, \
+         patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}):
+        client = TestClient(app)
+        resp = client.post("/api/stats/refresh")
+    assert resp.status_code == 200
+    mock_ref.assert_called_once()
+
+
+def test_api_stats_data_renders_with_snapshot():
+    from app.services.stats import Bucket, StatsSnapshot
+    snap = StatsSnapshot(
+        fetched_at=1716144665.0, bots_total=2500, bots_online=200,
+        players_total=3, players_online=1, ahbot_total=4, ahbot_online=0,
+        bots_by_class=[Bucket("Warrior", 400)],
+    )
+    with patch("app.main.stats_refresher.get", return_value=snap), \
+         patch("app.main.stats_refresher.is_stale", return_value=False):
+        client = TestClient(app)
+        resp = client.get("/api/stats/data")
+    assert resp.status_code == 200
+    assert "2500" in resp.text
+    assert "Warrior" in resp.text
+
+
+def test_existing_resources_card_endpoint_still_works():
+    # /api/stats (CPU/mem card) must not collide with the new page endpoints.
+    with patch("app.main.docker_client.inspect_worldserver") as mock_i, \
+         patch("app.main.docker_client.stats_worldserver", return_value=None):
+        mock_i.return_value = type("I", (), {"started_at": None})()
+        client = TestClient(app)
+        resp = client.get("/api/stats")
+    assert resp.status_code == 200

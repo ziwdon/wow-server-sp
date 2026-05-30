@@ -22,6 +22,7 @@ from app.services import backups as backups_svc
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
+from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
 APP_DIR = Path(__file__).resolve().parent
@@ -56,6 +57,8 @@ async def lifespan(app: FastAPI):
         removed = _state_mod._state.admin.gc_old_snapshots(keep_days=7)
         if removed:
             log.info("gc'd %d old admin.yml snapshots", removed)
+    # Load the last stats snapshot from disk so a restart serves it instantly.
+    stats_refresher.load_from_disk()
     yield
 
 
@@ -87,6 +90,7 @@ templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 templates.env.globals["css_ver"] = _file_hash("app.css")
 templates.env.globals["js_ver"] = _file_hash("settings.js")
 templates.env.globals["backups_js_ver"] = _file_hash("backups.js")
+templates.env.globals["stats_js_ver"] = _file_hash("stats.js")
 
 
 @app.exception_handler(HTTPException)
@@ -192,6 +196,44 @@ async def api_stats(request: Request) -> HTMLResponse:
             "uptime": _humanize_uptime(info.started_at),
         },
     )
+
+
+def _stats_last_refreshed(snap) -> str | None:
+    if snap is None:
+        return None
+    return dt.datetime.fromtimestamp(
+        snap.fetched_at, tz=dt.timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+
+
+@app.get("/api/stats/data", response_class=HTMLResponse)
+async def api_stats_data(request: Request) -> HTMLResponse:
+    snap = stats_refresher.get()
+    # Auto-kick a refresh if the cache is stale/absent and none is running.
+    if stats_refresher.is_stale() and stats_refresher.status != "refreshing":
+        try:
+            stats_refresher.refresh_async(db_credentials())
+        except Exception:  # noqa: BLE001 — DB creds/thread issues must not 500 the page
+            pass
+    return templates.TemplateResponse(
+        request,
+        "partials/stats_page.html",
+        {
+            "snap": snap,
+            "status": stats_refresher.status,
+            "error": stats_refresher.error,
+            "last_refreshed": _stats_last_refreshed(snap),
+        },
+    )
+
+
+@app.post("/api/stats/refresh")
+async def api_stats_refresh() -> dict:
+    try:
+        started = stats_refresher.refresh_async(db_credentials())
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"could not start refresh: {e}")
+    return {"status": "refreshing" if started else "already_running"}
 
 
 @app.get("/api/players", response_class=HTMLResponse)
@@ -458,6 +500,13 @@ async def stream_action(id: str | None = None):
                 await asyncio.sleep(1)
 
     return EventSourceResponse(_live())
+
+
+@app.get("/stats", response_class=HTMLResponse)
+async def stats_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "stats.html", {"title": "azerothcore-admin · stats"},
+    )
 
 
 @app.get("/settings", response_class=HTMLResponse)
