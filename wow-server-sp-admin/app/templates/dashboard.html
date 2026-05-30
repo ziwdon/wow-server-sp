@@ -65,6 +65,25 @@ function switchLog(btn, targetId) {
   if (el) el.style.display = '';
 }
 
+// Refresh logs while keeping whichever tab is currently active.
+// Registers a one-shot htmx:afterSettle listener on #logs BEFORE firing the
+// request, so switchLog always runs on the fully-settled new DOM regardless
+// of whether htmx.ajax() returns a Promise.
+function refreshLogsPreservingTab() {
+  var active = document.querySelector('.log-tab.active');
+  var m = active && active.getAttribute('onclick').match(/switchLog\(this,\s*'([^']+)'\)/);
+  var tabId = m ? m[1] : 'server-log';
+
+  var logsEl = document.getElementById('logs');
+  logsEl.addEventListener('htmx:afterSettle', function handler() {
+    logsEl.removeEventListener('htmx:afterSettle', handler);
+    var btn = document.querySelector(".log-tab[onclick*=\"'" + tabId + "'\"]");
+    if (btn) switchLog(btn, tabId);
+  }, { once: true });
+
+  htmx.ajax('GET', '/api/logs', {target: '#logs', swap: 'innerHTML'});
+}
+
 // Clear the action log when an action button fires so old history doesn't
 // accumulate across multiple actions.
 document.addEventListener('htmx:afterRequest', function(e) {

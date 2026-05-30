@@ -7,7 +7,7 @@
   {% for b in buckets %}
   <div class="bar-row">
     <span class="bar-label">{{ b.label }}</span>
-    <span class="bar-track"><span class="bar-fill" style="width: {{ (100 * b.count / maxc) if maxc else 0 }}%"></span></span>
+    <span class="bar-track"><span class="bar-fill" style="width: {{ (100 * b.count / maxc) if maxc else 0 }}%;{% if b.color %} background: {{ b.color }};{% endif %}"></span></span>
     <span class="bar-count">{{ b.count }}</span>
   </div>
   {% endfor %}
@@ -35,6 +35,7 @@
   <div class="stats-grid">
     <div class="panel"><div class="panel-header"><span class="panel-title">Bot pool</span></div>
       <div class="panel-body">
+        {{ bars("Bot breakdown", snap.bots_pool_breakdown) }}
         {{ bars("By level", snap.bots_by_bracket) }}
         {{ bars("By class", snap.bots_by_class) }}
         {{ bars("By race", snap.bots_by_race) }}
@@ -49,6 +50,7 @@
       <div class="panel-body">
         {{ bars("By level", snap.online_by_bracket) }}
         {{ bars("By class", snap.online_by_class) }}
+        {{ bars("By faction", snap.online_by_faction) }}
         {{ bars("By zone", snap.online_by_zone) }}
       </div></div>
     <div class="panel"><div class="panel-header"><span class="panel-title">Faction</span></div>

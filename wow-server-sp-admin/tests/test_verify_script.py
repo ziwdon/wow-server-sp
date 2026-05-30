@@ -29,3 +29,14 @@ def test_deploy_scripts_stage_backup_into_build_context():
     for name in ("install-azerothcore-admin.sh", "redeploy-azerothcore-admin.sh"):
         s = (REPO_ROOT / "scripts" / name).read_text()
         assert 'backup.sh" "$STACK_DIR/build/backup.sh"' in s
+
+
+def test_redeploy_excludes_htmx_vendor_files_from_rsync():
+    s = (REPO_ROOT / "scripts/redeploy-azerothcore-admin.sh").read_text()
+    # rsync must skip both vendor files so the real HTMX from the install
+    # is not overwritten by the repo placeholders on every redeploy.
+    assert "--exclude='app/static/htmx.min.js'" in s
+    assert "--exclude='app/static/htmx-sse.js'" in s
+    # Guard must exist so a missing vendor file causes a loud failure
+    # rather than silently baking a broken image.
+    assert "placeholder" in s or "htmx_size" in s or "_htmx_size" in s

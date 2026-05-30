@@ -25,7 +25,27 @@ echo "==> Removing old image..."
 docker rmi -f azerothcore-admin:local 2>/dev/null || true
 
 echo "==> Syncing code..."
-rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
+# Exclude vendor files that the install script downloads from unpkg.
+# rsync --delete would otherwise overwrite them with the 51-byte repo
+# placeholders, baking a broken image that only works from browser cache.
+rsync -a --delete \
+    --exclude='app/static/htmx.min.js' \
+    --exclude='app/static/htmx-sse.js' \
+    "$REPO_DIR/" "$STACK_DIR/build/"
+
+# Guard: abort early if HTMX vendor files are still placeholders.
+# This happens when the build dir is new or was cleaned.
+# Fix: run install-azerothcore-admin.sh, or fetch manually:
+#   curl -sSfL -o "$STACK_DIR/build/app/static/htmx.min.js" \
+#       "https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js"
+#   curl -sSfL -o "$STACK_DIR/build/app/static/htmx-sse.js" \
+#       "https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"
+_htmx_size="$(wc -c < "$STACK_DIR/build/app/static/htmx.min.js" 2>/dev/null || echo 0)"
+if [ "$_htmx_size" -le 200 ]; then
+    echo "ERROR: htmx.min.js is a placeholder ($_htmx_size bytes) — cannot build." >&2
+    echo "  Run install-azerothcore-admin.sh to vendor HTMX, or fetch manually (see comment above)." >&2
+    exit 1
+fi
 
 mkdir -p "$STACK_DIR/build/dist"
 # Stage the canonical backup script into the build context (Dockerfile COPYs it).

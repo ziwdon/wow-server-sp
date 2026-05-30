@@ -45,10 +45,12 @@ def test_collect_stats_builds_snapshot(mock_connect):
         [(1, 3)],  # players by race
         [(40, 201)],  # online by level
         [(1, 201)],  # online by class
+        [(1, 100), (2, 101)],   # online by race (for online_by_faction)
         [(12, 100), (1637, 101)],  # online by zone
         [(1, 1250), (2, 1250)],  # faction src rows (race_id, count) all chars
         [(1, 1200), (2, 1200)],  # faction bots
         [(1, 3), (2, 0)],  # faction players
+        [(1, 1500, 170), (2, 0, 500)],  # pool breakdown (account_type, online, offline)
     ]
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cur

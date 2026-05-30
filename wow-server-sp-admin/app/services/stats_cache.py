@@ -102,7 +102,8 @@ def _buckets(value: Any) -> list[Bucket]:
         label = item["label"]
         if not isinstance(label, str):
             raise TypeError("bucket label must be a string")
-        buckets.append(Bucket(label=label, count=int(item["count"])))
+        color = item.get("color", "")
+        buckets.append(Bucket(label=label, count=int(item["count"]), color=str(color)))
     return buckets
 
 
@@ -119,8 +120,11 @@ def _snapshot_from_json(raw: Any) -> StatsSnapshot:
         "players_online",
         "ahbot_total",
         "ahbot_online",
+        "bots_active",
+        "bots_idle",
+        "bots_summon_reserve",
     ):
-        data[name] = int(data[name])
+        data[name] = int(data[name]) if name in data else 0
 
     for field in dataclasses.fields(StatsSnapshot):
         if field.default_factory is not dataclasses.MISSING:
