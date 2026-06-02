@@ -189,13 +189,19 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   letter-spacing: 0.08em;
   color: var(--gold);
 }
-.panel-body { padding: 0.5rem 0.75rem; flex: 1; overflow-y: auto; }
+.panel-body { padding: 0.5rem 0.75rem; flex: 1; overflow-y: scroll; }
 
 /* ── Scrollbars: always-visible, palette-styled ── */
+/* WebKit/Blink (Chrome, Edge): custom scrollbar disables overlay mode */
 ::-webkit-scrollbar { width: 7px; height: 7px; }
-::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-track { background: var(--border-dark); border-radius: 4px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+/* Firefox */
+.panel-body, pre.logview, .backups-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) var(--border-dark);
+}
 
 /* ── Logs panel ── */
 .log-tabs {
@@ -241,7 +247,7 @@ pre.logview {
   color: var(--text-warm);
   padding: 0.75rem 1rem;
   white-space: pre-wrap;
-  overflow-y: auto;
+  overflow-y: scroll;
   flex: 1;
   line-height: 1.5;
   background: var(--log-bg);
@@ -688,7 +694,7 @@ pre.logview {
   overflow: hidden;
 }
 .backups-grid > .panel { min-height: 0; }
-.backups-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.backups-scroll { flex: 1; min-height: 0; overflow-y: scroll; }
 .backups-list { list-style: none; margin: 0; padding: 0; }
 .backup-row {
   display: flex; align-items: center; gap: 1rem;
@@ -730,7 +736,7 @@ pre.logview {
   min-height: 0;
 }
 .stats-grid > .panel { min-height: 0; max-height: 42vh; }
-.stats-grid > .panel .panel-body { overflow-y: auto; }
+.stats-grid > .panel .panel-body { overflow-y: scroll; }
 
 .stats-block { margin-bottom: 0.9rem; }
 .stats-block:last-child { margin-bottom: 0; }
