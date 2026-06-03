@@ -93,7 +93,7 @@
           {% for r in snap.top10 %}
           <div class="player-row player-row--rank">
             <span>{{ r.rank }}</span>
-            <span style="color: {{ r.class_color }}">{{ r.name }}</span>
+            <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
             <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
             <span>{{ r.race_name }}</span>
             <span>{{ r.level }}</span>
