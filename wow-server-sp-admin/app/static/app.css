@@ -778,6 +778,12 @@ pre.logview {
 /* --- Players page --- */
 .players-page { gap: 1rem; }
 
+/* Suppress pulse animation at rest so htmx-indicator opacity:0 isn't overridden.
+   htmx adds .htmx-request to the indicator element while a request is in flight;
+   re-enable the animation only then. */
+#players-spinner { animation: none; }
+#players-spinner.htmx-request { animation: pulse 1.2s ease-in-out infinite; }
+
 /* 3 small stat cards, centered, not over-stretched. */
 .players-headline {
   display: grid;

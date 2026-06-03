@@ -15,7 +15,8 @@
   <div id="players-data"
        hx-get="/api/players/data"
        hx-trigger="load"
-       hx-swap="innerHTML">
+       hx-swap="innerHTML"
+       hx-indicator="#players-spinner">
     <p class="loading">Loading players…</p>
   </div>
 
