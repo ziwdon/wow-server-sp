@@ -88,6 +88,36 @@ Live stdout (not written to any file on disk):
 
 ## Common Issues
 
+### Post-Unexpected-Shutdown Verification (power loss, forced reboot, OOM kill)
+
+Run these in order — stop at the first failure and investigate before continuing:
+
+```bash
+# 1. Confirm all three containers are up
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep ac-
+# Expected: ac-worldserver, ac-authserver, ac-database — all Up
+
+# 2. Check MySQL recovered cleanly
+docker logs ac-database 2>&1 | grep -E "InnoDB|ERROR|crash|recover" | tail -30
+# InnoDB self-recovers; look for "ready for connections" at the end, no [ERROR] lines
+
+# 3. Check Errors.log — must be 0 bytes
+ls -la /opt/stacks/azerothcore/logs/Errors.log
+
+# 4. Confirm worldserver is healthy
+# "World Initialized" may not be in the tail if server has been up for minutes —
+# the bot stats block in stdout is equally authoritative
+docker logs --tail 200 ac-worldserver 2>&1 | tail -30
+
+# 5. MySQL table check (only if steps above show errors)
+source /opt/stacks/azerothcore/.env
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
+    -e "CHECK TABLE acore_characters.characters, acore_characters.character_inventory, acore_auth.account;"
+# All rows must return status: OK
+```
+
+InnoDB is crash-safe — actual corruption is rare. The main risk is a few seconds of in-flight character saves lost (data loss, not corruption). If containers are not up, start them: `cd /opt/stacks/azerothcore && docker compose up -d`
+
 ### Containers not running
 ```bash
 docker ps | grep ac-
