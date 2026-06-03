@@ -22,6 +22,7 @@ from app.services import backups as backups_svc
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
+from app.services import players as players_svc
 from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
@@ -512,6 +513,36 @@ async def stream_action(id: str | None = None):
                 await asyncio.sleep(1)
 
     return EventSourceResponse(_live())
+
+
+@app.get("/players", response_class=HTMLResponse)
+async def players_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "players.html", {"title": "azerothcore-admin · players"},
+    )
+
+
+def _players_last_refreshed(snap) -> str | None:
+    if snap is None:
+        return None
+    return dt.datetime.fromtimestamp(
+        snap.fetched_at, tz=dt.timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+
+
+@app.get("/api/players/data", response_class=HTMLResponse)
+async def api_players_data(request: Request) -> HTMLResponse:
+    snap = None
+    err = None
+    try:
+        snap = players_svc.collect_players(**db_credentials())
+    except Exception as e:  # noqa: BLE001 — DB down must not 500 the page
+        err = str(e)
+    return templates.TemplateResponse(
+        request,
+        "partials/players_page.html",
+        {"snap": snap, "error": err, "last_refreshed": _players_last_refreshed(snap)},
+    )
 
 
 @app.get("/stats", response_class=HTMLResponse)

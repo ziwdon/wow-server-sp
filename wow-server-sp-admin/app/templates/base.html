@@ -13,6 +13,7 @@
   <a class="nav-brand" href="/"><span class="nav-icon">⚔</span> AzerothCore Admin</a>
   <div class="nav-links">
     <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/">Dashboard</a>
+    <a class="nav-link {% if request.url.path == '/players' %}active{% endif %}" href="/players">Players</a>
     <a class="nav-link {% if request.url.path == '/stats' %}active{% endif %}" href="/stats">Stats</a>
     <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
     <a class="nav-link {% if request.url.path == '/backups' %}active{% endif %}" href="/backups">Backups</a>

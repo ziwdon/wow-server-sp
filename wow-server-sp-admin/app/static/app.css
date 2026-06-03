@@ -774,3 +774,90 @@ pre.logview {
   .stats-toolbar { flex-wrap: wrap; }
   #clear-dialog { min-width: unset; width: calc(100vw - 2rem); }
 }
+
+/* --- Players page --- */
+.players-page { gap: 1rem; }
+
+/* Suppress pulse animation at rest so htmx-indicator opacity:0 isn't overridden.
+   htmx adds .htmx-request to the indicator element while a request is in flight;
+   re-enable the animation only then. */
+#players-spinner { animation: none; }
+#players-spinner.htmx-request { animation: pulse 1.2s ease-in-out infinite; }
+
+/* 3 small stat cards, centered, not over-stretched. */
+.players-headline {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 300px));
+  justify-content: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  flex-shrink: 0;
+}
+/* Center total/online number cards vertically + horizontally; larger value. */
+.players-headline .stat-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 90px;
+}
+.players-headline .stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+}
+.cap-breakdown {
+  display: flex; flex-direction: column; gap: 0.15rem;
+  font-size: 0.85rem; color: var(--text);
+}
+.cap-breakdown b {
+  color: var(--gold-bright); font-variant-numeric: tabular-nums; margin-right: 0.3rem;
+}
+
+/* Online-now panel spans full width; cap its height and scroll internally. */
+.players-online { max-height: 30vh; margin-bottom: 0.75rem; flex-shrink: 0; }
+
+/* All characters | Top 10 (top-10 is wider: ~560px vs original 360px) */
+.players-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 560px;
+  gap: 0.75rem;
+  flex: 1;
+  min-height: 0;
+}
+.players-grid > .panel { min-height: 0; }
+
+/* Compact table rows. */
+.player-table { display: flex; flex-direction: column; }
+.player-row {
+  display: grid; align-items: center; gap: 0.5rem;
+  padding: 2px 0; font-size: 0.8rem; color: var(--text-warm);
+}
+.player-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+.player-row--head {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); border-bottom: 1px solid var(--border);
+  padding-bottom: 3px; margin-bottom: 2px;
+}
+/* Column templates per card. */
+.player-row--online { grid-template-columns: 1.1fr 1.2fr 1fr 1fr 48px 0.9fr 1.3fr; }
+.player-row--all    { grid-template-columns: 1.4fr 1fr 1fr 48px 0.9fr; }
+.player-row--rank   { grid-template-columns: 28px 1.4fr 1fr 1fr 48px 52px; }
+
+.player-group { margin-bottom: 0.7rem; }
+.player-group:last-child { margin-bottom: 0; }
+.player-group-head {
+  font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--gold); margin: 0.2rem 0 0.25rem;
+  border-bottom: 1px solid var(--border-dark); padding-bottom: 2px;
+}
+
+@media (max-width: 768px) {
+  .players-page { height: auto; overflow: visible; }
+  .players-headline { grid-template-columns: repeat(2, 1fr); }
+  .players-online { max-height: none; }
+  .players-grid { grid-template-columns: 1fr; }
+  .players-grid > .panel { min-height: 200px; }
+  .stats-toolbar { flex-wrap: wrap; }
+}
