@@ -43,7 +43,7 @@
   {% if snap %}
   <div class="stat-row stats-headline">
     <div class="stat-card"><div class="stat-label">Bots</div>
-      <div class="stat-value">{{ snap.bots_online }} online · {{ snap.bots_total }} total</div></div>
+      <div class="stat-value">{{ snap.bots_total }} total</div></div>
     <div hx-get="/api/players" hx-trigger="load, every 10s" hx-swap="outerHTML">
       <div class="stat-card"><div class="stat-label">Players</div>
         <div class="stat-value" style="color:var(--text-muted)">Loading…</div></div></div>
