@@ -31,7 +31,7 @@
       <div class="player-table">
         <div class="player-row player-row--head player-row--online">
           <span>Account</span><span>Character</span><span>Class</span>
-          <span>Race</span><span class="num">Level</span><span>Faction</span><span>Zone</span>
+          <span>Race</span><span>Level</span><span>Faction</span><span>Zone</span>
         </div>
         {% for c in snap.online_now %}
         <div class="player-row player-row--online">
@@ -39,7 +39,7 @@
           <span style="color: {{ c.class_color }}">{{ c.name }}</span>
           <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
           <span>{{ c.race_name }}</span>
-          <span class="num">{{ c.level }}</span>
+          <span>{{ c.level }}</span>
           <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
           <span>{{ c.zone_name }}</span>
         </div>
