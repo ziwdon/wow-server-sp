@@ -33,6 +33,45 @@ document.addEventListener('DOMContentLoaded', function () {
   btn.removeAttribute('hx-confirm');
 });
 
+// Import & Restore: file picker → confirm → multipart upload → restore action.
+document.addEventListener('DOMContentLoaded', function () {
+  var importBtn = document.getElementById('import-restore-btn');
+  var fileInput = document.getElementById('import-file-input');
+  if (!importBtn || !fileInput) return;
+
+  var confirmMsg = (
+    'IMPORT AND RESTORE this backup file?\n\n' +
+    'The whole server is rolled back to the point the backup was taken — ' +
+    'characters, items, gold, auctions, and accounts created after it will be ' +
+    'permanently LOST. The server will be stopped and unavailable for several ' +
+    'minutes while databases reimport (including the large world DB).\n\n' +
+    'A pre-restore safety backup is taken first so this can be undone. Continue?'
+  );
+
+  importBtn.addEventListener('click', function () {
+    fileInput.value = '';
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', function () {
+    var file = fileInput.files[0];
+    if (!file) return;
+    if (!window.confirm(confirmMsg)) return;
+    var log = document.getElementById('action-log');
+    if (log) log.innerHTML = '';
+    var formData = new FormData();
+    formData.append('file', file);
+    fetch('/api/action/import-restore', { method: 'POST', body: formData })
+      .then(function (r) {
+        if (!r.ok) {
+          r.json().then(function (d) {
+            alert('Import failed: ' + (d.detail || 'unknown error'));
+          });
+        }
+      });
+  });
+});
+
 // Clear the action log when Create backup fires; refresh the list when an action finishes.
 document.addEventListener('htmx:afterRequest', function (e) {
   if (e.detail.elt && e.detail.elt.closest && e.detail.elt.closest('.action-bar')) {

@@ -8,7 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -476,6 +476,34 @@ async def post_restore(payload: RestorePayload):
     ):
         raise HTTPException(status_code=400, detail="invalid archive name")
     record = _kick("restore", lambda cb: run_restore(name, on_progress=cb))
+    return {"id": record.id, "status": "running"}
+
+
+@app.post("/api/action/import-restore")
+async def post_import_restore(file: UploadFile = File(...)):
+    from app.services.actions import read_manifest, run_restore
+
+    if not (file.filename or "").endswith(".tar.gz"):
+        raise HTTPException(400, "file must be a .tar.gz archive")
+
+    ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
+    backups_dir = ac_stack / "backups"
+    stamp = int(dt.datetime.now().timestamp())
+    archive_name = f"azerothcore-backup-imported-{stamp}.tar.gz"
+    dest = backups_dir / archive_name
+
+    content = await file.read()
+    try:
+        dest.write_bytes(content)
+    except OSError as e:
+        raise HTTPException(500, f"could not save upload: {e}")
+
+    manifest = read_manifest(dest)
+    if manifest is None or manifest.get("format_version") != 1:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "invalid or unsupported archive — missing or incompatible manifest")
+
+    record = _kick("restore", lambda cb: run_restore(archive_name, on_progress=cb))
     return {"id": record.id, "status": "running"}
 
 

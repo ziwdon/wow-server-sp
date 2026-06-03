@@ -16,6 +16,8 @@
     <button class="btn btn-gold" id="restore-btn" disabled
             hx-confirm="RESTORE this backup? The whole server is rolled back to the selected point — characters, items, gold, auctions, and accounts created after it will be permanently LOST. The server will be stopped and unavailable for several minutes while databases reimport (including the large world DB). A pre-restore safety backup is taken first so this can be undone. Continue?"
             hx-swap="none">⟲ Restore selected</button>
+    <input type="file" id="import-file-input" accept=".tar.gz" style="display:none">
+    <button class="btn btn-gold" id="import-restore-btn">⬆ Import &amp; Restore</button>
   </div>
 
   <div class="backups-grid">
