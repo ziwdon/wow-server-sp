@@ -817,10 +817,10 @@ pre.logview {
 /* Online-now panel spans full width; cap its height and scroll internally. */
 .players-online { max-height: 30vh; margin-bottom: 0.75rem; flex-shrink: 0; }
 
-/* All characters | Top 10 (top-10 is wider: ~560px vs original 360px) */
+/* All characters | Top 10 (top-10 is slightly wider: 1fr vs 1.2fr, both flex) */
 .players-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 560px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   gap: 0.75rem;
   flex: 1;
   min-height: 0;
