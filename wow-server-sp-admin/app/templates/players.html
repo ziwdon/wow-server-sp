@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="dashboard-content players-page">
+
+  <div class="stats-toolbar">
+    <button class="btn btn-gold" id="refresh-players-btn"
+            hx-get="/api/players/data"
+            hx-target="#players-data"
+            hx-swap="innerHTML"
+            hx-indicator="#players-spinner">⟳ Refresh</button>
+    <span id="players-last-refreshed" class="stats-last">—</span>
+    <span id="players-spinner" class="stats-spinner htmx-indicator">refreshing…</span>
+  </div>
+
+  <div id="players-data"
+       hx-get="/api/players/data"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading players…</p>
+  </div>
+
+</div>
+{% endblock %}

@@ -22,6 +22,7 @@ from app.services import backups as backups_svc
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
+from app.services import players as players_svc
 from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
@@ -512,6 +513,13 @@ async def stream_action(id: str | None = None):
                 await asyncio.sleep(1)
 
     return EventSourceResponse(_live())
+
+
+@app.get("/players", response_class=HTMLResponse)
+async def players_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "players.html", {"title": "azerothcore-admin · players"},
+    )
 
 
 @app.get("/stats", response_class=HTMLResponse)

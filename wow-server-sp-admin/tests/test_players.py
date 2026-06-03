@@ -123,3 +123,21 @@ def test_collect_players_coerces_null_headline_to_zero(mock_connect):
     assert snap.online_now == ()
     assert snap.all_groups == ()
     assert snap.top10 == ()
+
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.main import app  # noqa: E402
+
+
+def test_players_page_renders_and_nav_between_dashboard_and_stats():
+    client = TestClient(app)
+    resp = client.get("/players")
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'id="players-data"' in body
+    assert "refresh-players-btn" in body
+    # Nav order: Dashboard < Players < Stats
+    assert body.index('href="/"') < body.index('href="/players"') < body.index('href="/stats"')
+    # Players link is marked active on its own page
+    assert 'class="nav-link active" href="/players"' in body
