@@ -60,12 +60,15 @@
         <div class="player-group">
           <div class="player-group-head">{{ g.account }}</div>
           <div class="player-table">
+            <div class="player-row player-row--head player-row--all">
+              <span>Character</span><span>Class</span><span>Race</span><span>Level</span><span>Faction</span>
+            </div>
             {% for c in g.chars %}
             <div class="player-row player-row--all">
               <span style="color: {{ c.class_color }}">{{ c.name }}</span>
               <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
               <span>{{ c.race_name }}</span>
-              <span class="num">{{ c.level }}</span>
+              <span>{{ c.level }}</span>
               <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
             </div>
             {% endfor %}
