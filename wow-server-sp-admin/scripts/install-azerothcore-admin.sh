@@ -171,8 +171,8 @@ case "${answer:-y}" in
 [Unit]
 Description=AzerothCore Admin (Docker Compose)
 Requires=docker.service tailscaled.service
-Wants=network-online.target
-After=docker.service tailscaled.service network-online.target
+Wants=network-online.target azerothcore.service
+After=docker.service tailscaled.service network-online.target azerothcore.service
 
 [Service]
 Type=oneshot
