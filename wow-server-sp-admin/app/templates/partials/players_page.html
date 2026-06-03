@@ -1,0 +1,110 @@
+{# Out-of-band update of the toolbar "last refreshed" label (load + refresh). #}
+<span id="players-last-refreshed" class="stats-last" hx-swap-oob="true">Last refreshed: {{ last_refreshed or "never" }}</span>
+
+<div id="players-data-inner">
+  {% if error %}<div class="banner error">Could not load players: {{ error }}</div>{% endif %}
+
+  {% if snap %}
+  <div class="players-headline">
+    <div class="stat-card">
+      <div class="stat-label">Total players</div>
+      <div class="stat-value">{{ snap.total_players }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Online players</div>
+      <div class="stat-value">{{ snap.online_players }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Expansion-cap levels</div>
+      <div class="cap-breakdown">
+        <span><b>{{ snap.cap_vanilla }}</b> Vanilla 60</span>
+        <span><b>{{ snap.cap_tbc }}</b> TBC 70</span>
+        <span><b>{{ snap.cap_wotlk }}</b> WotLK 80</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel players-online">
+    <div class="panel-header"><span class="panel-title">Online now</span></div>
+    <div class="panel-body">
+      {% if snap.online_now %}
+      <div class="player-table">
+        <div class="player-row player-row--head player-row--online">
+          <span>Account</span><span>Character</span><span>Class</span>
+          <span>Race</span><span>Level</span><span>Faction</span><span>Zone</span>
+        </div>
+        {% for c in snap.online_now %}
+        <div class="player-row player-row--online">
+          <span>{{ c.account }}</span>
+          <span style="color: {{ c.class_color }}">{{ c.name }}</span>
+          <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
+          <span>{{ c.race_name }}</span>
+          <span class="num">{{ c.level }}</span>
+          <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
+          <span>{{ c.zone_name }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-state">No players online.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="players-grid">
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">All characters</span></div>
+      <div class="panel-body">
+        {% if snap.all_groups %}
+        {% for g in snap.all_groups %}
+        <div class="player-group">
+          <div class="player-group-head">{{ g.account }}</div>
+          <div class="player-table">
+            {% for c in g.chars %}
+            <div class="player-row player-row--all">
+              <span style="color: {{ c.class_color }}">{{ c.name }}</span>
+              <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
+              <span>{{ c.race_name }}</span>
+              <span class="num">{{ c.level }}</span>
+              <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="empty-state">No characters.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">Top 10 characters</span></div>
+      <div class="panel-body">
+        {% if snap.top10 %}
+        <div class="player-table">
+          <div class="player-row player-row--head player-row--rank">
+            <span>#</span><span>Character</span><span>Class</span>
+            <span>Race</span><span>Level</span><span>iLvl</span>
+          </div>
+          {% for r in snap.top10 %}
+          <div class="player-row player-row--rank">
+            <span class="num">{{ r.rank }}</span>
+            <span style="color: {{ r.class_color }}">{{ r.name }}</span>
+            <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
+            <span>{{ r.race_name }}</span>
+            <span class="num">{{ r.level }}</span>
+            <span class="num">{{ r.avg_ilvl if r.avg_ilvl is not none else "—" }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty-state">No characters.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <p class="empty-state">Database unreachable — no player data to show. Try Refresh.</p>
+  {% endif %}
+</div>

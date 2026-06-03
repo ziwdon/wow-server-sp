@@ -522,6 +522,29 @@ async def players_page(request: Request) -> HTMLResponse:
     )
 
 
+def _players_last_refreshed(snap) -> str | None:
+    if snap is None:
+        return None
+    return dt.datetime.fromtimestamp(
+        snap.fetched_at, tz=dt.timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+
+
+@app.get("/api/players/data", response_class=HTMLResponse)
+async def api_players_data(request: Request) -> HTMLResponse:
+    snap = None
+    err = None
+    try:
+        snap = players_svc.collect_players(**db_credentials())
+    except Exception as e:  # noqa: BLE001 — DB down must not 500 the page
+        err = str(e)
+    return templates.TemplateResponse(
+        request,
+        "partials/players_page.html",
+        {"snap": snap, "error": err, "last_refreshed": _players_last_refreshed(snap)},
+    )
+
+
 @app.get("/stats", response_class=HTMLResponse)
 async def stats_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(

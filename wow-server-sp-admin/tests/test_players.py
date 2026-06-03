@@ -141,3 +141,58 @@ def test_players_page_renders_and_nav_between_dashboard_and_stats():
     assert body.index('href="/"') < body.index('href="/players"') < body.index('href="/stats"')
     # Players link is marked active on its own page
     assert 'class="nav-link active" href="/players"' in body
+
+
+from unittest.mock import patch as _patch  # noqa: E402
+
+
+def _sample_snapshot():
+    sariel = CharRow(
+        account="CARLOS", name="Sariel", class_name="Druid", class_color="#FF7C0A",
+        race_name="Night Elf", faction="Alliance", faction_color="#4080C0",
+        level=25, online=True, zone_name="Stormwind City",
+    )
+    return PlayersSnapshot(
+        fetched_at=1716144665.0,
+        total_players=2, online_players=1,
+        cap_vanilla=1, cap_tbc=0, cap_wotlk=0,
+        online_now=(sariel,),
+        all_groups=(AccountGroup("CARLOS", (sariel,)),),
+        top10=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 25, None),),
+    )
+
+
+def test_api_players_data_renders_with_snapshot():
+    creds = {"host": "h", "port": 3306, "user": "u", "password": "p"}
+    with _patch("app.main.players_svc.collect_players", return_value=_sample_snapshot()), \
+         _patch("app.main.db_credentials", return_value=creds):
+        client = TestClient(app)
+        resp = client.get("/api/players/data")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "Sariel" in body
+    assert "#FF7C0A" in body                       # class color applied
+    assert "CARLOS" in body                        # account group header
+    assert "Vanilla 60" in body                    # expansion-cap breakdown
+    assert 'id="players-last-refreshed"' in body and 'hx-swap-oob="true"' in body
+    assert "—" in body                             # None avg_ilvl → dash
+
+
+def test_api_players_data_db_down_shows_empty_state():
+    creds = {"host": "h", "port": 3306, "user": "u", "password": "p"}
+    with _patch("app.main.players_svc.collect_players", side_effect=RuntimeError("db down")), \
+         _patch("app.main.db_credentials", return_value=creds):
+        client = TestClient(app)
+        resp = client.get("/api/players/data")
+    assert resp.status_code == 200
+    assert "unreachable" in resp.text.lower()
+
+
+def test_existing_api_players_online_card_still_works():
+    # The dashboard "Online" stat card endpoint must not collide with the page.
+    from app.services.db_stats import OnlineCounts
+    with _patch("app.main.db_stats.count_online", return_value=OnlineCounts(real=1, bots=2)):
+        client = TestClient(app)
+        resp = client.get("/api/players")
+    assert resp.status_code == 200
+    assert "real" in resp.text  # partials/players.html renders "N real · N bots"
