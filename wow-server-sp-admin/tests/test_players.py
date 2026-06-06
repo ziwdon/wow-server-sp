@@ -199,10 +199,11 @@ def test_api_players_data_renders_with_snapshot():
     assert "Top characters" in body
     assert "Top PvE" in body
     assert "Top PvP" in body
-    assert "Honor Kills" in body
+    assert "Kills" in body
+    assert "Honor Kills" not in body
     assert "Honor" in body
     assert '<span class="num">25</span>' in body  # PvE Level right-aligned
-    assert '<span class="num">12</span>' in body  # Honor Kills right-aligned
+    assert '<span class="num">12</span>' in body  # Kills right-aligned
     assert "Top 10 characters" not in body
 
 
