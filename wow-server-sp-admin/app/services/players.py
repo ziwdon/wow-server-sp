@@ -1,4 +1,4 @@
-"""Real-player roster, online list, and top-10 ranking for the admin Players page.
+"""Real-player roster, online list, and character rankings for the admin Players page.
 
 Cohort (matches stats.py): a "real player" account is
     username NOT LIKE 'RNDBOT%' AND username <> 'ahbot'
@@ -7,7 +7,7 @@ so the lowercase 'ahbot' literal already excludes the uppercase-stored 'AHBOT'
 account — do NOT switch to LOWER(username) (redundant + non-sargable).
 
 No background cache: real players are few, so collect_players() runs
-synchronously per request (3 small queries on one connection).
+synchronously per request (4 small queries on one connection).
 """
 
 from __future__ import annotations
@@ -60,6 +60,17 @@ class RankRow:
 
 
 @dataclass(frozen=True)
+class PvpRankRow:
+    rank: int
+    name: str
+    class_name: str
+    class_color: str
+    race_name: str
+    honor_kills: int
+    honor: int
+
+
+@dataclass(frozen=True)
 class PlayersSnapshot:
     fetched_at: float
     total_players: int
@@ -69,7 +80,8 @@ class PlayersSnapshot:
     cap_wotlk: int
     online_now: tuple[CharRow, ...]
     all_groups: tuple[AccountGroup, ...]
-    top10: tuple[RankRow, ...]
+    top_pve: tuple[RankRow, ...]
+    top_pvp: tuple[PvpRankRow, ...]
 
 
 def char_row(row) -> CharRow:
@@ -131,6 +143,25 @@ def rank_rows(rows) -> tuple[RankRow, ...]:
     return tuple(out)
 
 
+def pvp_rank_rows(rows) -> tuple[PvpRankRow, ...]:
+    """Map pre-ordered PvP rows (name, class_id, race_id, kills, honor)."""
+    out: list[PvpRankRow] = []
+    for i, (name, class_id, race_id, honor_kills, honor) in enumerate(rows, start=1):
+        cls = wr.class_name(int(class_id))
+        out.append(
+            PvpRankRow(
+                rank=i,
+                name=str(name),
+                class_name=cls,
+                class_color=wr.class_color(cls),
+                race_name=wr.race_name(int(race_id)),
+                honor_kills=int(honor_kills or 0),
+                honor=int(honor or 0),
+            )
+        )
+    return tuple(out)
+
+
 def collect_players(*, host: str, port: int, user: str, password: str) -> PlayersSnapshot:
     conn = mysql.connector.connect(
         host=host,
@@ -163,7 +194,7 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
             )
             h = cur.fetchone() or (0, 0, 0, 0, 0)
 
-            # 3. Top-10 by level, then gear (avg equipped item level), then name.
+            # 3. Top PvE by level, then gear (avg equipped item level), then name.
             cur.execute(
                 "SELECT c.name, c.class, c.race, c.level, ROUND(AVG(it.ItemLevel)) AS avg_ilvl "
                 "FROM acore_characters.characters c "
@@ -175,9 +206,20 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
                 f"WHERE {_REAL} "
                 "GROUP BY c.guid, c.name, c.class, c.race, c.level "
                 "ORDER BY c.level DESC, avg_ilvl DESC, c.name ASC "
-                "LIMIT 10"
+                "LIMIT 5"
             )
-            top_rows = cur.fetchall()
+            top_pve_rows = cur.fetchall()
+
+            # 4. Top PvP by lifetime honor kills, then current honor, then name.
+            cur.execute(
+                "SELECT c.name, c.class, c.race, c.totalKills, c.totalHonorPoints "
+                "FROM acore_characters.characters c "
+                "JOIN acore_auth.account a ON a.id = c.account "
+                f"WHERE {_REAL} "
+                "ORDER BY c.totalKills DESC, c.totalHonorPoints DESC, c.name ASC "
+                "LIMIT 5"
+            )
+            top_pvp_rows = cur.fetchall()
 
         return PlayersSnapshot(
             fetched_at=time.time(),
@@ -188,7 +230,8 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
             cap_wotlk=int(h[4] or 0),
             online_now=online_sorted(roster),
             all_groups=group_by_account(roster),
-            top10=rank_rows(top_rows),
+            top_pve=rank_rows(top_pve_rows),
+            top_pvp=pvp_rank_rows(top_pvp_rows),
         )
     finally:
         try:

@@ -817,7 +817,7 @@ pre.logview {
 /* Online-now panel spans full width; cap its height and scroll internally. */
 .players-online { max-height: 30vh; margin-bottom: 0.75rem; flex-shrink: 0; }
 
-/* All characters | Top 10 — equal split, both flex */
+/* All characters | Top characters — equal split, both flex */
 .players-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -843,7 +843,17 @@ pre.logview {
 /* Column templates per card. */
 .player-row--online { grid-template-columns: 1.1fr 1.2fr 1fr 1fr 0.6fr 1fr 1.4fr; }
 .player-row--all    { grid-template-columns: 1.4fr 1fr 1fr 0.6fr 1fr; }
-.player-row--rank   { grid-template-columns: 0.4fr 1.4fr 1fr 1fr 0.6fr 52px; }
+.player-row--rank,
+.player-row--rank-pvp {
+  column-gap: 0.5rem;
+  grid-template-columns: 0.4fr 1.4fr 1fr 1fr 74px 84px;
+}
+
+.player-rank-section + .player-rank-section { margin-top: 0.8rem; }
+.player-rank-title {
+  font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--gold); margin: 0.1rem 0 0.35rem;
+}
 
 .player-group { margin-bottom: 0.7rem; }
 .player-group:last-child { margin-bottom: 0; }

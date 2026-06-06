@@ -5,6 +5,7 @@ from app.services.players import (
     AccountGroup,
     CharRow,
     PlayersSnapshot,
+    PvpRankRow,
     RankRow,
     char_row,
     group_by_account,
@@ -75,7 +76,7 @@ def test_rank_rows_assigns_ranks_and_preserves_none_ilvl():
 @patch("app.services.players.mysql.connector.connect")
 def test_collect_players_builds_snapshot(mock_connect):
     cur = MagicMock()
-    # fetchall order matches collect_players: (1) roster, then (3) top10.
+    # fetchall order matches collect_players: roster, top PvE, top PvP.
     cur.fetchall.side_effect = [
         [
             ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637),
@@ -86,6 +87,10 @@ def test_collect_players_builds_snapshot(mock_connect):
         [
             ("Vegivaca", 1, 6, 58, 37),
             ("Sariel", 11, 4, 25, None),
+        ],
+        [
+            ("Pitocas", 3, 3, 42, 1500),
+            ("Sariel", 11, 4, 11, 300),
         ],
     ]
     # fetchone is the (2) headline aggregate: total, online, cap60, cap70, cap80.
@@ -103,16 +108,27 @@ def test_collect_players_builds_snapshot(mock_connect):
     # all_groups: A→Z (carlos, EDUARDO), within-group level desc
     assert [g.account for g in snap.all_groups] == ["carlos", "EDUARDO"]
     assert [c.name for c in snap.all_groups[1].chars] == ["Vegivaca", "Pitocas"]
-    # top10 ranked; None ilvl preserved
-    assert snap.top10[0].rank == 1 and snap.top10[0].name == "Vegivaca"
-    assert snap.top10[1].avg_ilvl is None
+    # top PvE ranked; None ilvl preserved
+    assert snap.top_pve[0].rank == 1 and snap.top_pve[0].name == "Vegivaca"
+    assert snap.top_pve[1].avg_ilvl is None
+    # top PvP ranked by total lifetime kills, then honor.
+    assert snap.top_pvp[0].rank == 1 and snap.top_pvp[0].name == "Pitocas"
+    assert snap.top_pvp[0].honor_kills == 42
+    assert snap.top_pvp[0].honor == 1500
     assert snap.fetched_at > 0
+
+    executed_sql = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "ORDER BY c.level DESC, avg_ilvl DESC, c.name ASC LIMIT 5" in executed_sql
+    assert (
+        "ORDER BY c.totalKills DESC, c.totalHonorPoints DESC, c.name ASC LIMIT 5"
+        in executed_sql
+    )
 
 
 @patch("app.services.players.mysql.connector.connect")
 def test_collect_players_coerces_null_headline_to_zero(mock_connect):
     cur = MagicMock()
-    cur.fetchall.side_effect = [[], []]          # no roster, no top10
+    cur.fetchall.side_effect = [[], [], []]      # no roster, no top PvE/PvP
     cur.fetchone.return_value = (0, 0, None, None, None)  # SUM over no rows → NULL
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cur
@@ -122,7 +138,8 @@ def test_collect_players_coerces_null_headline_to_zero(mock_connect):
     assert (snap.cap_vanilla, snap.cap_tbc, snap.cap_wotlk) == (0, 0, 0)
     assert snap.online_now == ()
     assert snap.all_groups == ()
-    assert snap.top10 == ()
+    assert snap.top_pve == ()
+    assert snap.top_pvp == ()
 
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -158,7 +175,10 @@ def _sample_snapshot():
         cap_vanilla=1, cap_tbc=0, cap_wotlk=0,
         online_now=(sariel,),
         all_groups=(AccountGroup("CARLOS", (sariel,)),),
-        top10=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 25, None),),
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 25, None),),
+        top_pvp=(
+            PvpRankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 12, 450),
+        ),
     )
 
 
@@ -176,6 +196,15 @@ def test_api_players_data_renders_with_snapshot():
     assert "Vanilla 60" in body                    # expansion-cap breakdown
     assert 'id="players-last-refreshed"' in body and 'hx-swap-oob="true"' in body
     assert "—" in body                             # None avg_ilvl → dash
+    assert "Top characters" in body
+    assert "Top PvE" in body
+    assert "Top PvP" in body
+    assert "Kills" in body
+    assert "Honor Kills" not in body
+    assert "Honor" in body
+    assert '<span class="num">25</span>' in body  # PvE Level right-aligned
+    assert '<span class="num">12</span>' in body  # Kills right-aligned
+    assert "Top 10 characters" not in body
 
 
 def test_api_players_data_db_down_shows_empty_state():
