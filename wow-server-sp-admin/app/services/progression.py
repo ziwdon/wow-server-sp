@@ -180,3 +180,147 @@ def config_from_resolved_keys(keys: list[dict]) -> ProgressionConfig:
         tbc_races_starting=int_key("IndividualProgression.tbcRacesStartingProgression", 0),
         death_knight_starting=int_key("IndividualProgression.DeathKnightStartingProgression", 13),
     )
+
+
+@dataclass(frozen=True)
+class ApplyProgressionResult:
+    status: str
+    target_state: int
+    effective_state: int
+    reason: str | None = None
+    message: str = ""
+
+
+def _fetch_character(cur, guid: int) -> CharacterProgressionRow | None:
+    cur.execute(
+        "SELECT c.guid, a.username, c.name, c.class, c.race, c.level, c.online, "
+        "COALESCE(MAX(CASE WHEN q.quest BETWEEN 66001 AND 66013 AND q.active=1 "
+        "THEN q.quest - 66000 END), 0) AS progression_state "
+        "FROM acore_characters.characters c "
+        "JOIN acore_auth.account a ON a.id = c.account "
+        "LEFT JOIN acore_characters.character_queststatus_rewarded q ON q.guid = c.guid "
+        f"WHERE {REAL_ACCOUNT_SQL} AND c.guid = %s "
+        "GROUP BY c.guid, a.username, c.name, c.class, c.race, c.level, c.online",
+        (guid,),
+    )
+    row = cur.fetchone()
+    return None if row is None else _row_to_character(row)
+
+
+def _existing_progression_quests(cur, guid: int) -> set[int]:
+    cur.execute(
+        "SELECT quest FROM acore_characters.character_queststatus_rewarded "
+        "WHERE guid = %s AND quest BETWEEN 66001 AND 66013 AND active = 1",
+        (guid,),
+    )
+    return {int(r[0]) for r in cur.fetchall()}
+
+
+def _write_audit_snapshot(
+    *,
+    snapshots_dir: Path,
+    row: CharacterProgressionRow,
+    target_expansion: str,
+    target_state: int,
+    existing_quests: set[int],
+) -> Path:
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+    path = snapshots_dir / f"progression-{row.guid}-{stamp}.json"
+    payload = {
+        "format_version": 1,
+        "guid": row.guid,
+        "account": row.account,
+        "character": row.name,
+        "level": row.level,
+        "online": row.online,
+        "previous_progression": row.progression,
+        "previous_expansion": row.expansion,
+        "target_expansion": target_expansion,
+        "target_state": target_state,
+        "existing_progression_quests": sorted(existing_quests),
+        "created_unix": stamp,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _verify_effective_state(cur, guid: int) -> int:
+    cur.execute(
+        "SELECT COALESCE(MAX(quest - 66000), 0) "
+        "FROM acore_characters.character_queststatus_rewarded "
+        "WHERE guid = %s AND quest BETWEEN 66001 AND 66013 AND active = 1",
+        (guid,),
+    )
+    row = cur.fetchone() or (0,)
+    return int(row[0] or 0)
+
+
+def apply_progression(
+    *,
+    guid: int,
+    target_expansion: str,
+    config: ProgressionConfig,
+    snapshots_dir: Path,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+) -> ApplyProgressionResult:
+    target_state = target_state_for_expansion(target_expansion)
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            row = _fetch_character(cur, guid)
+            if row is None:
+                conn.rollback()
+                return ApplyProgressionResult("rejected", target_state, 0, reason="not_found", message="Character not found.")
+
+            login_floor = login_floor_for_character(row, config)
+            validation = validate_apply(
+                row,
+                target_expansion,
+                progression_limit=config.progression_limit,
+                login_floor=login_floor,
+            )
+            if not validation.ok:
+                conn.rollback()
+                return ApplyProgressionResult("rejected", target_state, row.progression, reason=validation.reason, message=validation.message)
+            if validation.noop:
+                conn.rollback()
+                return ApplyProgressionResult("noop", target_state, row.progression, message=validation.message)
+
+            existing = _existing_progression_quests(cur, guid)
+            _write_audit_snapshot(
+                snapshots_dir=snapshots_dir,
+                row=row,
+                target_expansion=target_expansion,
+                target_state=target_state,
+                existing_quests=existing,
+            )
+
+            for quest in range(QUEST_BASE + PROGRESSION_MIN, QUEST_BASE + target_state + 1):
+                if quest not in existing:
+                    cur.execute(
+                        "INSERT IGNORE INTO acore_characters.character_queststatus_rewarded (guid, quest, active) VALUES (%s, %s, 1)",
+                        (guid, quest),
+                    )
+
+            conn.commit()
+
+            with conn.cursor() as verify_cur:
+                effective = _verify_effective_state(verify_cur, guid)
+            if effective < target_state:
+                return ApplyProgressionResult("error", target_state, effective, reason="verify_failed", message="Progression write committed but verification did not reach target.")
+            return ApplyProgressionResult("applied", target_state, effective, message="Progression updated.")
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

@@ -106,3 +106,61 @@ def test_config_from_resolved_keys_parses_progression_values_and_defaults():
     assert cfg.starting_progression == 8
     assert cfg.tbc_races_starting == 0
     assert cfg.death_knight_starting == 13
+
+
+@patch("app.services.progression.mysql.connector.connect")
+def test_apply_progression_inserts_missing_rows_and_deletes_nothing(mock_connect, tmp_path):
+    cur = MagicMock()
+    # selected character re-read, existing rows, post-commit verification
+    cur.fetchone.side_effect = [
+        (101, "CARLOS", "Sariel", 11, 4, 60, 0, 0),
+        (8,),
+    ]
+    cur.fetchall.return_value = [(66001,), (66002,)]
+    conn = mock_connect.return_value
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    result = progression.apply_progression(
+        guid=101,
+        target_expansion="tbc",
+        config=progression.ProgressionConfig(),
+        snapshots_dir=tmp_path,
+        host="h",
+        port=3306,
+        user="u",
+        password="p",
+    )
+
+    assert result.status == "applied"
+    assert result.target_state == 8
+    assert conn.commit.called
+    executed = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "DELETE" not in executed.upper()
+    inserted_params = [call.args[1] for call in cur.execute.call_args_list if "INSERT IGNORE" in call.args[0]]
+    assert inserted_params == [(101, 66003), (101, 66004), (101, 66005), (101, 66006), (101, 66007), (101, 66008)]
+    assert list(tmp_path.glob("progression-*.json"))
+
+
+@patch("app.services.progression.mysql.connector.connect")
+def test_apply_progression_rejects_online_without_write(mock_connect, tmp_path):
+    cur = MagicMock()
+    cur.fetchone.return_value = (101, "CARLOS", "Sariel", 11, 4, 60, 1, 0)
+    conn = mock_connect.return_value
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    result = progression.apply_progression(
+        guid=101,
+        target_expansion="tbc",
+        config=progression.ProgressionConfig(),
+        snapshots_dir=tmp_path,
+        host="h",
+        port=3306,
+        user="u",
+        password="p",
+    )
+
+    assert result.status == "rejected"
+    assert result.reason == "online"
+    assert not conn.commit.called
+    executed = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "INSERT IGNORE" not in executed
