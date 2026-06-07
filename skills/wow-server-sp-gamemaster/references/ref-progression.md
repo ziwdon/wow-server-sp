@@ -40,6 +40,31 @@
 - Players cannot trade/group with those at different progression tiers (configurable)
 - Death Knights start at WotLK progression (they skip all pre-WotLK tiers; configurable)
 
+## How Progression Is Stored
+
+The installed module derives a character's progression from hidden rewarded quests,
+not from `character_settings`.
+
+- Hidden progression quest IDs are `66000 + progression_state`.
+- `GetPlayerProgressionFromQuests()` scans progression states and returns the
+  highest hidden quest with `QUEST_STATUS_REWARDED`.
+- State `0` is represented by no hidden progression quest.
+- The expansion boundary states are:
+  - Vanilla: state `< 8` (exact admin boundary target: `0`)
+  - TBC: state `>= 8` and `< 13` (exact admin boundary target: `8`)
+  - WotLK: state `>= 13` (exact admin boundary target: `13`)
+- Natural progression via `UpdateProgressionState()` adds the newly earned hidden
+  quest and does not delete older progression quest rows.
+- Forced progression via `ForceUpdateProgressionState()` removes all hidden
+  progression quests before adding one replacement quest. Treat that as a
+  testing/admin command path, not the safest database strategy for preserving
+  forward-only character history.
+
+For database inspection, check
+`acore_characters.character_queststatus_rewarded` for active quest rows between
+`66000` and `66018`. Do not use `character_settings` for this module's current
+progression state.
+
 ## Setting Player Progression (GM Command)
 
 To manually set a player's progression tier (useful for testing or catching up):
@@ -51,8 +76,10 @@ To manually set a player's progression tier (useful for testing or catching up):
 
 > **Note:** The exact GM command for setting progression is module-specific. Check the module's
 > source code or ask in the mod-individual-progression GitHub for the current command syntax.
-> Alternatively, set it directly in the database:
-> `UPDATE acore_characters.character_settings SET value=<tier> WHERE source='mod-individual-progression' AND guid=<charGUID>`
+> For forward-only offline admin promotion, prefer adding the missing hidden
+> rewarded quest rows in `character_queststatus_rewarded` and deleting nothing.
+> Do not use the old `character_settings` fallback; it is not how this installed
+> module stores progression.
 
 ## Key Config Options (individualProgression.conf)
 

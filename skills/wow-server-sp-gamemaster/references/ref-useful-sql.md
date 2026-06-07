@@ -168,20 +168,55 @@ FROM acore_characters.auctionhouse;
 
 ## Individual Progression Queries
 
-### Check a player's progression tier
+### Check players' progression hidden quest rows
 ```sql
-SELECT c.name, cs.value AS progression_tier
-FROM acore_characters.character_settings cs
-JOIN acore_characters.characters c ON c.guid = cs.guid
-WHERE cs.source = 'mod-individual-progression';
+SELECT
+  c.guid,
+  c.name,
+  COALESCE(MAX(q.quest - 66000), 0) AS progression_state,
+  GROUP_CONCAT(q.quest ORDER BY q.quest) AS hidden_progression_quests
+FROM acore_characters.characters c
+LEFT JOIN acore_characters.character_queststatus_rewarded q
+  ON q.guid = c.guid
+ AND q.active = 1
+ AND q.quest BETWEEN 66000 AND 66018
+GROUP BY c.guid, c.name
+ORDER BY c.name;
 ```
 
-### Set a player's progression tier manually
+### Promote an offline player forward to an expansion boundary
+
+This inserts hidden rewarded quests and deletes nothing. Use only for real,
+offline player characters, and only for upward promotion. Boundary targets:
+Vanilla = `0`, TBC = `8`, WotLK = `13`.
+
 ```sql
-UPDATE acore_characters.character_settings
-SET value = '5'  -- Tier 5 = AQ40 completed
-WHERE source = 'mod-individual-progression'
-AND guid = <CHARACTER_GUID>;
+-- Example: promote character 12345 forward to TBC boundary state 8.
+-- First confirm the character is offline and not already above the target:
+SELECT
+  c.guid,
+  c.name,
+  c.online,
+  COALESCE(MAX(q.quest - 66000), 0) AS current_state
+FROM acore_characters.characters c
+LEFT JOIN acore_characters.character_queststatus_rewarded q
+  ON q.guid = c.guid
+ AND q.active = 1
+ AND q.quest BETWEEN 66000 AND 66018
+WHERE c.guid = 12345
+GROUP BY c.guid, c.name, c.online;
+
+-- Then insert missing hidden rewarded quests through the target state:
+INSERT IGNORE INTO acore_characters.character_queststatus_rewarded (guid, quest, active)
+VALUES
+  (12345, 66001, 1),
+  (12345, 66002, 1),
+  (12345, 66003, 1),
+  (12345, 66004, 1),
+  (12345, 66005, 1),
+  (12345, 66006, 1),
+  (12345, 66007, 1),
+  (12345, 66008, 1);
 ```
 
 ---
