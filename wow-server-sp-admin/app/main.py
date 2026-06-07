@@ -23,6 +23,7 @@ from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
 from app.services import players as players_svc
+from app.services import progression as progression_svc
 from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
@@ -578,6 +579,63 @@ async def stats_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "stats.html", {"title": "azerothcore-admin · stats"},
     )
+
+
+class ProgressionApplyPayload(BaseModel):
+    guid: int
+    target_expansion: str
+
+
+@app.get("/progression", response_class=HTMLResponse)
+async def progression_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "progression.html",
+        {"title": "azerothcore-admin · progression"},
+    )
+
+
+@app.get("/api/progression/characters", response_class=HTMLResponse)
+async def api_progression_characters(request: Request) -> HTMLResponse:
+    rows = ()
+    err = None
+    cfg = progression_svc.config_from_resolved_keys(list_keys_resolved())
+    try:
+        rows = progression_svc.collect_characters(**db_credentials())
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+    return templates.TemplateResponse(
+        request,
+        "partials/progression_page.html",
+        {
+            "rows": rows,
+            "config": cfg,
+            "error": err,
+            "labels": progression_svc.EXPANSION_LABELS,
+        },
+    )
+
+
+@app.post("/api/progression/apply")
+async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
+    cfg = progression_svc.config_from_resolved_keys(list_keys_resolved())
+    try:
+        result = progression_svc.apply_progression(
+            guid=payload.guid,
+            target_expansion=payload.target_expansion,
+            config=cfg,
+            snapshots_dir=_SNAPSHOTS,
+            **db_credentials(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": result.status,
+        "target_state": result.target_state,
+        "effective_state": result.effective_state,
+        "reason": result.reason,
+        "message": result.message,
+    }
 
 
 @app.get("/settings", response_class=HTMLResponse)

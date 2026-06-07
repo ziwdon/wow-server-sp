@@ -1,0 +1,113 @@
+<div id="progression-data-inner">
+  {% if error %}
+  <div class="banner error">Could not load progression data: {{ error }}</div>
+  {% endif %}
+
+  {% if rows %}
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">Character progression</span></div>
+    <div class="panel-body">
+      <div class="progression-form">
+        <label class="field-label" for="progression-character">Character</label>
+        <select id="progression-character">
+          {% for c in rows %}
+          <option value="{{ c.guid }}"
+                  data-online="{{ '1' if c.online else '0' }}"
+                  data-expansion="{{ c.expansion }}"
+                  data-progression="{{ c.progression }}"
+                  data-name="{{ c.name }}"
+                  data-account="{{ c.account }}">
+            {{ c.account }} / {{ c.name }} - level {{ c.level }} - {{ labels[c.expansion] }}{% if c.online %} - online{% endif %}
+          </option>
+          {% endfor %}
+        </select>
+
+        <label class="field-label" for="progression-target">Target expansion</label>
+        <select id="progression-target">
+          <option value="vanilla">Vanilla</option>
+          <option value="tbc">TBC</option>
+          <option value="wotlk">WotLK</option>
+        </select>
+
+        <div id="progression-warning" class="banner warning hidden"></div>
+        <div id="progression-result" class="banner hidden"></div>
+
+        <button class="btn btn-apply" id="progression-apply">Apply progression</button>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <p class="empty-state">No real-player characters found.</p>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  const order = {vanilla: 0, tbc: 8, wotlk: 13};
+  const character = document.getElementById('progression-character');
+  const target = document.getElementById('progression-target');
+  const apply = document.getElementById('progression-apply');
+  const warning = document.getElementById('progression-warning');
+  const result = document.getElementById('progression-result');
+  if (!character || !target || !apply || !warning || !result) return;
+
+  function showWarning(text) {
+    warning.textContent = text;
+    warning.classList.remove('hidden');
+  }
+
+  function hideWarning() {
+    warning.textContent = '';
+    warning.classList.add('hidden');
+  }
+
+  function selectedOption() {
+    return character.options[character.selectedIndex];
+  }
+
+  function refreshState() {
+    hideWarning();
+    result.classList.add('hidden');
+    const opt = selectedOption();
+    const isOnline = opt.dataset.online === '1';
+    const current = Number(opt.dataset.progression || '0');
+    const desired = order[target.value];
+    let disabled = false;
+
+    if (isOnline) {
+      showWarning('This character is online. Log out before changing progression.');
+      disabled = true;
+    } else if (opt.dataset.expansion === target.value) {
+      // Same expansion as current (targets are boundaries): no-op. Must be
+      // checked before the downgrade branch so a mid-tier character selecting
+      // its own expansion is not mislabelled as a downgrade.
+      showWarning('This character is already in the selected expansion.');
+      disabled = true;
+    } else if (desired < current) {
+      showWarning('Moving characters backward is intentionally blocked.');
+      disabled = true;
+    }
+    apply.disabled = disabled;
+  }
+
+  character.addEventListener('change', refreshState);
+  target.addEventListener('change', refreshState);
+  apply.addEventListener('click', async function() {
+    const opt = selectedOption();
+    const name = opt.dataset.account + ' / ' + opt.dataset.name;
+    if (!confirm('Apply progression change to ' + name + '? Level will not change.')) return;
+    apply.disabled = true;
+    const response = await fetch('/api/progression/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({guid: Number(opt.value), target_expansion: target.value})
+    });
+    const data = await response.json();
+    result.className = 'banner ' + (response.ok && data.status === 'applied' ? 'ok' : 'error');
+    result.textContent = data.message || data.detail || data.status || 'Unknown result';
+    result.classList.remove('hidden');
+    await htmx.ajax('GET', '/api/progression/characters', {target: '#progression-data', swap: 'innerHTML'});
+  });
+  refreshState();
+})();
+</script>
