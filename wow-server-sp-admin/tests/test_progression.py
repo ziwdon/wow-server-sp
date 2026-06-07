@@ -39,3 +39,39 @@ def test_collect_characters_excludes_bots_and_maps_progression(mock_connect):
     assert "a.username NOT LIKE 'RNDBOT%%'" in executed
     assert "a.username <> 'ahbot'" in executed
     assert "character_queststatus_rewarded" in executed
+
+
+def test_validate_apply_blocks_online_character():
+    row = progression.CharacterProgressionRow(1, "ACC", "Name", 1, 1, 60, True, 0, "vanilla")
+    result = progression.validate_apply(row, "tbc", progression_limit=0, login_floor=0)
+    assert result.ok is False
+    assert result.reason == "online"
+
+
+def test_validate_apply_blocks_downgrade():
+    row = progression.CharacterProgressionRow(1, "ACC", "Name", 1, 1, 70, False, 8, "tbc")
+    result = progression.validate_apply(row, "vanilla", progression_limit=0, login_floor=0)
+    assert result.ok is False
+    assert result.reason == "downgrade"
+
+
+def test_validate_apply_allows_same_expansion_as_noop():
+    row = progression.CharacterProgressionRow(1, "ACC", "Name", 1, 1, 70, False, 9, "tbc")
+    result = progression.validate_apply(row, "tbc", progression_limit=0, login_floor=0)
+    assert result.ok is True
+    assert result.noop is True
+    assert result.target_state == 8
+
+
+def test_validate_apply_blocks_progression_limit():
+    row = progression.CharacterProgressionRow(1, "ACC", "Name", 1, 1, 60, False, 0, "vanilla")
+    result = progression.validate_apply(row, "wotlk", progression_limit=8, login_floor=0)
+    assert result.ok is False
+    assert result.reason == "progression_limit"
+
+
+def test_validate_apply_blocks_below_login_floor():
+    row = progression.CharacterProgressionRow(1, "ACC", "Deathy", 6, 1, 58, False, 0, "vanilla")
+    result = progression.validate_apply(row, "tbc", progression_limit=0, login_floor=13)
+    assert result.ok is False
+    assert result.reason == "login_floor"

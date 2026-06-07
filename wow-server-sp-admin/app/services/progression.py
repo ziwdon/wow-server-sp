@@ -106,3 +106,37 @@ def collect_characters(*, host: str, port: int, user: str, password: str) -> tup
             conn.close()
         except Exception:
             pass
+
+
+@dataclass(frozen=True)
+class ApplyValidation:
+    ok: bool
+    target_state: int
+    noop: bool = False
+    reason: str | None = None
+    message: str = ""
+
+
+def validate_apply(
+    row: CharacterProgressionRow,
+    target_expansion: str,
+    *,
+    progression_limit: int,
+    login_floor: int,
+) -> ApplyValidation:
+    target = target_state_for_expansion(target_expansion)
+    if row.online:
+        return ApplyValidation(False, target, reason="online", message="Character must log out before progression can be changed.")
+    # Targets are always expansion boundaries (0/8/13), so "already in this
+    # expansion" fully captures the no-op / no-downgrade-needed case. This MUST
+    # be checked BEFORE the downgrade guard: a mid-tier character (e.g. state 9
+    # in TBC) targeting its own expansion (8) must be a no-op, not a downgrade.
+    if expansion_from_state(row.progression) == target_expansion:
+        return ApplyValidation(True, target, noop=True, message="Character is already in that expansion.")
+    if target < row.progression:
+        return ApplyValidation(False, target, reason="downgrade", message="Moving characters backward is not supported.")
+    if progression_limit and target > progression_limit:
+        return ApplyValidation(False, target, reason="progression_limit", message="Target is above IndividualProgression.ProgressionLimit.")
+    if login_floor and target < login_floor:
+        return ApplyValidation(False, target, reason="login_floor", message="Module login rules would promote this character above the selected target.")
+    return ApplyValidation(True, target, message="Progression can be applied.")
