@@ -140,3 +140,43 @@ def validate_apply(
     if login_floor and target < login_floor:
         return ApplyValidation(False, target, reason="login_floor", message="Module login rules would promote this character above the selected target.")
     return ApplyValidation(True, target, message="Progression can be applied.")
+
+
+CLASS_DEATH_KNIGHT = 6
+RACE_DRAENEI = 11
+RACE_BLOODELF = 10
+
+
+@dataclass(frozen=True)
+class ProgressionConfig:
+    progression_limit: int = 0
+    starting_progression: int = 0
+    tbc_races_starting: int = 0
+    death_knight_starting: int = 13
+
+
+def login_floor_for_character(row: CharacterProgressionRow, cfg: ProgressionConfig) -> int:
+    floor = int(cfg.starting_progression or 0)
+    if row.race_id in (RACE_DRAENEI, RACE_BLOODELF):
+        floor = max(floor, int(cfg.tbc_races_starting or 0))
+    if row.class_id == CLASS_DEATH_KNIGHT:
+        floor = max(floor, int(cfg.death_knight_starting or 0))
+    return floor
+
+
+def config_from_resolved_keys(keys: list[dict]) -> ProgressionConfig:
+    values = {str(k.get("key")): str(k.get("effective_value", "")) for k in keys}
+
+    def int_key(name: str, default: int) -> int:
+        raw = values.get(name, "")
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    return ProgressionConfig(
+        progression_limit=int_key("IndividualProgression.ProgressionLimit", 0),
+        starting_progression=int_key("IndividualProgression.StartingProgression", 0),
+        tbc_races_starting=int_key("IndividualProgression.tbcRacesStartingProgression", 0),
+        death_knight_starting=int_key("IndividualProgression.DeathKnightStartingProgression", 13),
+    )

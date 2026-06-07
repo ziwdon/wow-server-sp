@@ -75,3 +75,21 @@ def test_validate_apply_blocks_below_login_floor():
     result = progression.validate_apply(row, "tbc", progression_limit=0, login_floor=13)
     assert result.ok is False
     assert result.reason == "login_floor"
+
+
+def test_login_floor_for_death_knight_uses_config():
+    row = progression.CharacterProgressionRow(1, "ACC", "Deathy", 6, 1, 58, False, 0, "vanilla")
+    cfg = progression.ProgressionConfig(progression_limit=0, starting_progression=0, tbc_races_starting=0, death_knight_starting=13)
+    assert progression.login_floor_for_character(row, cfg) == 13
+
+
+def test_login_floor_for_tbc_race_uses_config():
+    row = progression.CharacterProgressionRow(1, "ACC", "Draenei", 2, 11, 20, False, 0, "vanilla")
+    cfg = progression.ProgressionConfig(progression_limit=0, starting_progression=0, tbc_races_starting=8, death_knight_starting=13)
+    assert progression.login_floor_for_character(row, cfg) == 8
+
+
+def test_login_floor_uses_global_starting_progression():
+    row = progression.CharacterProgressionRow(1, "ACC", "Human", 1, 1, 20, False, 0, "vanilla")
+    cfg = progression.ProgressionConfig(progression_limit=0, starting_progression=8, tbc_races_starting=0, death_knight_starting=13)
+    assert progression.login_floor_for_character(row, cfg) == 8
