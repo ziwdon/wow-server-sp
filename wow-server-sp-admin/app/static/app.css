@@ -871,3 +871,39 @@ pre.logview {
   .players-grid > .panel { min-height: 200px; }
   .stats-toolbar { flex-wrap: wrap; }
 }
+
+/* Progression page */
+.progression-page .panel {
+  max-width: 900px;
+}
+
+.progression-form {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 620px;
+}
+
+.progression-form select {
+  width: 100%;
+  min-height: 2.4rem;
+  background: #17140f;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.banner.hidden {
+  display: none;
+}
+
+.banner.ok {
+  border-color: #4d7f52;
+  color: #bfe8c2;
+  background: rgba(50, 95, 55, 0.28);
+}
