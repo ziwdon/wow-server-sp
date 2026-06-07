@@ -3,7 +3,8 @@ import time
 from unittest.mock import patch
 
 from app.services import stats_cache
-from app.services.stats import Bucket, StatsSnapshot
+from app.services.players import PvpRankRow, RankRow
+from app.services.stats import Bucket, StackedBucket, StackedSegment, StatsSnapshot
 
 
 def _snap(fetched_at: float) -> StatsSnapshot:
@@ -12,6 +13,11 @@ def _snap(fetched_at: float) -> StatsSnapshot:
         bots_total=2500, bots_online=200, players_total=3, players_online=1,
         ahbot_total=4, ahbot_online=0,
         bots_by_class=[Bucket("Warrior", 400)],
+        bots_by_bracket_stacked=[
+            StackedBucket("1-10", 450, (StackedSegment("#88c870", 100), StackedSegment("#888070", 300), StackedSegment("#7ab0e0", 50))),
+        ],
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 80, 251),),
+        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", 99, 1200),),
     )
 
 
@@ -24,6 +30,12 @@ def test_json_round_trip(tmp_path):
     assert got is not None
     assert got.bots_total == 2500
     assert got.bots_by_class[0] == Bucket("Warrior", 400)
+    assert got.bots_by_bracket_stacked[0].total == 450
+    assert got.bots_by_bracket_stacked[0].segments[1].count == 300
+    assert got.top_pve[0].name == "Sariel"
+    assert got.top_pve[0].avg_ilvl == 251
+    assert got.top_pvp[0].name == "Rndslayer"
+    assert got.top_pvp[0].honor_kills == 99
     assert got.fetched_at == 123.0
 
 

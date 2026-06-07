@@ -54,6 +54,52 @@
   </div>
 
   <div class="stats-grid">
+    <div class="panel"><div class="panel-header"><span class="panel-title">Top PvE</span></div>
+      <div class="panel-body">
+        {% if snap.top_pve %}
+        <div class="player-table">
+          <div class="player-row player-row--head player-row--rank">
+            <span>#</span><span>Character</span><span>Class</span>
+            <span>Race</span><span class="num">Level</span><span class="num">iLvl</span>
+          </div>
+          {% for r in snap.top_pve %}
+          <div class="player-row player-row--rank">
+            <span>{{ r.rank }}</span>
+            <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
+            <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
+            <span>{{ r.race_name }}</span>
+            <span class="num">{{ r.level }}</span>
+            <span class="num">{{ r.avg_ilvl if r.avg_ilvl is not none else "—" }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty-state">No characters.</p>
+        {% endif %}
+      </div></div>
+    <div class="panel"><div class="panel-header"><span class="panel-title">Top PvP</span></div>
+      <div class="panel-body">
+        {% if snap.top_pvp %}
+        <div class="player-table">
+          <div class="player-row player-row--head player-row--rank-pvp">
+            <span>#</span><span>Character</span><span>Class</span>
+            <span>Race</span><span class="num">Kills</span><span class="num">Honor</span>
+          </div>
+          {% for r in snap.top_pvp %}
+          <div class="player-row player-row--rank-pvp">
+            <span>{{ r.rank }}</span>
+            <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
+            <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
+            <span>{{ r.race_name }}</span>
+            <span class="num">{{ r.honor_kills }}</span>
+            <span class="num">{{ r.honor }}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty-state">No characters.</p>
+        {% endif %}
+      </div></div>
     <div class="panel"><div class="panel-header"><span class="panel-title">Online now</span></div>
       <div class="panel-body">
         {{ bars("By level", snap.online_by_bracket) }}

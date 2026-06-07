@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import mysql.connector
 
 from app.services import wow_reference as wr
+from app.services.players import PvpRankRow, RankRow, pvp_rank_rows, rank_rows
 
 _RNDBOT_ACCOUNT_TYPE_RNDBOT   = 1
 _RNDBOT_ACCOUNT_TYPE_ADDCLASS = 2
@@ -81,6 +82,8 @@ class StatsSnapshot:
     faction_bots: list[Bucket] = field(default_factory=list)
     faction_players: list[Bucket] = field(default_factory=list)
     bots_pool_breakdown: list[Bucket] = field(default_factory=list)
+    top_pve: tuple[RankRow, ...] = ()
+    top_pvp: tuple[PvpRankRow, ...] = ()
 
 
 def bracket_label(level: int) -> str:
@@ -178,6 +181,10 @@ def _fill_all_classes(buckets: list[Bucket]) -> list[Bucket]:
 _BOT = "a.username LIKE 'RNDBOT%%'"
 _AHBOT = "a.username = 'ahbot'"
 _PLAYER = "a.username NOT LIKE 'RNDBOT%%' AND a.username <> 'ahbot'"
+_RANKABLE = (
+    f"(({_PLAYER}) OR "
+    f"({_BOT} AND c.online = 1 AND pat.account_type = {_RNDBOT_ACCOUNT_TYPE_RNDBOT}))"
+)
 _JOIN = (
     "FROM acore_characters.characters c "
     "JOIN acore_auth.account a ON a.id = c.account"
@@ -243,6 +250,33 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
             )
             pool_rows = cur.fetchall()
 
+            cur.execute(
+                "SELECT c.name, c.class, c.race, c.level, ROUND(AVG(it.ItemLevel)) AS avg_ilvl "
+                "FROM acore_characters.characters c "
+                "JOIN acore_auth.account a ON a.id = c.account "
+                "LEFT JOIN acore_playerbots.playerbots_account_type pat ON pat.account_id = c.account "
+                "LEFT JOIN acore_characters.character_inventory ci "
+                "  ON ci.guid = c.guid AND ci.bag = 0 AND ci.slot < 19 "
+                "LEFT JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
+                "LEFT JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
+                f"WHERE {_RANKABLE} "
+                "GROUP BY c.guid, c.name, c.class, c.race, c.level "
+                "ORDER BY c.level DESC, avg_ilvl DESC, c.name ASC "
+                "LIMIT 5"
+            )
+            top_pve_rows = cur.fetchall()
+
+            cur.execute(
+                "SELECT c.name, c.class, c.race, c.totalKills, c.totalHonorPoints "
+                "FROM acore_characters.characters c "
+                "JOIN acore_auth.account a ON a.id = c.account "
+                "LEFT JOIN acore_playerbots.playerbots_account_type pat ON pat.account_id = c.account "
+                f"WHERE {_RANKABLE} "
+                "ORDER BY c.totalKills DESC, c.totalHonorPoints DESC, c.name ASC "
+                "LIMIT 5"
+            )
+            top_pvp_rows = cur.fetchall()
+
         bots_active = bots_idle = bots_summon_reserve = 0
         for acct_type, online_n, offline_n in pool_rows:
             if acct_type == _RNDBOT_ACCOUNT_TYPE_RNDBOT:
@@ -290,6 +324,8 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
             faction_bots=faction_from_race_rows(fac_bots, color_fn=wr.faction_color),
             faction_players=faction_from_race_rows(fac_pl, color_fn=wr.faction_color),
             bots_pool_breakdown=bots_pool_breakdown,
+            top_pve=rank_rows(top_pve_rows),
+            top_pvp=pvp_rank_rows(top_pvp_rows),
         )
     finally:
         try:

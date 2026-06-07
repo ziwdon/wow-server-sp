@@ -93,6 +93,14 @@ def test_collect_stats_builds_snapshot(mock_connect):
         [(1, 1200), (2, 1200)],  # faction bots
         [(1, 3), (2, 0)],  # faction players
         [(1, 1500, 170), (2, 0, 500)],  # pool breakdown (account_type, online, offline)
+        [
+            ("Sariel", 11, 4, 80, 251),
+            ("Rndchamp", 1, 1, 80, 232),
+        ],  # top PvE
+        [
+            ("Rndslayer", 3, 2, 99, 1200),
+            ("Pitocas", 3, 3, 42, 1500),
+        ],  # top PvP
     ]
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cur
@@ -115,3 +123,20 @@ def test_collect_stats_builds_snapshot(mock_connect):
     assert segs["#88c870"] == 800   # active
     assert segs["#888070"] == 200   # idle
     assert segs["#7ab0e0"] == 0     # summon (none in mock)
+    assert [r.name for r in snap.top_pve] == ["Sariel", "Rndchamp"]
+    assert snap.top_pve[0].rank == 1
+    assert snap.top_pve[0].avg_ilvl == 251
+    assert snap.top_pve[1].class_name == "Warrior"
+    assert [r.name for r in snap.top_pvp] == ["Rndslayer", "Pitocas"]
+    assert snap.top_pvp[0].rank == 1
+    assert snap.top_pvp[0].honor_kills == 99
+    assert snap.top_pvp[1].honor == 1500
+
+    executed_sql = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "pat.account_type = 1" in executed_sql
+    assert "c.online = 1" in executed_sql
+    assert "ORDER BY c.level DESC, avg_ilvl DESC, c.name ASC LIMIT 5" in executed_sql
+    assert (
+        "ORDER BY c.totalKills DESC, c.totalHonorPoints DESC, c.name ASC LIMIT 5"
+        in executed_sql
+    )
