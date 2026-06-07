@@ -93,3 +93,16 @@ def test_login_floor_uses_global_starting_progression():
     row = progression.CharacterProgressionRow(1, "ACC", "Human", 1, 1, 20, False, 0, "vanilla")
     cfg = progression.ProgressionConfig(progression_limit=0, starting_progression=8, tbc_races_starting=0, death_knight_starting=13)
     assert progression.login_floor_for_character(row, cfg) == 8
+
+
+def test_config_from_resolved_keys_parses_progression_values_and_defaults():
+    cfg = progression.config_from_resolved_keys([
+        {"key": "IndividualProgression.ProgressionLimit", "effective_value": "13"},
+        {"key": "IndividualProgression.StartingProgression", "effective_value": "8"},
+        {"key": "IndividualProgression.tbcRacesStartingProgression", "effective_value": "bad"},
+    ])
+
+    assert cfg.progression_limit == 13
+    assert cfg.starting_progression == 8
+    assert cfg.tbc_races_starting == 0
+    assert cfg.death_knight_starting == 13
