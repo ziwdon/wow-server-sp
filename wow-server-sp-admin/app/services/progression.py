@@ -194,13 +194,15 @@ class ApplyProgressionResult:
 def _fetch_character(cur, guid: int) -> CharacterProgressionRow | None:
     cur.execute(
         "SELECT c.guid, a.username, c.name, c.class, c.race, c.level, c.online, "
-        "COALESCE(MAX(CASE WHEN q.quest BETWEEN 66001 AND 66013 AND q.active=1 "
-        "THEN q.quest - 66000 END), 0) AS progression_state "
+        "COALESCE(("
+        "SELECT MAX(q.quest - 66000) "
+        "FROM acore_characters.character_queststatus_rewarded q "
+        "WHERE q.guid = c.guid AND q.quest BETWEEN 66001 AND 66013 AND q.active=1"
+        "), 0) AS progression_state "
         "FROM acore_characters.characters c "
         "JOIN acore_auth.account a ON a.id = c.account "
-        "LEFT JOIN acore_characters.character_queststatus_rewarded q ON q.guid = c.guid "
         f"WHERE {REAL_ACCOUNT_SQL} AND c.guid = %s "
-        "GROUP BY c.guid, a.username, c.name, c.class, c.race, c.level, c.online",
+        "FOR UPDATE",
         (guid,),
     )
     row = cur.fetchone()
@@ -225,8 +227,8 @@ def _write_audit_snapshot(
     existing_quests: set[int],
 ) -> Path:
     snapshots_dir.mkdir(parents=True, exist_ok=True)
-    stamp = int(time.time())
-    path = snapshots_dir / f"progression-{row.guid}-{stamp}.json"
+    created_unix = int(time.time())
+    path = snapshots_dir / f"progression-{row.guid}-{time.time_ns()}.json"
     payload = {
         "format_version": 1,
         "guid": row.guid,
@@ -239,9 +241,10 @@ def _write_audit_snapshot(
         "target_expansion": target_expansion,
         "target_state": target_state,
         "existing_progression_quests": sorted(existing_quests),
-        "created_unix": stamp,
+        "created_unix": created_unix,
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with path.open("x", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return path
 
 
@@ -306,12 +309,12 @@ def apply_progression(
                         (guid, quest),
                     )
 
-            conn.commit()
-
-            with conn.cursor() as verify_cur:
-                effective = _verify_effective_state(verify_cur, guid)
+            effective = _verify_effective_state(cur, guid)
             if effective < target_state:
-                return ApplyProgressionResult("error", target_state, effective, reason="verify_failed", message="Progression write committed but verification did not reach target.")
+                conn.rollback()
+                return ApplyProgressionResult("error", target_state, effective, reason="verify_failed", message="Progression verification did not reach target; no changes were committed.")
+
+            conn.commit()
             return ApplyProgressionResult("applied", target_state, effective, message="Progression updated.")
     except Exception:
         try:

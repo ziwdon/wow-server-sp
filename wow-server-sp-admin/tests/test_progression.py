@@ -136,6 +136,7 @@ def test_apply_progression_inserts_missing_rows_and_deletes_nothing(mock_connect
     assert conn.commit.called
     executed = " ".join(call.args[0] for call in cur.execute.call_args_list)
     assert "DELETE" not in executed.upper()
+    assert "FOR UPDATE" in executed.upper()
     inserted_params = [call.args[1] for call in cur.execute.call_args_list if "INSERT IGNORE" in call.args[0]]
     assert inserted_params == [(101, 66003), (101, 66004), (101, 66005), (101, 66006), (101, 66007), (101, 66008)]
     assert list(tmp_path.glob("progression-*.json"))
@@ -164,3 +165,53 @@ def test_apply_progression_rejects_online_without_write(mock_connect, tmp_path):
     assert not conn.commit.called
     executed = " ".join(call.args[0] for call in cur.execute.call_args_list)
     assert "INSERT IGNORE" not in executed
+
+
+@patch("app.services.progression.mysql.connector.connect")
+def test_apply_progression_rolls_back_if_verification_fails(mock_connect, tmp_path):
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        (101, "CARLOS", "Sariel", 11, 4, 60, 0, 0),
+        (7,),
+    ]
+    cur.fetchall.return_value = []
+    conn = mock_connect.return_value
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    result = progression.apply_progression(
+        guid=101,
+        target_expansion="tbc",
+        config=progression.ProgressionConfig(),
+        snapshots_dir=tmp_path,
+        host="h",
+        port=3306,
+        user="u",
+        password="p",
+    )
+
+    assert result.status == "error"
+    assert result.reason == "verify_failed"
+    assert not conn.commit.called
+    assert conn.rollback.called
+
+
+def test_write_audit_snapshot_does_not_overwrite_same_second(tmp_path):
+    row = progression.CharacterProgressionRow(101, "ACC", "Name", 1, 1, 60, False, 0, "vanilla")
+    first = progression._write_audit_snapshot(
+        snapshots_dir=tmp_path,
+        row=row,
+        target_expansion="tbc",
+        target_state=8,
+        existing_quests=set(),
+    )
+    second = progression._write_audit_snapshot(
+        snapshots_dir=tmp_path,
+        row=row,
+        target_expansion="wotlk",
+        target_state=13,
+        existing_quests=set(),
+    )
+
+    assert first != second
+    assert first.exists()
+    assert second.exists()
