@@ -74,6 +74,29 @@ The Settings page allows browsing and modifying AzerothCore configuration via `A
 ### Rollback
 If something breaks after Apply, use the Rollback button to restore the most recent snapshot.
 
+## Progression Page
+
+The Progression page (`/progression`) lets you advance individual characters through expansion tiers (Classic → TBC → WotLK) without GM commands or direct database access.
+
+### How to use it
+1. Select an account from the dropdown
+2. Pick a character from the scrollable list (sorted by level high → low, then name)
+3. Click the target expansion icon — grayed-out tiles are either the current expansion or a downgrade and cannot be selected
+4. A confirmation dialog summarises the action and its caveats; click **Yes, proceed**
+5. The admin inserts the missing `character_queststatus_rewarded` rows and returns the result inline
+
+### Icon states
+| State | Appearance | Meaning |
+|-------|-----------|---------|
+| Current | Dimmed, no click | The character's existing expansion boundary |
+| Available | Semi-opaque, clickable | A valid upward target |
+| Downgrade | Fully grayed, no click | Below the character's current progression state |
+
+### Constraints
+- The character must be **offline** — the page warns and blocks Apply for online characters
+- Progression is **forward-only** — the service rejects downgrade requests server-side as well as in the UI
+- The internal key `"vanilla"` is displayed as **"Classic"** throughout the UI; the database and service always use `"vanilla"`
+
 ## Backups & Restore
 
 The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first.

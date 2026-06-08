@@ -65,21 +65,34 @@ For database inspection, check
 `66000` and `66018`. Do not use `character_settings` for this module's current
 progression state.
 
-## Setting Player Progression (GM Command)
+## Setting Player Progression (Admin UI — preferred)
 
-To manually set a player's progression tier (useful for testing or catching up):
-```
-# In-game or console (check exact syntax in docs/wikis/azerothcore-wiki/docs/gm-commands.md
-# or the mod-individual-progression source for the GM command):
-.playerbot setprogression <tier>     # If playerbots-integrated command exists
+The admin web app's **Progression page** (`http://<tailscale-ip>:<port>/progression`) is the recommended way to advance a character's expansion tier:
+
+1. Open the Progression page
+2. Select the account, then select the character from the list
+3. Click the target expansion icon (Classic / TBC / WotLK) — downgrade tiles are grayed and blocked
+4. Confirm in the dialog
+
+The character must be offline first. Progression is forward-only.
+Under the hood the admin inserts the missing `character_queststatus_rewarded` rows for quest IDs `66001` through `66001 + target_state - 1` — identical to what the module would write after legitimate boss kills.
+
+## Setting Player Progression (Direct DB — fallback)
+
+If the admin app is unavailable, insert the hidden rewarded quest rows directly:
+
+```sql
+-- Example: advance character with guid 5 to TBC boundary (state 8)
+-- Insert quests 66001–66008 that are not already present
+INSERT IGNORE INTO acore_characters.character_queststatus_rewarded (guid, quest, active)
+SELECT 5, 66000 + seq, 1
+FROM (
+  SELECT 1 AS seq UNION SELECT 2 UNION SELECT 3 UNION SELECT 4
+  UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8
+) AS states;
 ```
 
-> **Note:** The exact GM command for setting progression is module-specific. Check the module's
-> source code or ask in the mod-individual-progression GitHub for the current command syntax.
-> For forward-only offline admin promotion, prefer adding the missing hidden
-> rewarded quest rows in `character_queststatus_rewarded` and deleting nothing.
-> Do not use the old `character_settings` fallback; it is not how this installed
-> module stores progression.
+Always INSERT IGNORE (never delete existing rows) — removing rows can confuse the module's `GetPlayerProgressionFromQuests()` scan. Do not use `character_settings` for progression state; this installed version of the module ignores that column.
 
 ## Key Config Options (individualProgression.conf)
 
