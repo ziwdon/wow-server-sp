@@ -135,7 +135,8 @@
     updateApply();
     updateIconStates();
 
-    const filtered = chars.filter(function(c) { return c.account === account; });
+    const filtered = chars.filter(function(c) { return c.account === account; })
+      .sort(function(a, b) { return b.level - a.level || a.name.localeCompare(b.name); });
     if (!filtered.length) {
       charList.innerHTML = '<div class="char-list-hint">No characters</div>';
       return;

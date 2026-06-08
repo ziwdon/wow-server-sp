@@ -877,7 +877,7 @@ pre.logview {
   display: grid;
   grid-template-columns: 480px 1fr;
   gap: 2rem;
-  align-items: start;
+  align-items: stretch;
 }
 
 .prog-layout .left-col {
@@ -935,8 +935,8 @@ pre.logview {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 1rem;
-  padding-top: 0.25rem;
 }
 
 .exp-picker-horiz {
