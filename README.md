@@ -16,10 +16,12 @@ Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that 
 - [`mod-individual-progression`](https://github.com/ZhengPeiRu21/mod-individual-progression) — per-character expansion gating (Vanilla → TBC → WotLK)
 
 **Web admin** (`wow-server-sp-admin/`)
-- Live stats: server status, players online, active bots, uptime
-- Start / Stop / Restart with a live SSE progress log
-- Settings editor — browse, edit, and apply any server config with live apply + rollback
-- Log viewer and manual backup trigger
+- Dashboard — live server status, player/bot counts, uptime, log viewer, and Start / Stop / Restart with a live SSE progress log
+- Players — who is online, with per-character stats
+- Stats — top characters by level, kills, and playtime
+- Settings — browse, edit, and apply any of the ~1 800 server config keys; live apply + rollback
+- Backups — trigger manual backups, browse archives, and restore from any snapshot
+- Progression — per-character expansion control (Classic → TBC → WotLK) with icon picker and confirmation flow
 
 **AI assistant skill** (`skills/wow-server-sp-gamemaster/`)
 - Installable skill that gives an AI assistant deep knowledge of this stack
