@@ -79,6 +79,32 @@ def test_stats_page_renders_and_nav_between_dashboard_and_settings():
     assert body.index('href="/"') < body.index('href="/stats"')
 
 
+def test_progression_page_renders_and_nav_between_stats_and_settings():
+    client = TestClient(app)
+    resp = client.get("/progression")
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'id="progression-data"' in body
+    assert body.index('href="/stats"') < body.index('href="/progression"') < body.index('href="/settings"')
+    assert 'class="nav-link active" href="/progression"' in body
+
+
+def test_api_progression_apply_uses_service():
+    from app.services.progression import ApplyProgressionResult, ProgressionConfig
+
+    with patch("app.main.progression_svc.config_from_resolved_keys", return_value=ProgressionConfig()), \
+         patch("app.main.list_keys_resolved", return_value=[]), \
+         patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
+         patch("app.main.progression_svc.apply_progression", return_value=ApplyProgressionResult("applied", 8, 8)) as mock_apply:
+        client = TestClient(app)
+        resp = client.post("/api/progression/apply", json={"guid": 101, "target_expansion": "tbc"})
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "applied"
+    assert mock_apply.call_args.kwargs["guid"] == 101
+    assert mock_apply.call_args.kwargs["target_expansion"] == "tbc"
+
+
 def test_api_stats_refresh_returns_immediately():
     with patch("app.main.stats_refresher.refresh_async", return_value=True) as mock_ref, \
          patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}):

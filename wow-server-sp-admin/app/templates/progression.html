@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="dashboard-content progression-page">
+  <div id="progression-data"
+       hx-get="/api/progression/characters"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading progression data...</p>
+  </div>
+</div>
+{% endblock %}
