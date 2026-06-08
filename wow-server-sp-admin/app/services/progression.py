@@ -23,9 +23,14 @@ TARGET_STATES = {
     "wotlk": 13,
 }
 EXPANSION_LABELS = {
-    "vanilla": "Vanilla",
+    "vanilla": "Classic",
     "tbc": "TBC",
     "wotlk": "WotLK",
+}
+EXPANSION_ICONS = {
+    "vanilla": "classic",
+    "tbc": "tbc",
+    "wotlk": "wotlk",
 }
 REAL_ACCOUNT_SQL = "a.username NOT LIKE 'RNDBOT%%' AND a.username <> 'ahbot'"
 

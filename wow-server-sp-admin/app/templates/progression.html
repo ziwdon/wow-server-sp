@@ -1,20 +1,10 @@
 {% extends "base.html" %}
 {% block main %}
 <div class="dashboard-content progression-page">
-  <div class="stats-toolbar">
-    <button class="btn btn-gold" id="refresh-progression-btn"
-            hx-get="/api/progression/characters"
-            hx-target="#progression-data"
-            hx-swap="innerHTML"
-            hx-indicator="#progression-spinner">Refresh</button>
-    <span id="progression-spinner" class="stats-spinner htmx-indicator">refreshing...</span>
-  </div>
-
   <div id="progression-data"
        hx-get="/api/progression/characters"
        hx-trigger="load"
-       hx-swap="innerHTML"
-       hx-indicator="#progression-spinner">
+       hx-swap="innerHTML">
     <p class="loading">Loading progression data...</p>
   </div>
 </div>

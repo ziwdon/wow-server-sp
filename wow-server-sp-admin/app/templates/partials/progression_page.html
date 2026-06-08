@@ -4,35 +4,46 @@
   {% endif %}
 
   {% if rows %}
+  <script type="application/json" id="progression-char-data">{{ rows_json | safe }}</script>
+
   <div class="panel">
     <div class="panel-header"><span class="panel-title">Character progression</span></div>
     <div class="panel-body">
-      <div class="progression-form">
-        <label class="field-label" for="progression-character">Character</label>
-        <select id="progression-character">
-          {% for c in rows %}
-          <option value="{{ c.guid }}"
-                  data-online="{{ '1' if c.online else '0' }}"
-                  data-expansion="{{ c.expansion }}"
-                  data-progression="{{ c.progression }}"
-                  data-name="{{ c.name }}"
-                  data-account="{{ c.account }}">
-            {{ c.account }} / {{ c.name }} - level {{ c.level }} - {{ labels[c.expansion] }}{% if c.online %} - online{% endif %}
-          </option>
-          {% endfor %}
-        </select>
+      <div class="prog-layout">
 
-        <label class="field-label" for="progression-target">Target expansion</label>
-        <select id="progression-target">
-          <option value="vanilla">Vanilla</option>
-          <option value="tbc">TBC</option>
-          <option value="wotlk">WotLK</option>
-        </select>
+        <!-- Left column: account + character list + apply -->
+        <div class="left-col">
+          <div>
+            <label class="field-label" for="prog-account">Account</label>
+            <select id="prog-account" class="prog-account-select">
+              <option value="">— select account —</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label">Character</label>
+            <div class="char-list-box" id="prog-char-list">
+              <div class="char-list-hint">Select an account above</div>
+            </div>
+          </div>
+          <div id="prog-warning" class="banner warning hidden"></div>
+          <div id="prog-result" class="banner hidden"></div>
+          <button class="btn btn-apply prog-apply" id="prog-apply" disabled>Apply progression</button>
+        </div>
 
-        <div id="progression-warning" class="banner warning hidden"></div>
-        <div id="progression-result" class="banner hidden"></div>
+        <!-- Right column: expansion icon picker -->
+        <div class="right-col">
+          <label class="field-label">Target expansion</label>
+          <div class="exp-picker-horiz" id="exp-picker">
+            {% for exp_key in ['vanilla', 'tbc', 'wotlk'] %}
+            <div class="exp-tile state-downgrade" data-expansion="{{ exp_key }}" id="exp-tile-{{ exp_key }}">
+              <img src="/static/assets/{{ icons[exp_key] }}.png" alt="{{ labels[exp_key] }}">
+              <span class="exp-label">{{ labels[exp_key] }}</span>
+              <span class="exp-badge" id="exp-badge-{{ exp_key }}"></span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
 
-        <button class="btn btn-apply" id="progression-apply">Apply progression</button>
       </div>
     </div>
   </div>
@@ -43,71 +54,154 @@
 
 <script>
 (function() {
-  const order = {vanilla: 0, tbc: 8, wotlk: 13};
-  const character = document.getElementById('progression-character');
-  const target = document.getElementById('progression-target');
-  const apply = document.getElementById('progression-apply');
-  const warning = document.getElementById('progression-warning');
-  const result = document.getElementById('progression-result');
-  if (!character || !target || !apply || !warning || !result) return;
+  const dataEl = document.getElementById('progression-char-data');
+  if (!dataEl) return;
+  const chars = JSON.parse(dataEl.textContent || '[]');
+  const expOrder = {vanilla: 0, tbc: 8, wotlk: 13};
+  const expKeys = ['vanilla', 'tbc', 'wotlk'];
+  const labels = {{ labels | tojson }};
+  let selectedChar = null;
+  let selectedExpansion = null;
 
-  function showWarning(text) {
-    warning.textContent = text;
-    warning.classList.remove('hidden');
-  }
+  const accountSel = document.getElementById('prog-account');
+  const charList = document.getElementById('prog-char-list');
+  const applyBtn = document.getElementById('prog-apply');
+  const warningEl = document.getElementById('prog-warning');
+  const resultEl = document.getElementById('prog-result');
+  if (!accountSel || !charList || !applyBtn) return;
 
-  function hideWarning() {
-    warning.textContent = '';
-    warning.classList.add('hidden');
-  }
-
-  function selectedOption() {
-    return character.options[character.selectedIndex];
-  }
-
-  function refreshState() {
-    hideWarning();
-    result.classList.add('hidden');
-    const opt = selectedOption();
-    const isOnline = opt.dataset.online === '1';
-    const current = Number(opt.dataset.progression || '0');
-    const desired = order[target.value];
-    let disabled = false;
-
-    if (isOnline) {
-      showWarning('This character is online. Log out before changing progression.');
-      disabled = true;
-    } else if (opt.dataset.expansion === target.value) {
-      // Same expansion as current (targets are boundaries): no-op. Must be
-      // checked before the downgrade branch so a mid-tier character selecting
-      // its own expansion is not mislabelled as a downgrade.
-      showWarning('This character is already in the selected expansion.');
-      disabled = true;
-    } else if (desired < current) {
-      showWarning('Moving characters backward is intentionally blocked.');
-      disabled = true;
-    }
-    apply.disabled = disabled;
-  }
-
-  character.addEventListener('change', refreshState);
-  target.addEventListener('change', refreshState);
-  apply.addEventListener('click', async function() {
-    const opt = selectedOption();
-    const name = opt.dataset.account + ' / ' + opt.dataset.name;
-    if (!confirm('Apply progression change to ' + name + '? Level will not change.')) return;
-    apply.disabled = true;
-    const response = await fetch('/api/progression/apply', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({guid: Number(opt.value), target_expansion: target.value})
-    });
-    const data = await response.json();
-    result.className = 'banner ' + (response.ok && data.status === 'applied' ? 'ok' : 'error');
-    result.textContent = data.message || data.detail || data.status || 'Unknown result';
-    result.classList.remove('hidden');
-    await htmx.ajax('GET', '/api/progression/characters', {target: '#progression-data', swap: 'innerHTML'});
+  // Populate account dropdown from unique accounts
+  const accounts = [...new Set(chars.map(c => c.account))].sort();
+  accounts.forEach(function(a) {
+    const opt = document.createElement('option');
+    opt.value = a;
+    opt.textContent = a;
+    accountSel.appendChild(opt);
   });
-  refreshState();
+
+  function setWarning(text) {
+    warningEl.textContent = text;
+    warningEl.classList.toggle('hidden', !text);
+  }
+
+  function setResult(text, ok) {
+    if (!text) { resultEl.className = 'banner hidden'; return; }
+    resultEl.textContent = text;
+    resultEl.className = 'banner ' + (ok ? 'ok' : 'error');
+  }
+
+  function updateApply() {
+    const canApply = selectedChar
+      && selectedExpansion
+      && !selectedChar.online
+      && selectedExpansion !== selectedChar.expansion;
+    applyBtn.disabled = !canApply;
+  }
+
+  function updateIconStates() {
+    expKeys.forEach(function(key) {
+      const tile = document.getElementById('exp-tile-' + key);
+      const badge = document.getElementById('exp-badge-' + key);
+      if (!tile || !badge) return;
+      badge.textContent = '';
+      tile.onclick = null;
+
+      if (!selectedChar) {
+        tile.className = 'exp-tile state-downgrade';
+        return;
+      }
+
+      if (key === selectedChar.expansion) {
+        tile.className = 'exp-tile state-current';
+        badge.textContent = 'current';
+      } else if (key === selectedExpansion) {
+        tile.className = 'exp-tile state-selected';
+        tile.onclick = function() { pickExpansion(key); };
+      } else if (expOrder[key] < selectedChar.progression) {
+        tile.className = 'exp-tile state-downgrade';
+      } else {
+        tile.className = 'exp-tile state-available';
+        tile.onclick = function() { pickExpansion(key); };
+      }
+    });
+  }
+
+  function renderChars(account) {
+    charList.innerHTML = '';
+    selectedChar = null;
+    selectedExpansion = null;
+    setWarning('');
+    setResult('');
+    updateApply();
+    updateIconStates();
+
+    const filtered = chars.filter(function(c) { return c.account === account; });
+    if (!filtered.length) {
+      charList.innerHTML = '<div class="char-list-hint">No characters</div>';
+      return;
+    }
+    filtered.forEach(function(c) {
+      const row = document.createElement('div');
+      row.className = 'char-row' + (c.online ? ' online' : '');
+      row.dataset.guid = String(c.guid);
+      const expLabel = labels[c.expansion] || c.expansion;
+      const onlineBadge = c.online ? ' · <span style="color:#c97f7f">online</span>' : '';
+      row.innerHTML = '<span class="char-row-name">' + c.name + '</span>'
+        + '<span class="char-row-meta">Lvl ' + c.level + ' · ' + expLabel + onlineBadge + '</span>';
+      row.addEventListener('click', function() { selectChar(c, row); });
+      charList.appendChild(row);
+    });
+  }
+
+  function selectChar(c, rowEl) {
+    selectedChar = c;
+    selectedExpansion = null;
+    setResult('');
+    charList.querySelectorAll('.char-row').forEach(function(r) { r.classList.remove('selected'); });
+    rowEl.classList.add('selected');
+    setWarning(c.online ? 'This character is online. Log out before changing progression.' : '');
+    updateIconStates();
+    updateApply();
+  }
+
+  function pickExpansion(key) {
+    if (!selectedChar) return;
+    const tile = document.getElementById('exp-tile-' + key);
+    if (!tile) return;
+    const cls = tile.className;
+    if (cls.indexOf('state-current') !== -1 || cls.indexOf('state-downgrade') !== -1) return;
+    selectedExpansion = key;
+    updateIconStates();
+    updateApply();
+  }
+
+  accountSel.addEventListener('change', function() {
+    if (accountSel.value) renderChars(accountSel.value);
+  });
+
+  applyBtn.addEventListener('click', async function() {
+    if (!selectedChar || !selectedExpansion) return;
+    const expLabel = labels[selectedExpansion] || selectedExpansion;
+    if (!confirm('Apply ' + expLabel + ' progression to ' + selectedChar.name + '? Level will not change.')) return;
+    applyBtn.disabled = true;
+    try {
+      const response = await fetch('/api/progression/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({guid: selectedChar.guid, target_expansion: selectedExpansion})
+      });
+      const data = await response.json();
+      const ok = response.ok && data.status === 'applied';
+      setResult(data.message || data.detail || data.status || 'Unknown result', ok);
+      if (ok) {
+        await htmx.ajax('GET', '/api/progression/characters', {target: '#progression-data', swap: 'innerHTML'});
+      } else {
+        updateApply();
+      }
+    } catch(e) {
+      setResult('Request failed: ' + e.message, false);
+      updateApply();
+    }
+  });
 })();
 </script>

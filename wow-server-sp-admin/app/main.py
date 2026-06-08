@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 import datetime as dt
+import json
 import re
 
 from app.services import backups as backups_svc
@@ -604,14 +605,22 @@ async def api_progression_characters(request: Request) -> HTMLResponse:
         rows = progression_svc.collect_characters(**db_credentials())
     except Exception as e:  # noqa: BLE001
         err = str(e)
+    rows_json = json.dumps([
+        {"guid": r.guid, "account": r.account, "name": r.name,
+         "level": r.level, "online": r.online, "progression": r.progression,
+         "expansion": r.expansion}
+        for r in rows
+    ])
     return templates.TemplateResponse(
         request,
         "partials/progression_page.html",
         {
             "rows": rows,
+            "rows_json": rows_json,
             "config": cfg,
             "error": err,
             "labels": progression_svc.EXPANSION_LABELS,
+            "icons": progression_svc.EXPANSION_ICONS,
         },
     )
 
