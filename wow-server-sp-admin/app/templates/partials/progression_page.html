@@ -47,6 +47,22 @@
       </div>
     </div>
   </div>
+  <!-- Confirmation modal -->
+  <div id="prog-confirm-overlay" class="prog-confirm-overlay hidden" role="dialog" aria-modal="true">
+    <div class="prog-confirm-dialog">
+      <h3 class="prog-confirm-title">Confirm Progression Change</h3>
+      <p class="prog-confirm-body" id="prog-confirm-body"></p>
+      <ul class="prog-confirm-notes">
+        <li>This action is irreversible.</li>
+        <li>Existing max level restrictions remain in place.</li>
+        <li>Your character's level will not be boosted.</li>
+      </ul>
+      <div class="prog-confirm-actions">
+        <button class="btn btn-muted prog-confirm-cancel-btn" id="prog-confirm-cancel">Cancel</button>
+        <button class="btn btn-apply prog-confirm-yes-btn" id="prog-confirm-yes">Yes, proceed</button>
+      </div>
+    </div>
+  </div>
   {% else %}
   <p class="empty-state">No real-player characters found.</p>
   {% endif %}
@@ -135,7 +151,8 @@
     updateApply();
     updateIconStates();
 
-    const filtered = chars.filter(function(c) { return c.account === account; });
+    const filtered = chars.filter(function(c) { return c.account === account; })
+      .sort(function(a, b) { return b.level - a.level || a.name.localeCompare(b.name); });
     if (!filtered.length) {
       charList.innerHTML = '<div class="char-list-hint">No characters</div>';
       return;
@@ -175,6 +192,40 @@
     updateApply();
   }
 
+  function showConfirmModal(charName, expLabel) {
+    return new Promise(function(resolve) {
+      const overlay = document.getElementById('prog-confirm-overlay');
+      const body = document.getElementById('prog-confirm-body');
+      const yesBtn = document.getElementById('prog-confirm-yes');
+      const cancelBtn = document.getElementById('prog-confirm-cancel');
+      if (!overlay || !body || !yesBtn || !cancelBtn) { resolve(true); return; }
+
+      body.textContent = 'Applying ' + expLabel + ' progression to ' + charName
+        + ' will progress this character toward that expansion and unlock previously restricted content.';
+
+      overlay.classList.remove('hidden');
+      yesBtn.focus();
+
+      function cleanup(result) {
+        overlay.classList.add('hidden');
+        yesBtn.removeEventListener('click', onYes);
+        cancelBtn.removeEventListener('click', onCancel);
+        overlay.removeEventListener('click', onOverlay);
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      }
+      function onYes() { cleanup(true); }
+      function onCancel() { cleanup(false); }
+      function onOverlay(e) { if (e.target === overlay) cleanup(false); }
+      function onKey(e) { if (e.key === 'Escape') cleanup(false); }
+
+      yesBtn.addEventListener('click', onYes);
+      cancelBtn.addEventListener('click', onCancel);
+      overlay.addEventListener('click', onOverlay);
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
   accountSel.addEventListener('change', function() {
     if (accountSel.value) renderChars(accountSel.value);
   });
@@ -182,7 +233,8 @@
   applyBtn.addEventListener('click', async function() {
     if (!selectedChar || !selectedExpansion) return;
     const expLabel = labels[selectedExpansion] || selectedExpansion;
-    if (!confirm('Apply ' + expLabel + ' progression to ' + selectedChar.name + '? Level will not change.')) return;
+    const confirmed = await showConfirmModal(selectedChar.name, expLabel);
+    if (!confirmed) return;
     applyBtn.disabled = true;
     try {
       const response = await fetch('/api/progression/apply', {
