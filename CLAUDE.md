@@ -105,6 +105,7 @@ Note: there is no `pause-1` phase. The first manual pause (Tailscale auth) runs 
 | `/opt/stacks/azerothcore-admin/` | Admin stack root (separate from AC's so admin can manage AC without being affected by AC restarts) |
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime: `TAILSCALE_IP`, `ADMIN_PORT`, `HOST_UID`, `HOST_GID`, `DOCKER_GID` (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<unix-ts>` snapshots written before every Apply/Rollback (mounted into the admin container as `/admin-snapshots/`). Lives here, NOT next to `admin.yml`, because `/ac/`'s parent is ro inside the admin container — a sibling-file snapshot would hit EROFS. GC'd to 7-day retention on admin app boot. |
+| `/opt/stacks/azerothcore-admin/data/` | Admin-owned runtime state (mounted as `/admin-data`). Contains `maintenance.json` (scheduler config) and `maintenance-log.jsonl` (last 20 run entries). Created automatically by the store on first write. |
 | `docker logs azerothcore-admin` | Admin app's JSON-formatted stdout |
 
 ## Non-obvious internal conventions
@@ -187,6 +188,14 @@ These are the cross-cutting invariants of `wow-server-sp-admin/` you need to kno
 **Backup architecture is one shared script.** `scripts/backup.sh` is the canonical backup procedure. Phase 7 copies it to `/opt/stacks/azerothcore/backup.sh` for the host cron, and the admin install/redeploy scripts bundle the same file into the admin image as `/app/scripts/backup.sh` with `STACK_DIR=/ac`. It produces one consolidated `azerothcore-backup-<label>-<stamp>.tar.gz` containing `manifest.json`, SQL dumps, and staged config files. There is no `backup_runner.py` and no per-DB/config-tarball multi-file backup format.
 
 **Backups are daily-cron, manual, and pre-restore only.** Stop, Restart, and Apply do not take backups. The Backups page triggers manual archives with label `manual`; in-app Restore first takes a `prerestore` safety archive; nightly cron runs the script in default `daily` mode. Pruning is uniformly 7 days and is owned by `backup.sh` daily mode, which deletes old archives of every label plus old legacy multi-file artifacts.
+
+**`MaintenanceScheduler` is an asyncio background task, not a cron job.** It is started inside `lifespan` (`main.py`) and stored on `app.state.maintenance_scheduler`; it is cleanly cancelled on app shutdown. The loop polls every 30 seconds but only fires jobs when `now.minute == 0` (top of the UTC hour). `ADMIN_DATA_DIR` (default `/admin-data`, mounted from `/opt/stacks/azerothcore-admin/data/`) is the scheduler's storage root — `maintenance.json` holds the config, `maintenance-log.jsonl` holds the last 20 run entries (trimmed on every append).
+
+**`mark_attempted` is called before `runner.start`.** The `last_runs` stamp for a job is written to `maintenance.json` before `runner.start` is called. If `runner.start` raises (e.g., another action is already running), the job is logged as "skipped" but the stamp is already committed — it will not retry until the next UTC hour. This prevents double-fire when the scheduler ticks again within the same minute.
+
+**Midnight-crossing stop/start windows are not supported.** `MaintenanceStore.validate` requires `window_start_hour_utc > window_stop_hour_utc` (strictly greater). A window like "stop at 23:00, start at 02:00" is rejected with a 400. Both hours also appear in the same 0–23 range — no date arithmetic is done across the day boundary.
+
+**`maintenance.json` is written with tmp+rename (`os.replace`), unlike `admin.yml`.** `admin.yml` must be written in-place (open+truncate) because it is a bind-mount source inode and `rename(2)` over it fails with EBUSY. `maintenance.json` is a regular file in `ADMIN_DATA_DIR` (not a bind-mount source), so atomic tmp+rename is safe and correct here.
 
 **Expected admin test warnings.** The Dockerized pytest command may print pip's "running as root" warning and a new-pip-version notice because tests run inside a disposable `python:3.12-slim` container; those are harmless. Current tests also emit a Starlette `multipart` pending-deprecation warning and a `TemplateResponse` call-style deprecation warning. The latter is worth cleaning up before a future FastAPI/Starlette upgrade, but neither warning is related to the admin restart/apply console path.
 

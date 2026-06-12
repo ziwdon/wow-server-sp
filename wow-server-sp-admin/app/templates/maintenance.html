@@ -12,7 +12,6 @@
           <input type="checkbox" name="restart_enabled" {% if config.restart_enabled %}checked{% endif %}>
           <span class="toggle-label-wrap">
             <span>Enable daily restart</span>
-            <span class="maintenance-help">Runs through the same graceful restart path as Dashboard.</span>
           </span>
         </label>
         <label class="maintenance-field">
@@ -35,7 +34,6 @@
           <input type="checkbox" name="window_enabled" {% if config.window_enabled %}checked{% endif %}>
           <span class="toggle-label-wrap">
             <span>Enable daily stop/start window</span>
-            <span class="maintenance-help">Stop and start use the same safe lifecycle actions as Dashboard.</span>
           </span>
         </label>
         <div class="maintenance-two-col">

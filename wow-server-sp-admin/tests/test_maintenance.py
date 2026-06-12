@@ -61,6 +61,37 @@ def test_validate_rejects_bad_hours_and_reversed_window(tmp_path):
         )
 
 
+def test_validate_allows_reversed_window_when_disabled(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    cfg = MaintenanceConfig(
+        window_enabled=False,
+        window_stop_hour_utc=8,
+        window_start_hour_utc=3,
+    )
+    store.save_config(cfg)
+    assert store.load_config() == cfg
+
+
+def test_log_job_field_uses_job_name_not_action(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    store.save_config(
+        MaintenanceConfig(
+            window_enabled=True,
+            window_stop_hour_utc=3,
+            window_start_hour_utc=8,
+        )
+    )
+    runner = Mock()
+    runner.start.side_effect = RuntimeError("another action already running")
+    scheduler = MaintenanceScheduler(store, runner=runner)
+
+    scheduler.tick(dt.datetime(2026, 6, 12, 3, 0, 0, tzinfo=UTC))
+
+    logs = store.read_log()
+    assert logs[0].job == "window_stop"
+    assert logs[0].action == "stop"
+
+
 def test_due_jobs_do_not_catch_up_after_missed_hour(tmp_path):
     store = MaintenanceStore(tmp_path)
     store.save_config(MaintenanceConfig(restart_enabled=True, restart_hour_utc=4))
@@ -118,7 +149,7 @@ def test_runner_wrapper_logs_final_action_result(tmp_path):
         run_restart=restart,
     )
     run = scheduler._build_runner_func(  # noqa: SLF001 - pins wrapper behavior
-        DueJob("restart", "restart", 4),
+        DueJob("restart", "restart"),
     )
 
     result = run(lambda *_: None)

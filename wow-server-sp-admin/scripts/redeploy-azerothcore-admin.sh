@@ -62,6 +62,12 @@ docker compose -f "$STACK_DIR/docker-compose.yml" \
     --project-directory "$STACK_DIR/build" \
     --env-file "$STACK_DIR/.env" build
 
+# Ensure data dir exists and is writable by the container user. If Docker
+# created it implicitly (bind-mount source missing), it would be root:root and
+# the non-root container user cannot write maintenance scheduler state to it.
+sudo mkdir -p "$STACK_DIR/data"
+sudo chown "$(id -u):$(id -g)" "$STACK_DIR/data"
+
 echo "==> Starting admin container..."
 docker compose -f "$STACK_DIR/docker-compose.yml" --env-file "$STACK_DIR/.env" up -d
 

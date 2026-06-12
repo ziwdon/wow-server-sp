@@ -52,7 +52,6 @@ class MaintenanceConfig:
 class DueJob:
     name: str
     action: str
-    hour_utc: int
 
 
 class MaintenanceStore:
@@ -82,7 +81,7 @@ class MaintenanceStore:
         _validate_hour("restart hour", cfg.restart_hour_utc)
         _validate_hour("stop hour", cfg.window_stop_hour_utc)
         _validate_hour("start hour", cfg.window_start_hour_utc)
-        if cfg.window_start_hour_utc <= cfg.window_stop_hour_utc:
+        if cfg.window_enabled and cfg.window_start_hour_utc <= cfg.window_stop_hour_utc:
             raise ValueError("start hour must be after stop hour")
 
     def append_log(self, entry: MaintenanceLogEntry) -> None:
@@ -175,18 +174,18 @@ class MaintenanceScheduler:
             and now.hour == cfg.restart_hour_utc
             and cfg.last_runs.get("restart") != stamp
         ):
-            jobs.append(DueJob("restart", "restart", cfg.restart_hour_utc))
+            jobs.append(DueJob("restart", "restart"))
         if cfg.window_enabled:
             if (
                 now.hour == cfg.window_stop_hour_utc
                 and cfg.last_runs.get("window_stop") != stamp
             ):
-                jobs.append(DueJob("window_stop", "stop", cfg.window_stop_hour_utc))
+                jobs.append(DueJob("window_stop", "stop"))
             if (
                 now.hour == cfg.window_start_hour_utc
                 and cfg.last_runs.get("window_start") != stamp
             ):
-                jobs.append(DueJob("window_start", "start", cfg.window_start_hour_utc))
+                jobs.append(DueJob("window_start", "start"))
         return jobs
 
     def mark_attempted(self, job: DueJob, now: dt.datetime) -> None:
@@ -214,7 +213,7 @@ class MaintenanceScheduler:
             except RuntimeError as e:
                 self.store.append_log(MaintenanceLogEntry(
                     timestamp_utc=_display_stamp(now),
-                    job=job.action,
+                    job=job.name,
                     action=job.action,
                     status="skipped",
                     message=str(e),
@@ -222,7 +221,7 @@ class MaintenanceScheduler:
                 continue
             self.store.append_log(MaintenanceLogEntry(
                 timestamp_utc=_display_stamp(now),
-                job=job.action,
+                job=job.name,
                 action=job.action,
                 status="started",
                 message="scheduled action started",
@@ -235,7 +234,7 @@ class MaintenanceScheduler:
             except Exception as e:  # noqa: BLE001
                 self.store.append_log(MaintenanceLogEntry(
                     timestamp_utc=_display_stamp(dt.datetime.now(UTC)),
-                    job=job.action,
+                    job=job.name,
                     action=job.action,
                     status="error",
                     message=str(e),
@@ -244,7 +243,7 @@ class MaintenanceScheduler:
             status = _result_status(result)
             self.store.append_log(MaintenanceLogEntry(
                 timestamp_utc=_display_stamp(dt.datetime.now(UTC)),
-                job=job.action,
+                job=job.name,
                 action=job.action,
                 status=status,
                 message=f"scheduled action finished: {status}",

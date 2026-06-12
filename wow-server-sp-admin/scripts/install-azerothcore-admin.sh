@@ -102,13 +102,15 @@ if [ ! -d "$AC_STACK_DIR/backups" ]; then
     sudo chmod 700 "$AC_STACK_DIR/backups"
 fi
 
-# --- Step 5: stack dir + snapshots subdir ---
-# snapshots/ is the rw target for admin.yml.bak.<ts> files. It MUST be
-# writable as the same UID/GID that runs the admin container (HOST_UID/GID),
-# because admin.yml writes/snapshots happen as that user.
-sudo mkdir -p "$STACK_DIR" "$STACK_DIR/snapshots"
-sudo chown "$(id -u):$(id -g)" "$STACK_DIR" "$STACK_DIR/snapshots"
-sudo chmod 700 "$STACK_DIR/snapshots"
+# --- Step 5: stack dir + subdirs ---
+# snapshots/ is the rw target for admin.yml.bak.<ts> files.
+# data/ is the rw target for maintenance scheduler state (maintenance.json, maintenance-log.jsonl).
+# Both MUST be writable as the same UID/GID that runs the admin container
+# (HOST_UID/GID); if Docker creates them it does so as root:root, which
+# prevents the non-root container user from writing.
+sudo mkdir -p "$STACK_DIR" "$STACK_DIR/snapshots" "$STACK_DIR/data"
+sudo chown "$(id -u):$(id -g)" "$STACK_DIR" "$STACK_DIR/snapshots" "$STACK_DIR/data"
+sudo chmod 700 "$STACK_DIR/snapshots" "$STACK_DIR/data"
 
 # --- Step 6: copy compose + dist into stack ---
 cp "$REPO_DIR/docker-compose.yml" "$STACK_DIR/"
