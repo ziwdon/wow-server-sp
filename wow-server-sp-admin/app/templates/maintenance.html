@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="dashboard-content maintenance-page">
+
+  <form class="maintenance-grid" method="post" action="/api/maintenance">
+    <section class="panel maintenance-card">
+      <div class="panel-header">
+        <span class="panel-title">Scheduled Restart</span>
+      </div>
+      <div class="panel-body maintenance-form">
+        <label class="toggle-item">
+          <input type="checkbox" name="restart_enabled" {% if config.restart_enabled %}checked{% endif %}>
+          <span class="toggle-label-wrap">
+            <span>Enable daily restart</span>
+            <span class="maintenance-help">Runs through the same graceful restart path as Dashboard.</span>
+          </span>
+        </label>
+        <label class="maintenance-field">
+          <span class="sidebar-label">Restart hour (UTC)</span>
+          <select class="maintenance-select" name="restart_hour_utc">
+            {% for hour in hours %}
+            <option value="{{ hour }}" {% if hour == config.restart_hour_utc %}selected{% endif %}>{{ "%02d"|format(hour) }}:00 UTC</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel maintenance-card">
+      <div class="panel-header">
+        <span class="panel-title">Stop / Start Window</span>
+      </div>
+      <div class="panel-body maintenance-form">
+        <label class="toggle-item">
+          <input type="checkbox" name="window_enabled" {% if config.window_enabled %}checked{% endif %}>
+          <span class="toggle-label-wrap">
+            <span>Enable daily stop/start window</span>
+            <span class="maintenance-help">Stop and start use the same safe lifecycle actions as Dashboard.</span>
+          </span>
+        </label>
+        <div class="maintenance-two-col">
+          <label class="maintenance-field">
+            <span class="sidebar-label">Stop hour (UTC)</span>
+            <select class="maintenance-select" name="window_stop_hour_utc">
+              {% for hour in hours %}
+              <option value="{{ hour }}" {% if hour == config.window_stop_hour_utc %}selected{% endif %}>{{ "%02d"|format(hour) }}:00 UTC</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="maintenance-field">
+            <span class="sidebar-label">Start hour (UTC)</span>
+            <select class="maintenance-select" name="window_start_hour_utc">
+              {% for hour in hours %}
+              <option value="{{ hour }}" {% if hour == config.window_start_hour_utc %}selected{% endif %}>{{ "%02d"|format(hour) }}:00 UTC</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <p class="maintenance-help">Start hour must be after stop hour. Missed UTC hours are not caught up after downtime.</p>
+      </div>
+    </section>
+
+    <div class="maintenance-actions">
+      <button class="btn btn-apply" type="submit">Save maintenance settings</button>
+    </div>
+  </form>
+
+  <section class="panel maintenance-log-panel">
+    <div class="panel-header">
+      <span class="panel-title">Recent Maintenance</span>
+    </div>
+    <div class="panel-body">
+      {% if log %}
+      <ul class="maintenance-log">
+        {% for entry in log %}
+        <li class="maintenance-log-row maintenance-log-{{ entry.status }}">
+          <span class="maintenance-log-time">{{ entry.timestamp_utc }}</span>
+          <span class="maintenance-log-action">{{ entry.action }}</span>
+          <span class="maintenance-log-status">{{ entry.status }}</span>
+          <span class="maintenance-log-message">{{ entry.message }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="empty-state">No maintenance actions have run yet.</p>
+      {% endif %}
+    </div>
+  </section>
+
+</div>
+{% endblock %}
