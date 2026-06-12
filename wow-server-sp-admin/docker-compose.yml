@@ -39,9 +39,12 @@ services:
       # to /ac/docker-compose.admin.yml would hit "read-only file system".
       # Lives in the admin stack dir so the AC installer is unaware of it.
       - /opt/stacks/azerothcore-admin/snapshots:/admin-snapshots:rw
+      # rw mount for admin-owned runtime state such as maintenance schedules.
+      - /opt/stacks/azerothcore-admin/data:/admin-data:rw
     environment:
       AC_STACK_DIR: /ac
       ADMIN_SNAPSHOTS_DIR: /admin-snapshots
+      ADMIN_DATA_DIR: /admin-data
       ADMIN_LOG_LEVEL: info
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1"]

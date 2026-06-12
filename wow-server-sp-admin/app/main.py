@@ -2,15 +2,16 @@ from app.logging_config import configure as _configure_logging
 _configure_logging()
 
 import asyncio
+from dataclasses import asdict
 import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ from app.services import backups as backups_svc
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
+from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
 from app.services import progression as progression_svc
 from app.services.stats_cache import refresher as stats_refresher
@@ -62,7 +64,15 @@ async def lifespan(app: FastAPI):
             log.info("gc'd %d old admin.yml snapshots", removed)
     # Load the last stats snapshot from disk so a restart serves it instantly.
     stats_refresher.load_from_disk()
-    yield
+    maintenance_scheduler = maintenance_svc.MaintenanceScheduler(
+        maintenance_svc.store_from_env()
+    )
+    maintenance_scheduler.start()
+    app.state.maintenance_scheduler = maintenance_scheduler
+    try:
+        yield
+    finally:
+        await maintenance_scheduler.stop()
 
 
 class _GZipExcludeSSE:
@@ -298,6 +308,59 @@ async def backups_page(request: Request) -> HTMLResponse:
         "backups.html",
         {"title": "azerothcore-admin · backups"},
     )
+
+
+def _maintenance_store() -> maintenance_svc.MaintenanceStore:
+    return maintenance_svc.store_from_env()
+
+
+@app.get("/maintenance", response_class=HTMLResponse)
+async def maintenance_page(request: Request) -> HTMLResponse:
+    store = _maintenance_store()
+    return templates.TemplateResponse(
+        request,
+        "maintenance.html",
+        {
+            "title": "azerothcore-admin · maintenance",
+            "config": store.load_config(),
+            "log": store.read_log(),
+            "hours": list(range(24)),
+        },
+    )
+
+
+@app.get("/api/maintenance")
+async def api_maintenance() -> dict:
+    store = _maintenance_store()
+    return {
+        "config": asdict(store.load_config()),
+        "log": [asdict(entry) for entry in store.read_log()],
+    }
+
+
+@app.post("/api/maintenance")
+async def post_maintenance(
+    restart_enabled: str | None = Form(None),
+    restart_hour_utc: int = Form(...),
+    window_enabled: str | None = Form(None),
+    window_stop_hour_utc: int = Form(...),
+    window_start_hour_utc: int = Form(...),
+):
+    store = _maintenance_store()
+    current = store.load_config()
+    cfg = maintenance_svc.MaintenanceConfig(
+        restart_enabled=restart_enabled is not None,
+        restart_hour_utc=restart_hour_utc,
+        window_enabled=window_enabled is not None,
+        window_stop_hour_utc=window_stop_hour_utc,
+        window_start_hour_utc=window_start_hour_utc,
+        last_runs=current.last_runs,
+    )
+    try:
+        store.save_config(cfg)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return RedirectResponse("/maintenance", status_code=303)
 
 
 def _humanize_gb(num_bytes: int) -> str:

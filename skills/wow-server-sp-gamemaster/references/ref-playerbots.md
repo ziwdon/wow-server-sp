@@ -431,6 +431,14 @@ grep -E "AC_AI_PLAYERBOT_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-c
 - This is **normal and benign** — these are action-retry traces logged every tick
 - High volume is expected; not errors
 
+**Bots stuck in old party after player relog (can't invite — "already in a group"):**
+- Whisper `leave` only works if you are the bot's active master (i.e., in the same party). After relogging, the old party persists but you're no longer recognized as master, so whispers are ignored.
+- Fix with GM commands (requires level 2):
+  - `.group list BotName` — confirm which bots are in the stale party
+  - `.group disband BotName` — disband the entire old party at once (recommended)
+  - `.group remove BotName` — remove a single bot from the party without disbanding
+- After disbanding, invite normally.
+
 For more: see `docs/wikis/mod-playerbots-wiki/Troubleshooting.md`
 
 ---

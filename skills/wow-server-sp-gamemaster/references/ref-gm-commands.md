@@ -95,6 +95,20 @@ account set gmlevel mygm 3 -1
 | `.recall [name]` | 2 | Teleport player back to their recall point |
 | `.saverecall` | 2 | Save current position as recall point |
 
+### Group Management
+
+| Command | Security | Description |
+|---------|----------|-------------|
+| `.group list [$characterName]` | 2 | List all members of the group the character is in |
+| `.group disband [$characterName]` | 2 | Disband the entire group the character is in |
+| `.group remove [$characterName]` | 2 | Remove the character from their group (without disbanding) |
+| `.group join $anyMember [$characterName]` | 2 | Add a character to the group of `$anyMember` |
+| `.group leader [$characterName]` | 2 | Set the character as their group's leader |
+| `.group revive [$characterName]` | 2 | Revive all members of the character's group |
+| `.groupsummon [$characterName]` | 2 | Teleport the character and their entire group to you |
+
+> **Stuck bot in old party:** whisper `leave` only works if you are the bot's active master. After relogging, use `.group disband BotName` to free all bots at once, then reinvite normally. See also: "Bots stuck in old party after player relog" in `ref-playerbots.md`.
+
 ### Item Management
 
 | Command | Security | Description |

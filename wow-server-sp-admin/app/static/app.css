@@ -721,6 +721,95 @@ pre.logview {
   .backups-grid > .panel .panel-body { overflow-y: auto; max-height: 280px; }
 }
 
+/* --- Maintenance page --- */
+.maintenance-page { overflow-y: auto; }
+.maintenance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  flex-shrink: 0;
+}
+.maintenance-card .panel-body { overflow: visible; }
+.maintenance-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+.maintenance-help {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.maintenance-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.maintenance-two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.maintenance-select {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 0.45rem 0.55rem;
+  font-size: 0.88rem;
+}
+.maintenance-select:focus { outline: none; border-color: var(--gold); }
+.maintenance-actions {
+  grid-column: 1 / -1;
+  max-width: 280px;
+}
+.maintenance-log-panel { flex: 1; min-height: 0; }
+.maintenance-log { list-style: none; }
+.maintenance-log-row {
+  display: grid;
+  grid-template-columns: 150px 80px 76px minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border-dark);
+  font-size: 0.82rem;
+}
+.maintenance-log-row:last-child { border-bottom: none; }
+.maintenance-log-time {
+  font-family: 'Consolas', 'Menlo', monospace;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.maintenance-log-action { color: var(--text-warm); font-weight: 600; }
+.maintenance-log-status {
+  text-transform: uppercase;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.maintenance-log-ok .maintenance-log-status,
+.maintenance-log-already .maintenance-log-status { color: var(--green); }
+.maintenance-log-started .maintenance-log-status { color: var(--blue); }
+.maintenance-log-skipped .maintenance-log-status,
+.maintenance-log-timeout .maintenance-log-status,
+.maintenance-log-error .maintenance-log-status { color: var(--red); }
+.maintenance-log-message {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 768px) {
+  .maintenance-grid { grid-template-columns: 1fr; }
+  .maintenance-two-col { grid-template-columns: 1fr; }
+  .maintenance-actions { max-width: none; }
+  .maintenance-log-panel { min-height: 220px; }
+  .maintenance-log-row {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+    align-items: start;
+  }
+}
+
 /* --- Stats page --- */
 .stats-page { gap: 1rem; }
 .stats-toolbar { display: flex; align-items: center; gap: 0.6rem; flex-shrink: 0; }

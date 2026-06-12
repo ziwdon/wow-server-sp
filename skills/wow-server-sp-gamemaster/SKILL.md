@@ -140,9 +140,21 @@ ls -t /tmp/azerothcore-install-*.log 2>/dev/null | head -1 | xargs tail -100
 ## Epistemic Guardrails
 
 - If a config key is not in the reference files, check `docs/configs/<module>.conf.dist` for the authoritative default.
-- If a GM command behaviour is unclear, the AC wiki at `docs/wikis/azerothcore-wiki/docs/gm-commands.md` is the authoritative source.
 - If something seems like it should work but doesn't, check `Errors.log` and `docker logs ac-worldserver` first.
 - The upstream playerbot fork is `mod-playerbots/azerothcore-wotlk` on branch `Playerbot`, NOT the canonical `azerothcore/azerothcore-wotlk`.
+
+## Wiki / Raw Docs: Last Resort Only
+
+**Do NOT search `docs/wikis/` to answer a question unless the relevant reference file has been read and came up empty.**
+
+The reference files (`references/ref-*.md`) are the primary knowledge base and cover the vast majority of questions. Reaching past them to grep the raw wiki is a signal that the reference files need updating — not a normal lookup path.
+
+**Decision gate — only read `docs/wikis/` if ALL of these hold:**
+1. The relevant reference file has been read in full
+2. The answer is genuinely not there (not just hard to find)
+3. The question cannot be answered from `docs/configs/*.conf.dist` either
+
+**When you do find something in the wiki that isn't in the reference files:** add it to the appropriate `references/ref-*.md` file before (or immediately after) answering. The wiki is a source to pull from, not a place to send the user's question.
 
 ## Troubleshooting Escalation: GitHub Issue Search
 
