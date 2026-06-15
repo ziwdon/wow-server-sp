@@ -135,6 +135,60 @@ docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
 
 **Durability caveat.** A direct `INSERT` persists across restarts (the world DB is not wiped on boot — DBUpdater only applies *pending* update files), but a **full world re-import** (fresh install / wipe) loses it. To make it permanent, add the idempotent SQL to the install pipeline. Pre-existing `Errors.log` lines clear on the next worldserver restart (the `Server`/`Errors` appenders open in mode `w`); the fix stops *new* ones immediately after `reload graveyard_zone`.
 
+### Playerbots pile up on gryphons at continent borders (stuck taxi flight)
+
+**Symptom.** Groups of bots sit motionless on flight-path gryphons, stacked on top of each other, at the edge of a continent — most visibly the **Gates of Ironforge** (map 0, ≈ `-5034 -819 520`). They never dismount or move; the count grows the longer the server runs. Other clusters form at any cross-continent route's origin-map border (e.g. the Ghostlands ⇄ Outland boundary).
+
+**Root cause.** The mod-playerbots "New RPG" engine has idle bots randomly pick `RPG_TRAVEL_FLIGHT`, fly to a flight master and call `ActivateTaxiPathTo`. The destination is chosen by level-bracket / capital city with **no same-continent constraint** (`TravelMgr::GetOptimalFlightDestinations` → `FindTaxiPath`). The WotLK 3.3.5 data places the Isle of Quel'Danas / Sunwell "Shattered Sun" and Zul'Aman/Ghostlands taxi nodes on **map 530** (the TBC "Expansion01" map) and ships real direct flights from capital cities to them (e.g. `TaxiPath` 807: node 6 *Ironforge, map 0* → node 213 *Shattered Sun, map 530*). Bots are flagged taxi-cheaters (`PlayerbotAI.cpp:137-138`), so they bypass the "node known" and gold gates and get routed onto these cross-map flights.
+
+A taxi flight that crosses a map boundary only advances when the **game client** sends two packets: `CMSG_MOVE_SPLINE_DONE` (→ `HandleMoveSplineDoneOpcode`, `TaxiHandler.cpp`, which teleports the player to the next map) and then `MSG_MOVE_WORLDPORT_ACK` (→ `HandleMoveWorldportAck`, `MovementHandler.cpp`, which re-initialises the flight on the new map). A bot has no client, and mod-playerbots never synthesises `CMSG_MOVE_SPLINE_DONE`, so the cross-map teleport is never initiated. The server-side spline finishes at the last node on the origin map and the bot stays `UNIT_STATE_IN_FLIGHT` forever, frozen at the border. **Same-continent flights are unaffected** (they finalise server-side). This is **not** caused by mod-individual-progression, and it is **not player-facing** — real clients send the packets, so player flights work normally.
+
+**Restart behaviour (a partial cleaner, not a fix).** On login a saved `taxi_path` is reloaded and `Player::ContinueTaxiFlight()` (`Player.cpp:10397`) either *resumes* or *clears* it: it searches the current leg's nodes for a segment on the bot's **current map**. Bots frozen *at* the continent boundary were saved at the last node on their origin map, so no same-map segment remains ahead — `startNode == 0` and the taxi is **cleared** (`:10453-10456`), unsticking them on relogin. Bots saved *mid-route* (a same-map segment still ahead) **resume** and keep flying. So a restart clears the boundary-frozen pile-ups (e.g. the Ironforge gates cluster) but not every taxi-carrying bot — and, crucially, **without disabling RPG flights (Solution A) the cleared bots just pick fresh cross-continent flights and re-accumulate.** A restart alone is therefore not a durable fix.
+
+**Detection.**
+```bash
+source /opt/stacks/azerothcore/.env
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e "
+SELECT map, COUNT(*) n FROM acore_characters.characters
+WHERE taxi_path<>'' AND online=1 GROUP BY map ORDER BY n DESC;"
+```
+A persistent population of online characters with a non-empty `taxi_path` (often clustered at identical coordinates) is the signature. The `taxi_path` format is `<flightMasterFactionId> <srcNode> <node…>`; map a node id to its continent via the `ContinentID` field of `TaxiNodes.dbc`.
+
+#### Solution A — config mitigation (no rebuild, instant, reversible)
+
+Stop bots from ever auto-selecting a flight by zeroing the RPG flight weight:
+
+- Key: `AiPlayerbot.RpgStatusProbWeight.TravelFlight = 0` (default `15`)
+- Env var: `AC_AI_PLAYERBOT_RPG_STATUS_PROB_WEIGHT_TRAVEL_FLIGHT=0`
+- Apply via the admin app (Settings → set the key → Apply), or add the env var to `docker-compose.override.yml` / `docker-compose.admin.yml` and restart the worldserver.
+
+These eight RPG-status weights are **relative**, not absolute percentages (they sum to 150, not 100). Setting `TravelFlight` to `0` simply drops it from the weighted lottery — the other statuses keep their relative proportions automatically, so there is **no need to redistribute the 15** to the other weights.
+
+Trade-off: disables **all** bot RPG flights, including the same-continent ones that work fine, so bots no longer ride gryphons at all. They still relocate across continents via the independent `RandomPlayerbotMgr` teleport system (direct teleport, no flight), so zone population and redistribution are unaffected — the loss is purely cosmetic.
+
+#### Solution B — code fix (recommended; requires a worldserver rebuild)
+
+Restrict bot flight selection to same-continent routes. In `modules/mod-playerbots/src/Mgr/Travel/TravelMgr.cpp`, `GetOptimalFlightDestinations`, reject any candidate route whose nodes are not all on the bot's current map (compare each node's `TaxiNodesEntry->map_id` to the start node's map before returning the path). This keeps working same-continent flights and eliminates the stalls. It is **bot-only** — the core taxi/movement code and player flights are untouched.
+
+Deploy with the isolated redeploy script (**not** the installer — `install-azerothcore.sh --resume-from=3` would also run Phase 4 DB-init, account-creation pauses, etc.):
+```bash
+./scripts/redeploy-azerothcore.sh
+```
+No DB impact — characters, progression and items are untouched; only the worldserver image is rebuilt and the container recreated. Because the module source lives in the gitignored stack dir, carry the change as a repo patch applied right after the Phase-1 module clone so it survives a fresh install.
+
+#### Cleanup — unstick the bots already frozen
+
+A restart clears the boundary-frozen bots but *resumes* any saved mid-route (see **Restart behaviour** above), so on its own it is not a complete cleanup. **In practice, applying Solution A via the admin app already restarts the worldserver** — which clears the bulk on relogin — and any residual in-progress flights then drain within the 1–5 h `RandomBotTeleportInterval` (each bot's periodic `RandomTeleportForLevel` teleports it away and clears the taxi). So a separate cleanup is usually unnecessary. If you do want a deterministic, instant full clear, wipe `taxi_path` while the worldserver is **stopped** — for an online bot the authoritative flight state is in memory, so a live `UPDATE` is ignored and overwritten on the next save:
+```bash
+cd /opt/stacks/azerothcore
+docker compose stop -t 120 ac-worldserver
+source .env
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e "
+UPDATE acore_characters.characters SET taxi_path='' WHERE taxi_path<>'';"
+docker compose up -d ac-worldserver
+```
+Pair this with Solution A or B — otherwise bots will re-stick on the next round of RPG flights.
+
 ### Post-Unexpected-Shutdown Verification (power loss, forced reboot, OOM kill)
 
 Run these in order — stop at the first failure and investigate before continuing:
