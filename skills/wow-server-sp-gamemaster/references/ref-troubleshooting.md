@@ -84,9 +84,56 @@ Live stdout (not written to any file on disk):
 ### docker logs ac-worldserver
 - `Random Bots Stats: 0 online` with all zeros — **NORMAL when no real player is logged in** (due to `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1`)
 
+### Errors.log
+- `Table \`graveyard_zone\` incomplete: Zone <id> Team <0|1> does not have a linked graveyard` — an upstream **data gap**, functionally benign (the server falls back to the default graveyard). Triggered by playerbot deaths in zones AzerothCore ships no graveyard for, so it surfaces only after hours of uptime. Does break the "0 bytes = clean" signal. See **"`graveyard_zone` incomplete errors"** under Common Issues for the root cause and the exact fix SQL.
+
 ---
 
 ## Common Issues
+
+### `graveyard_zone` incomplete errors in Errors.log
+
+```
+Table `graveyard_zone` incomplete: Zone 2037 Team 0 does not have a linked graveyard.
+Table `graveyard_zone` incomplete: Zone 3455 Team 1 does not have a linked graveyard.
+```
+
+**Root cause.** `Graveyard::GetClosestGraveyard()` (`src/server/game/Misc/GameGraveyard.cpp:168`) logs this on the `sql.sql` channel when an entity needs a *player* graveyard in a zone with no row in the `graveyard_zone` table for its team (and the map isn't a battleground/arena). It then falls back to `GetDefaultGraveyard()` — Westfall (Alliance) / Crossroads (Horde) — so **gameplay is unaffected**; this is log noise, but it makes `Errors.log` non-zero.
+
+AzerothCore ships **no graveyard link** for a few zones a real player essentially never dies in (confirmed: absent from `data/sql/base/db_world/graveyard_zone.sql` and all update files — a genuine upstream gap, not local corruption):
+- **Zone 2037 = Quel'thalas** (map 0, a vanilla leftover sliver in the far-north Eastern Kingdoms, bordering the Eastern Plaguelands)
+- **Zone 3455 = The North Sea** (map 530, the open ocean around the blood-elf/Quel'Danas isle)
+
+It surfaces **after hours of uptime, not at boot**, because it needs a death event there — playerbots roam, get RandomBot-teleported, swim, and drown, so one eventually dies in these zones. (Identify any other reported zone ID by parsing `AreaTable.dbc`, field 0 = ID, field 11 = enUS name.)
+
+**Fix** — add a neutral (`Faction=0` = serves both factions) link per zone, pointing at the nearest existing graveyard on the **same map**. The IDs below are graveyards AzerothCore *already* classifies neutral (`Faction=0`) for their own adjacent zones, so they're proven safe for Alliance and Horde:
+
+```sql
+INSERT INTO acore_world.graveyard_zone (ID, GhostZone, Faction, Comment) VALUES
+  (1448, 2037, 0, 'Quel''thalas -> EPL Northdale (custom: fill upstream graveyard_zone gap)'),
+  (922,  3455, 0, 'The North Sea -> Eversong Fairbreeze GY (custom: fill upstream graveyard_zone gap)');
+```
+- `1448` = Eastern Plaguelands, Northdale (map 0) — neutral contested PvE, no faction guards
+- `922` = Eversong Woods, Fairbreeze GY (map 530) — nearest blood-elf landmass GY
+
+Apply live without a restart (the in-memory store is only refreshed on reload/boot):
+```bash
+docker attach ac-worldserver
+reload graveyard_zone            # then detach: Ctrl-P Ctrl-Q  (NEVER Ctrl-C)
+# console should print: >> Loaded <N> Graveyard-Zone Links
+```
+
+**Verify / revert:**
+```bash
+source /opt/stacks/azerothcore/.env
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
+  -e "SELECT * FROM acore_world.graveyard_zone WHERE GhostZone IN (2037,3455);"
+# Revert:
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
+  -e "DELETE FROM acore_world.graveyard_zone WHERE (ID=1448 AND GhostZone=2037) OR (ID=922 AND GhostZone=3455);"
+```
+
+**Durability caveat.** A direct `INSERT` persists across restarts (the world DB is not wiped on boot — DBUpdater only applies *pending* update files), but a **full world re-import** (fresh install / wipe) loses it. To make it permanent, add the idempotent SQL to the install pipeline. Pre-existing `Errors.log` lines clear on the next worldserver restart (the `Server`/`Errors` appenders open in mode `w`); the fix stops *new* ones immediately after `reload graveyard_zone`.
 
 ### Post-Unexpected-Shutdown Verification (power loss, forced reboot, OOM kill)
 
