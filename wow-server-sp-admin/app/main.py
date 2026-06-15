@@ -431,7 +431,8 @@ def _render_progress(step: str, msg: str) -> str:
     # ampersands or angle brackets from arbitrary subprocess stderr.
     safe_step = _esc(step)
     safe_msg = _esc(msg)
-    return f'<li class="step step-{safe_step}"><b>{safe_step}</b>: {safe_msg}</li>'
+    ts = dt.datetime.now(tz=dt.timezone.utc).strftime("%H:%M")
+    return f'<li class="step step-{safe_step}"><span class="log-ts">[{ts}]</span> <b>{safe_step}</b>: {safe_msg}</li>'
 
 
 def _render_done(record: ActionRecord) -> str:

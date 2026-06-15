@@ -263,6 +263,7 @@ pre.logview {
 }
 #action-log li { padding: 0.25rem 0; border-bottom: 1px solid var(--border-dark); color: var(--text-warm); }
 #action-log li:last-child { border-bottom: none; }
+.log-ts { color: var(--text-dim); font-size: 0.75rem; margin-right: 0.25rem; font-variant-numeric: tabular-nums; }
 .step-done { color: var(--green); font-weight: bold; }
 .action-done.action-ok    { color: var(--green); }
 .action-done.action-error { color: var(--red); font-weight: bold; }
@@ -541,7 +542,7 @@ pre.logview {
   nav.topnav { flex-wrap: wrap; height: auto; padding: 0.5rem 0.75rem; }
   .nav-brand { flex: 1; order: 1; margin-right: 0; font-size: 0.95rem; }
   .nav-right { order: 2; }
-  .nav-links { order: 3; width: 100%; border-top: 1px solid var(--border-dark); padding: 0.25rem 0; }
+  .nav-links { order: 3; width: 100%; border-top: 1px solid var(--border-dark); padding: 0.25rem 0; flex-wrap: wrap; }
   .nav-link { height: auto; padding: 0.3rem 0.6rem; font-size: 0.85rem; }
 
   /* Dashboard: remove fixed viewport height, let page scroll */
@@ -687,7 +688,7 @@ pre.logview {
    mirrors the dashboard's .lower-grid so each panel scrolls internally. */
 .backups-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: 1fr;
   gap: 1rem;
   flex: 1;
   min-height: 0;
@@ -723,6 +724,7 @@ pre.logview {
 
 /* --- Maintenance page --- */
 .maintenance-page { overflow-y: auto; }
+.bot-control-body { display: flex; gap: 0.75rem; justify-content: center; }
 .maintenance-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -844,8 +846,6 @@ pre.logview {
 .bar-track--stacked { display: flex; }
 .bar-fill { display: block; height: 100%; background: var(--gold); min-width: 1px; }
 .bar-count { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
-
-.stats-activity { max-height: 11vh; }
 
 #clear-dialog {
   background: var(--panel-bg); border: 1px solid var(--red); border-radius: 4px;
