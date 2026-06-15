@@ -82,7 +82,7 @@ account set gmlevel mygm 3 -1
 | Command | Security | Description |
 |---------|----------|-------------|
 | `.tele <location>` | 1 | Teleport to named location |
-| `.tele <name> <location>` | 2 | Teleport another player |
+| `.tele name <name> <location>` | 2 | Teleport another player by name (the `name` subcommand is required; plain `.tele <name> <location>` errors with a usage hint). Works from the worldserver console |
 | `.tele add <name>` | 3 | Save current position as teleport point |
 | `.tele del <name>` | 3 | Delete a teleport point |
 | `.tele list` | 1 | List teleport locations |
@@ -196,9 +196,9 @@ account set gmlevel mygm 3 -1
 
 ### Teleport a stuck player
 ```
-# In-game, target the player:
-.tele <location>
-# Or bring them to you:
+# By name (works from the worldserver console; no target needed):
+.tele name <playername> <location>      # e.g. .tele name Asperico undercity
+# Or bring them to you (in-game, requires you to be in world):
 .summon <playername>
 ```
 
