@@ -86,6 +86,7 @@ Live stdout (not written to any file on disk):
 
 ### Errors.log
 - `Table \`graveyard_zone\` incomplete: Zone <id> Team <0|1> does not have a linked graveyard` — an upstream **data gap**, functionally benign (the server falls back to the default graveyard). Triggered by playerbot deaths in zones AzerothCore ships no graveyard for, so it surfaces only after hours of uptime. Does break the "0 bytes = clean" signal. See **"`graveyard_zone` incomplete errors"** under Common Issues for the root cause and the exact fix SQL.
+- `SmartScript::ProcessAction: SMART_ACTION_TALK: ... using non-existent Text id <g> for talker <entry>, ignored` — an upstream **SmartAI data quirk**: a creature's own "say line" targets `ACTION_INVOKER` (target type 7) instead of `SELF`. Functionally benign — only the cosmetic emote is skipped; any other action on the same event (e.g. the enrage cast) still fires. Surfaces when a **playerbot guardian summon** (Spirit Wolf, Shadowfiend, Mirror Image, …) is the action invoker, because the engine then treats *it* as the talker and it has no matching `creature_text`. Does break the "0 bytes = clean" signal. See **"SMART_ACTION_TALK non-existent Text id"** under Common Issues for the root cause and the per-entry fix SQL.
 
 ---
 
@@ -134,6 +135,52 @@ docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
 ```
 
 **Durability caveat.** A direct `INSERT` persists across restarts (the world DB is not wiped on boot — DBUpdater only applies *pending* update files), but a **full world re-import** (fresh install / wipe) loses it. To make it permanent, add the idempotent SQL to the install pipeline. Pre-existing `Errors.log` lines clear on the next worldserver restart (the `Server`/`Errors` appenders open in mode `w`); the fix stops *new* ones immediately after `reload graveyard_zone`.
+
+### SMART_ACTION_TALK "non-existent Text id" errors in Errors.log (talker resolves to a pet/summon)
+
+```
+SmartScript::ProcessAction: SMART_ACTION_TALK: EntryOrGuid 16878 SourceType 0 EventType 61 TargetType 7 using non-existent Text id 0 for talker 29264, ignored.
+```
+
+**Root cause.** In `SmartScript::ProcessAction` (`src/server/game/AI/SmartScripts/SmartScript.cpp:200`, `case SMART_ACTION_TALK`) the action's **target *is* the talker** (the one who speaks), not the recipient. A large number of stock `smart_scripts` rows give a creature's own "say line" a `target_type=7` (`SMART_TARGET_ACTION_INVOKER`) instead of `1` (`SMART_TARGET_SELF`). This normally works anyway: when the invoker is a **player**, the handler forces `talker = me` (the scripted creature), so the line plays and `Errors.log` stays clean.
+
+It only breaks when the invoker is a **non-player creature that is not a true Pet** — i.e. a **guardian summon**. The `!IsPet()` filter (line 207) excludes hunter/warlock Pet-class pets but NOT guardians, so `talker` becomes the summon. If that summon has no `creature_text` for the referenced group, the engine logs this error and **ignores only the talk** — every other action on the same event still runs, so **gameplay is unaffected**. It does make `Errors.log` non-zero.
+
+On this server it's **playerbot-driven**, exactly like the `graveyard_zone` noise: real players rarely make it fire, but bots constantly field guardian summons across old content. Confirmed example:
+- **16878 = Shattered Hand Berserker** (Shattered Halls). At <30% HP it casts Enrage (`id=3`) and, via a linked event (`id=4`), should *emote* its own line 0 — `creature_text` 16878/0 = `"%s becomes enraged!"` (Type 16 = monster emote). The row ships with `target_type=7`, so when an **Enhancement Shaman bot's Feral Spirit (29264 "Spirit Wolf")** was the last invoker, the engine looked for text on the *wolf*, found none, and logged the error. The row is byte-for-byte identical to stock upstream `data/sql/base/db_world/smart_scripts.sql:17672` — an upstream data quirk, not local corruption.
+
+**Fix (per-entry, only for verified self-talk).** Point the talk at SELF so the scripted creature speaks its own (existing) line:
+```sql
+UPDATE acore_world.smart_scripts
+SET target_type = 1            -- SMART_TARGET_SELF (was 7 = SMART_TARGET_ACTION_INVOKER)
+WHERE entryorguid = 16878 AND source_type = 0 AND id = 4;
+```
+Apply live without a restart (the in-memory script store is only refreshed on reload/boot):
+```bash
+docker attach ac-worldserver
+reload smart_scripts            # then detach: Ctrl-P Ctrl-Q  (NEVER Ctrl-C)
+```
+
+**Verify / revert:**
+```bash
+source /opt/stacks/azerothcore/.env
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
+  -e "SELECT id,event_type,action_type,target_type,comment FROM acore_world.smart_scripts WHERE entryorguid=16878 AND source_type=0 AND id=4;"
+# Revert:
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
+  -e "UPDATE acore_world.smart_scripts SET target_type=7 WHERE entryorguid=16878 AND source_type=0 AND id=4;"
+```
+
+**Scope — do NOT mass-fix.** ~335 stock rows use TALK + `ACTION_INVOKER`; most are correct (the player-invoker case, or escort/quest NPCs that legitimately make the *invoker* talk). Convert a row to SELF only after confirming **both**: (a) the row's intent is self-talk (comment like "Say Line N"; text is self-referential), and (b) the *scripted* creature actually has `creature_text` for that group. Fix reactively — when a new `for talker <entry>` appears in `Errors.log`, map it with the query below and fix that one row.
+```bash
+# Map a surfaced error: find the offending TALK row(s) for the scripted entry and its text group.
+# <ENTRY> = the EntryOrGuid in the error line (the scripted creature, NOT the "talker" id).
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e "
+SELECT entryorguid,id,action_param1 AS text_group,target_type,comment
+FROM acore_world.smart_scripts WHERE action_type=1 AND target_type=7 AND source_type=0 AND entryorguid=<ENTRY>;"
+```
+
+**Durability caveat.** Same as `graveyard_zone`: a direct `UPDATE` persists across restarts (the world DB is not wiped on boot — DBUpdater only applies *pending* update files), but a **full world re-import** (fresh install / wipe) reverts it to the upstream `target_type=7`. Not baked into the installer. Pre-existing `Errors.log` lines clear on the next worldserver restart (the `Server`/`Errors` appenders open in mode `w`); the fix stops *new* ones immediately after `reload smart_scripts`.
 
 ### Playerbots pile up on gryphons at continent borders (stuck taxi flight)
 
