@@ -14,9 +14,9 @@ from app.services.players import (
 )
 
 
-def _raw(username, name, class_id, race_id, level, online, zone):
+def _raw(username, name, class_id, race_id, level, online, zone, latency=10):
     """A roster row as the SQL SELECT returns it."""
-    return (username, name, class_id, race_id, level, online, zone)
+    return (username, name, class_id, race_id, level, online, zone, latency)
 
 
 def test_char_row_maps_names_colors_faction():
@@ -36,10 +36,11 @@ def test_char_row_maps_names_colors_faction():
 
 def test_online_sorted_filters_offline_and_orders_level_then_name():
     a = char_row(_raw("U", "Bob", 1, 1, 80, 1, 12))
-    b = char_row(_raw("U", "amy", 1, 1, 80, 1, 12))   # same level → name asc (amy<Bob)
-    c = char_row(_raw("U", "Zed", 1, 1, 90, 0, 12))   # offline → excluded
-    d = char_row(_raw("U", "Cara", 1, 1, 70, 1, 12))  # lower level → last
-    out = online_sorted([a, b, c, d])
+    b = char_row(_raw("U", "amy", 1, 1, 80, 1, 12))              # same level → name asc (amy<Bob)
+    c = char_row(_raw("U", "Zed", 1, 1, 90, 0, 12))              # offline → excluded
+    d = char_row(_raw("U", "Cara", 1, 1, 70, 1, 12))             # lower level → last
+    e = char_row(_raw("U", "Bot", 1, 1, 60, 1, 12, latency=0))   # online altbot → excluded
+    out = online_sorted([a, b, c, d, e])
     assert [x.name for x in out] == ["amy", "Bob", "Cara"]
 
 
@@ -79,10 +80,10 @@ def test_collect_players_builds_snapshot(mock_connect):
     # fetchall order matches collect_players: roster, top PvE, top PvP.
     cur.fetchall.side_effect = [
         [
-            ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637),
-            ("carlos", "Sariel", 11, 4, 25, 1, 1519),
-            ("carlos", "Tester", 1, 1, 1, 0, 12),
-            ("EDUARDO", "Pitocas", 3, 3, 24, 0, 1519),
+            ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637, 0),
+            ("carlos", "Sariel", 11, 4, 25, 1, 1519, 8),
+            ("carlos", "Tester", 1, 1, 1, 0, 12, 0),
+            ("EDUARDO", "Pitocas", 3, 3, 24, 0, 1519, 0),
         ],
         [
             ("Vegivaca", 1, 6, 58, 37),
@@ -167,7 +168,7 @@ def _sample_snapshot():
     sariel = CharRow(
         account="CARLOS", name="Sariel", class_name="Druid", class_color="#FF7C0A",
         race_name="Night Elf", faction="Alliance", faction_color="#4080C0",
-        level=25, online=True, zone_name="Stormwind City",
+        level=25, online=True, zone_name="Stormwind City", latency=8,
     )
     return PlayersSnapshot(
         fetched_at=1716144665.0,

@@ -20,16 +20,13 @@
     <button class="btn btn-gold" id="import-restore-btn">⬆ Import &amp; Restore</button>
   </div>
 
+  <div hx-ext="sse" sse-connect="/api/action/stream" style="display:none">
+    <span sse-swap="progress,done" hx-swap="none"></span>
+  </div>
+
   <div class="backups-grid">
     <div id="backups-list" class="panel" hx-get="/api/backups/list" hx-trigger="load, refresh">
       <div class="panel-body"><p class="empty-state">Loading…</p></div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">Activity</span></div>
-      <div class="panel-body" hx-ext="sse" sse-connect="/api/action/stream">
-        <ul id="action-log" sse-swap="progress,done" hx-swap="beforeend"></ul>
-      </div>
     </div>
   </div>
 

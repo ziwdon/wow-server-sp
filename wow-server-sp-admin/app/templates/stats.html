@@ -6,16 +6,6 @@
     <button class="btn btn-gold" id="refresh-stats-btn">⟳ Refresh</button>
     <span id="stats-last-refreshed" class="stats-last">—</span>
     <span id="stats-spinner" class="stats-spinner" style="display:none">refreshing…</span>
-    <div class="action-divider"></div>
-    <button class="btn btn-muted" id="reset-bots-btn">Reset bots</button>
-    <button class="btn btn-danger" id="clear-bots-btn">Clear bots</button>
-  </div>
-
-  <div class="panel stats-activity">
-    <div class="panel-header"><span class="panel-title">Activity</span></div>
-    <div class="panel-body" hx-ext="sse" sse-connect="/api/action/stream">
-      <ul id="action-log" sse-swap="progress,done" hx-swap="beforeend"></ul>
-    </div>
   </div>
 
   <div id="stats-data"
@@ -26,21 +16,6 @@
   </div>
 
 </div>
-
-<dialog id="clear-dialog">
-  <h2>Clear bots — destructive</h2>
-  <p style="color:var(--text-warm);line-height:1.5;">
-    This <b>stops the server</b>, takes a <b>safety backup</b>, then
-    <b>permanently deletes the entire rndbot pool</b> (all RNDBOT% accounts,
-    characters, items, mail, guilds, etc.) and restarts. The pool regenerates
-    from scratch on boot. Type <b>CLEAR</b> to confirm.
-  </p>
-  <input class="search-input" id="clear-confirm-input" type="text" placeholder="Type CLEAR" autocomplete="off">
-  <div class="dialog-actions">
-    <button class="btn btn-danger" id="clear-confirm-btn" disabled>Clear bots</button>
-    <button class="btn btn-muted" id="clear-cancel-btn">Cancel</button>
-  </div>
-</dialog>
 
 <script src="/static/stats.js?v={{ stats_js_ver }}" defer></script>
 {% endblock %}

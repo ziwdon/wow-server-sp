@@ -40,6 +40,7 @@ class CharRow:
     level: int
     online: bool
     zone_name: str
+    latency: int
 
 
 @dataclass(frozen=True)
@@ -85,8 +86,8 @@ class PlayersSnapshot:
 
 
 def char_row(row) -> CharRow:
-    """Map a roster row: (username, name, class_id, race_id, level, online, zone_id)."""
-    username, name, class_id, race_id, level, online, zone_id = row
+    """Map a roster row: (username, name, class_id, race_id, level, online, zone_id, latency)."""
+    username, name, class_id, race_id, level, online, zone_id, latency = row
     cls = wr.class_name(int(class_id))
     fac = wr.faction(int(race_id))
     return CharRow(
@@ -100,6 +101,7 @@ def char_row(row) -> CharRow:
         level=int(level),
         online=bool(online),
         zone_name=wr.zone_name(int(zone_id)),
+        latency=int(latency or 0),
     )
 
 
@@ -109,7 +111,10 @@ def _by_level_then_name(c: CharRow):
 
 
 def online_sorted(chars: list[CharRow]) -> tuple[CharRow, ...]:
-    return tuple(sorted((c for c in chars if c.online), key=_by_level_then_name))
+    return tuple(sorted(
+        (c for c in chars if c.online and c.latency > 0),
+        key=_by_level_then_name,
+    ))
 
 
 def group_by_account(chars: list[CharRow]) -> tuple[AccountGroup, ...]:
@@ -175,7 +180,7 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
         with conn.cursor() as cur:
             # 1. Roster — drives online_now + all_groups.
             cur.execute(
-                "SELECT a.username, c.name, c.class, c.race, c.level, c.online, c.zone "
+                "SELECT a.username, c.name, c.class, c.race, c.level, c.online, c.zone, c.latency "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 f"WHERE {_REAL} "
@@ -186,7 +191,7 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
             # 2. Headline aggregate.
             cur.execute(
                 "SELECT COUNT(DISTINCT a.id), "
-                "COUNT(DISTINCT CASE WHEN c.online=1 THEN a.id END), "
+                "COUNT(DISTINCT CASE WHEN c.online=1 AND c.latency > 0 THEN a.id END), "
                 "SUM(c.level=60), SUM(c.level=70), SUM(c.level=80) "
                 "FROM acore_auth.account a "
                 "JOIN acore_characters.characters c ON c.account = a.id "
