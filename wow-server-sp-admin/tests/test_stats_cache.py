@@ -16,8 +16,8 @@ def _snap(fetched_at: float) -> StatsSnapshot:
         bots_by_bracket_stacked=[
             StackedBucket("1-10", 450, (StackedSegment("#88c870", 100), StackedSegment("#888070", 300), StackedSegment("#7ab0e0", 50))),
         ],
-        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 80, 251),),
-        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", 99, 1200),),
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 80, 251),),
+        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", "Horde", "#C03030", 99, 1200),),
     )
 
 

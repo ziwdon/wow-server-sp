@@ -121,8 +121,8 @@ def test_api_stats_data_renders_with_snapshot():
         fetched_at=1716144665.0, bots_total=2500, bots_online=200,
         players_total=3, players_online=1, ahbot_total=4, ahbot_online=0,
         bots_by_class=[Bucket("Warrior", 400)],
-        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 80, 251),),
-        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", 99, 1200),),
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 80, 251),),
+        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", "Horde", "#C03030", 99, 1200),),
     )
     with patch("app.main.stats_refresher.get", return_value=snap), \
          patch("app.main.stats_refresher.is_stale", return_value=False):

@@ -61,3 +61,37 @@ def test_newly_mapped_inaccessible_zones():
     assert wr.zone_name(876)  == "GM Island (inaccessible)"
     assert wr.zone_name(3540) == "Twisting Nether (inaccessible)"
     assert wr.zone_name(3817) == "Testing (inaccessible)"
+
+
+_DAY = 86400
+
+
+def test_relative_last_online_online_char():
+    # An online character shows "online" regardless of its stored logout_time.
+    assert wr.relative_last_online(1000, True, now=10 * _DAY) == "online"
+
+
+def test_relative_last_online_never_logged_in():
+    # logout_time == 0 means the character has never logged in.
+    assert wr.relative_last_online(0, False, now=10 * _DAY) == "never"
+
+
+def test_relative_last_online_today():
+    now = 10 * _DAY + 3600
+    assert wr.relative_last_online(10 * _DAY, False, now=now) == "today"
+
+
+def test_relative_last_online_yesterday():
+    now = 10 * _DAY
+    assert wr.relative_last_online(now - _DAY - 5, False, now=now) == "yesterday"
+
+
+def test_relative_last_online_multiple_days():
+    now = 10 * _DAY
+    assert wr.relative_last_online(now - 5 * _DAY, False, now=now) == "5 days ago"
+
+
+def test_relative_last_online_future_logout_clamps_to_today():
+    # Clock skew: a logout_time slightly ahead of now must not go negative.
+    now = 10 * _DAY
+    assert wr.relative_last_online(now + 100, False, now=now) == "today"

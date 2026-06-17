@@ -61,7 +61,7 @@
           <div class="player-group-head">{{ g.account }}</div>
           <div class="player-table">
             <div class="player-row player-row--head player-row--all">
-              <span>Character</span><span>Class</span><span>Race</span><span>Level</span><span>Faction</span>
+              <span>Character</span><span>Class</span><span>Race</span><span>Level</span><span>Faction</span><span>Last online</span>
             </div>
             {% for c in g.chars %}
             <div class="player-row player-row--all">
@@ -70,6 +70,7 @@
               <span>{{ c.race_name }}</span>
               <span>{{ c.level }}</span>
               <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
+              <span>{{ last_online(c.last_logout, c.online) }}</span>
             </div>
             {% endfor %}
           </div>
@@ -91,7 +92,7 @@
           <div class="player-table">
             <div class="player-row player-row--head player-row--rank">
               <span>#</span><span>Character</span><span>Class</span>
-              <span>Race</span><span class="num">Level</span><span class="num">iLvl</span>
+              <span>Race</span><span>Faction</span><span class="num">Level</span><span class="num">iLvl</span>
             </div>
             {% for r in snap.top_pve %}
             <div class="player-row player-row--rank">
@@ -99,6 +100,7 @@
               <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
               <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
               <span>{{ r.race_name }}</span>
+              <span style="color: {{ r.faction_color }}">{{ r.faction }}</span>
               <span class="num">{{ r.level }}</span>
               <span class="num">{{ r.avg_ilvl if r.avg_ilvl is not none else "—" }}</span>
             </div>
@@ -115,7 +117,7 @@
           <div class="player-table">
             <div class="player-row player-row--head player-row--rank-pvp">
               <span>#</span><span>Character</span><span>Class</span>
-              <span>Race</span><span class="num">Kills</span><span class="num">Honor</span>
+              <span>Race</span><span>Faction</span><span class="num">Kills</span><span class="num">Honor</span>
             </div>
             {% for r in snap.top_pvp %}
             <div class="player-row player-row--rank-pvp">
@@ -123,6 +125,7 @@
               <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
               <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
               <span>{{ r.race_name }}</span>
+              <span style="color: {{ r.faction_color }}">{{ r.faction }}</span>
               <span class="num">{{ r.honor_kills }}</span>
               <span class="num">{{ r.honor }}</span>
             </div>

@@ -41,6 +41,7 @@ class CharRow:
     online: bool
     zone_name: str
     latency: int
+    last_logout: int  # unix ts of last logout; 0 = never logged in
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ class RankRow:
     class_name: str
     class_color: str
     race_name: str
+    faction: str
+    faction_color: str
     level: int
     avg_ilvl: int | None  # None → render "—" (no equipped-gear data)
 
@@ -67,6 +70,8 @@ class PvpRankRow:
     class_name: str
     class_color: str
     race_name: str
+    faction: str
+    faction_color: str
     honor_kills: int
     honor: int
 
@@ -86,8 +91,8 @@ class PlayersSnapshot:
 
 
 def char_row(row) -> CharRow:
-    """Map a roster row: (username, name, class_id, race_id, level, online, zone_id, latency)."""
-    username, name, class_id, race_id, level, online, zone_id, latency = row
+    """Map a roster row: (username, name, class_id, race_id, level, online, zone_id, latency, logout_time)."""
+    username, name, class_id, race_id, level, online, zone_id, latency, logout_time = row
     cls = wr.class_name(int(class_id))
     fac = wr.faction(int(race_id))
     return CharRow(
@@ -102,6 +107,7 @@ def char_row(row) -> CharRow:
         online=bool(online),
         zone_name=wr.zone_name(int(zone_id)),
         latency=int(latency or 0),
+        last_logout=int(logout_time or 0),
     )
 
 
@@ -134,6 +140,7 @@ def rank_rows(rows) -> tuple[RankRow, ...]:
     out: list[RankRow] = []
     for i, (name, class_id, race_id, level, avg_ilvl) in enumerate(rows, start=1):
         cls = wr.class_name(int(class_id))
+        fac = wr.faction(int(race_id))
         out.append(
             RankRow(
                 rank=i,
@@ -141,6 +148,8 @@ def rank_rows(rows) -> tuple[RankRow, ...]:
                 class_name=cls,
                 class_color=wr.class_color(cls),
                 race_name=wr.race_name(int(race_id)),
+                faction=fac,
+                faction_color=wr.faction_color(fac),
                 level=int(level),
                 avg_ilvl=None if avg_ilvl is None else int(avg_ilvl),
             )
@@ -153,6 +162,7 @@ def pvp_rank_rows(rows) -> tuple[PvpRankRow, ...]:
     out: list[PvpRankRow] = []
     for i, (name, class_id, race_id, honor_kills, honor) in enumerate(rows, start=1):
         cls = wr.class_name(int(class_id))
+        fac = wr.faction(int(race_id))
         out.append(
             PvpRankRow(
                 rank=i,
@@ -160,6 +170,8 @@ def pvp_rank_rows(rows) -> tuple[PvpRankRow, ...]:
                 class_name=cls,
                 class_color=wr.class_color(cls),
                 race_name=wr.race_name(int(race_id)),
+                faction=fac,
+                faction_color=wr.faction_color(fac),
                 honor_kills=int(honor_kills or 0),
                 honor=int(honor or 0),
             )
@@ -180,7 +192,7 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
         with conn.cursor() as cur:
             # 1. Roster — drives online_now + all_groups.
             cur.execute(
-                "SELECT a.username, c.name, c.class, c.race, c.level, c.online, c.zone, c.latency "
+                "SELECT a.username, c.name, c.class, c.race, c.level, c.online, c.zone, c.latency, c.logout_time "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 f"WHERE {_REAL} "

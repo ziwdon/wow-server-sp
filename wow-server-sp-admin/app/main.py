@@ -27,6 +27,7 @@ from app.services import logs as logs_svc
 from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
 from app.services import progression as progression_svc
+from app.services import wow_reference as wow_ref
 from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
@@ -104,6 +105,7 @@ templates.env.globals["css_ver"] = _file_hash("app.css")
 templates.env.globals["js_ver"] = _file_hash("settings.js")
 templates.env.globals["backups_js_ver"] = _file_hash("backups.js")
 templates.env.globals["stats_js_ver"] = _file_hash("stats.js")
+templates.env.globals["last_online"] = wow_ref.relative_last_online
 
 
 @app.exception_handler(HTTPException)

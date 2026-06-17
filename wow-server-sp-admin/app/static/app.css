@@ -931,11 +931,11 @@ pre.logview {
 }
 /* Column templates per card. */
 .player-row--online { grid-template-columns: 1.1fr 1.2fr 1fr 1fr 0.6fr 1fr 1.4fr; }
-.player-row--all    { grid-template-columns: 1.4fr 1fr 1fr 0.6fr 1fr; }
+.player-row--all    { grid-template-columns: 1.4fr 1fr 1fr 0.6fr 1fr 1.1fr; }
 .player-row--rank,
 .player-row--rank-pvp {
   column-gap: 0.5rem;
-  grid-template-columns: 0.4fr 1.4fr 1fr 1fr 74px 84px;
+  grid-template-columns: 0.4fr 1.4fr 1fr 1fr 1fr 74px 84px;
 }
 
 .player-rank-section + .player-rank-section { margin-top: 0.8rem; }

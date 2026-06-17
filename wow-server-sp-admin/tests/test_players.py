@@ -14,14 +14,14 @@ from app.services.players import (
 )
 
 
-def _raw(username, name, class_id, race_id, level, online, zone, latency=10):
+def _raw(username, name, class_id, race_id, level, online, zone, latency=10, logout_time=0):
     """A roster row as the SQL SELECT returns it."""
-    return (username, name, class_id, race_id, level, online, zone, latency)
+    return (username, name, class_id, race_id, level, online, zone, latency, logout_time)
 
 
 def test_char_row_maps_names_colors_faction():
     # class 1 = Warrior, race 6 = Tauren (Horde), zone 1637 = Orgrimmar
-    c = char_row(_raw("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637))
+    c = char_row(_raw("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637, logout_time=1716000000))
     assert c.account == "EDUARDO"
     assert c.name == "Vegivaca"
     assert c.class_name == "Warrior"
@@ -32,6 +32,7 @@ def test_char_row_maps_names_colors_faction():
     assert c.level == 58
     assert c.online is False
     assert c.zone_name == "Orgrimmar"
+    assert c.last_logout == 1716000000
 
 
 def test_online_sorted_filters_offline_and_orders_level_then_name():
@@ -72,6 +73,22 @@ def test_rank_rows_assigns_ranks_and_preserves_none_ilvl():
     assert ranked[1].avg_ilvl is None
     assert ranked[0].class_name == "Warrior"
     assert ranked[1].race_name == "Night Elf"
+    # Faction derived from race_id: Tauren(6)=Horde, Night Elf(4)=Alliance
+    assert ranked[0].faction == "Horde"
+    assert ranked[0].faction_color == "#C03030"
+    assert ranked[1].faction == "Alliance"
+    assert ranked[1].faction_color == "#4080C0"
+
+
+def test_pvp_rank_rows_derive_faction():
+    from app.services.players import pvp_rank_rows
+    # (name, class_id, race_id, kills, honor)
+    rows = [("Vegivaca", 1, 6, 42, 1500), ("Sariel", 11, 4, 11, 300)]
+    ranked = pvp_rank_rows(rows)
+    assert ranked[0].faction == "Horde"
+    assert ranked[0].faction_color == "#C03030"
+    assert ranked[1].faction == "Alliance"
+    assert ranked[1].faction_color == "#4080C0"
 
 
 @patch("app.services.players.mysql.connector.connect")
@@ -80,10 +97,10 @@ def test_collect_players_builds_snapshot(mock_connect):
     # fetchall order matches collect_players: roster, top PvE, top PvP.
     cur.fetchall.side_effect = [
         [
-            ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637, 0),
-            ("carlos", "Sariel", 11, 4, 25, 1, 1519, 8),
-            ("carlos", "Tester", 1, 1, 1, 0, 12, 0),
-            ("EDUARDO", "Pitocas", 3, 3, 24, 0, 1519, 0),
+            ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637, 0, 1716000000),
+            ("carlos", "Sariel", 11, 4, 25, 1, 1519, 8, 0),
+            ("carlos", "Tester", 1, 1, 1, 0, 12, 0, 0),
+            ("EDUARDO", "Pitocas", 3, 3, 24, 0, 1519, 0, 1715000000),
         ],
         [
             ("Vegivaca", 1, 6, 58, 37),
@@ -118,7 +135,12 @@ def test_collect_players_builds_snapshot(mock_connect):
     assert snap.top_pvp[0].honor == 1500
     assert snap.fetched_at > 0
 
+    # All-characters card "Last online" needs logout_time in the roster query.
+    assert snap.all_groups[1].chars[0].last_logout == 1716000000  # Vegivaca
+    assert snap.all_groups[0].chars[0].last_logout == 0           # Sariel (online)
+
     executed_sql = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "c.logout_time" in executed_sql
     assert "ORDER BY c.level DESC, avg_ilvl DESC, c.name ASC LIMIT 5" in executed_sql
     assert (
         "ORDER BY c.totalKills DESC, c.totalHonorPoints DESC, c.name ASC LIMIT 5"
@@ -168,7 +190,7 @@ def _sample_snapshot():
     sariel = CharRow(
         account="CARLOS", name="Sariel", class_name="Druid", class_color="#FF7C0A",
         race_name="Night Elf", faction="Alliance", faction_color="#4080C0",
-        level=25, online=True, zone_name="Stormwind City", latency=8,
+        level=25, online=True, zone_name="Stormwind City", latency=8, last_logout=0,
     )
     return PlayersSnapshot(
         fetched_at=1716144665.0,
@@ -176,9 +198,9 @@ def _sample_snapshot():
         cap_vanilla=1, cap_tbc=0, cap_wotlk=0,
         online_now=(sariel,),
         all_groups=(AccountGroup("CARLOS", (sariel,)),),
-        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 25, None),),
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 25, None),),
         top_pvp=(
-            PvpRankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", 12, 450),
+            PvpRankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 12, 450),
         ),
     )
 
@@ -206,6 +228,12 @@ def test_api_players_data_renders_with_snapshot():
     assert '<span class="num">25</span>' in body  # PvE Level right-aligned
     assert '<span class="num">12</span>' in body  # Kills right-aligned
     assert "Top 10 characters" not in body
+    # All-characters "Last online" column; Sariel is online → "online" label
+    assert "Last online" in body
+    assert "online" in body
+    # Faction columns in the Top PvE/PvP cards (Sariel = Alliance)
+    assert "#4080C0" in body
+    assert "Alliance" in body
 
 
 def test_api_players_data_db_down_shows_empty_state():

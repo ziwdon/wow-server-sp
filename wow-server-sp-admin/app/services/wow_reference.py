@@ -1,5 +1,7 @@
 """Static WoW 3.3.5a reference names for admin stats display."""
 
+import time
+
 CLASSES = {
     1: "Warrior",
     2: "Paladin",
@@ -306,3 +308,25 @@ def class_color(name: str) -> str:
 
 def faction_color(name: str) -> str:
     return FACTION_COLORS.get(name, "")
+
+
+def relative_last_online(logout_time: int, online: bool, now: float | None = None) -> str:
+    """Human-readable "last online" label for a character.
+
+    online            → "online" (its stored logout_time is the *previous* logout)
+    logout_time == 0  → "never"  (character has never logged in)
+    same day          → "today"; 1 day → "yesterday"; N days → "N days ago"
+    Future logout_time (clock skew) clamps to 0 days → "today".
+    """
+    if online:
+        return "online"
+    if not logout_time:
+        return "never"
+    if now is None:
+        now = time.time()
+    days = max(0, int((now - logout_time) // 86400))
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"{days} days ago"

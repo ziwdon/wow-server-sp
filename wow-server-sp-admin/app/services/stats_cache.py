@@ -150,6 +150,8 @@ def _rank_rows(value: Any) -> tuple[RankRow, ...]:
                 class_name=str(item["class_name"]),
                 class_color=str(item["class_color"]),
                 race_name=str(item["race_name"]),
+                faction=str(item["faction"]),
+                faction_color=str(item["faction_color"]),
                 level=int(item["level"]),
                 avg_ilvl=None if avg_ilvl is None else int(avg_ilvl),
             )
@@ -171,6 +173,8 @@ def _pvp_rank_rows(value: Any) -> tuple[PvpRankRow, ...]:
                 class_name=str(item["class_name"]),
                 class_color=str(item["class_color"]),
                 race_name=str(item["race_name"]),
+                faction=str(item["faction"]),
+                faction_color=str(item["faction_color"]),
                 honor_kills=int(item["honor_kills"]),
                 honor=int(item["honor"]),
             )
