@@ -1,6 +1,7 @@
 """Static WoW 3.3.5a reference names for admin stats display."""
 
 import time
+from datetime import datetime, timezone
 
 CLASSES = {
     1: "Warrior",
@@ -315,7 +316,7 @@ def relative_last_online(logout_time: int, online: bool, now: float | None = Non
 
     online            → "online" (its stored logout_time is the *previous* logout)
     logout_time == 0  → "never"  (character has never logged in)
-    same day          → "today"; 1 day → "yesterday"; N days → "N days ago"
+    same UTC date     → "today"; 1 day → "yesterday"; N days → "N days ago"
     Future logout_time (clock skew) clamps to 0 days → "today".
     """
     if online:
@@ -324,7 +325,9 @@ def relative_last_online(logout_time: int, online: bool, now: float | None = Non
         return "never"
     if now is None:
         now = time.time()
-    days = max(0, int((now - logout_time) // 86400))
+    now_date = datetime.fromtimestamp(now, timezone.utc).date()
+    logout_date = datetime.fromtimestamp(logout_time, timezone.utc).date()
+    days = max(0, (now_date - logout_date).days)
     if days == 0:
         return "today"
     if days == 1:

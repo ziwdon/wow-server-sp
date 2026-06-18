@@ -82,8 +82,15 @@ def test_relative_last_online_today():
 
 
 def test_relative_last_online_yesterday():
-    now = 10 * _DAY
-    assert wr.relative_last_online(now - _DAY - 5, False, now=now) == "yesterday"
+    now = 10 * _DAY + 3600
+    assert wr.relative_last_online(now - _DAY, False, now=now) == "yesterday"
+
+
+def test_relative_last_online_previous_calendar_day_within_24_hours():
+    # Sariel/Loriel case: previous calendar day, but less than 24 hours ago.
+    now = 1781789871       # 2026-06-18 13:37:51 UTC
+    logout = 1781711624    # 2026-06-17 15:53:44 UTC
+    assert wr.relative_last_online(logout, False, now=now) == "yesterday"
 
 
 def test_relative_last_online_multiple_days():
