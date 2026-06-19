@@ -1,4 +1,6 @@
-from app.main import _format_started_at
+import datetime as dt
+
+from app.main import _format_started_at, _render_progress
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from app.main import app
@@ -25,6 +27,14 @@ def test_format_started_at_bad_input_returns_dash():
 def test_format_started_at_no_subseconds():
     result = _format_started_at("2026-05-19T19:31:05Z")
     assert result == "2026-05-19 19:31 UTC"
+
+
+def test_render_progress_uses_event_timestamp():
+    event_time = dt.datetime(2026, 6, 19, 5, 0, tzinfo=dt.timezone.utc)
+
+    result = _render_progress("wait_init", "waiting", event_time)
+
+    assert "[19 Jun 05:00]" in result
 
 
 def test_api_backups_timestamp_includes_utc():

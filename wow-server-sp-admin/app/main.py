@@ -427,13 +427,15 @@ def _esc(s: str) -> str:
     )
 
 
-def _render_progress(step: str, msg: str) -> str:
+def _render_progress(step: str, msg: str, timestamp: dt.datetime) -> str:
     # All four entities (& < > ") must be escaped: step is interpolated
     # into a quoted attribute (class="step-…"), and msg can carry
     # ampersands or angle brackets from arbitrary subprocess stderr.
     safe_step = _esc(step)
     safe_msg = _esc(msg)
-    ts = dt.datetime.now(tz=dt.timezone.utc).strftime("%d %b %H:%M")
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
+    ts = timestamp.astimezone(dt.timezone.utc).strftime("%d %b %H:%M")
     return f'<li class="step step-{safe_step}"><span class="log-ts">[{ts}]</span> <b>{safe_step}</b>: {safe_msg}</li>'
 
 
@@ -465,9 +467,11 @@ async def _sse_stream(record: ActionRecord):
     q = record.subscribe()
     try:
         while True:
-            kind, a, b = await q.get()
+            item = await q.get()
+            kind = item[0]
             if kind == "progress":
-                yield {"event": "progress", "data": _render_progress(a, b)}
+                _, timestamp, step, msg = item
+                yield {"event": "progress", "data": _render_progress(step, msg, timestamp)}
             elif kind == "done":
                 yield {"event": "done", "data": _render_done(record)}
                 return

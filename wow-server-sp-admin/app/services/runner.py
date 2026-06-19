@@ -4,9 +4,9 @@ Design choices:
   - POSTs are fire-and-forget: kick off the action on a background
     task and return the action id immediately. The browser doesn't
     block for 40-60 s on Stop or several minutes on Restart.
-  - ActionRecord stores an append-only list of (step, msg) tuples,
-    so reconnecting or late-joining SSE clients can replay history
-    before subscribing to new events.
+  - ActionRecord stores an append-only list of (timestamp, step, msg)
+    tuples, so reconnecting or late-joining SSE clients can replay
+    history before subscribing to new events.
   - Each SSE consumer gets its own asyncio.Queue; the runner fans
     out progress events to every queue. Multiple browser tabs can
     watch the same action.
@@ -15,6 +15,7 @@ Design choices:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import threading
 import uuid
 from collections.abc import Callable
@@ -23,12 +24,16 @@ from dataclasses import dataclass, field
 from app.services.actions import ActionResult
 
 
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
 @dataclass
 class ActionRecord:
     id: str
     name: str
     status: str = "running"  # 'running' | 'ok' | 'error' | 'timeout' | 'already'
-    steps: list[tuple[str, str]] = field(default_factory=list)
+    steps: list[tuple[dt.datetime, str, str]] = field(default_factory=list)
     # Verification metadata populated by Apply flow (Task 25); empty
     # otherwise. Each entry is an actions.VerifyFailure with the env
     # var, the originating dist-file key (if known), and a reason.
@@ -42,8 +47,8 @@ class ActionRecord:
         q: asyncio.Queue = asyncio.Queue()
         # Replay history so a late-joining client sees everything that
         # happened before it connected.
-        for step, msg in self.steps:
-            q.put_nowait(("progress", step, msg))
+        for timestamp, step, msg in self.steps:
+            q.put_nowait(("progress", timestamp, step, msg))
         if self._done:
             q.put_nowait(("done", self.status, ""))
         self._subscribers.append(q)
@@ -55,7 +60,7 @@ class ActionRecord:
         except ValueError:
             pass
 
-    def _broadcast(self, item: tuple[str, str, str]) -> None:
+    def _broadcast(self, item: tuple) -> None:
         for q in list(self._subscribers):
             try:
                 q.put_nowait(item)
@@ -111,17 +116,17 @@ class ActionRunner:
 
         loop = asyncio.get_running_loop()
 
-        def _commit(step: str, msg: str) -> None:
+        def _commit(timestamp: dt.datetime, step: str, msg: str) -> None:
             # Runs on the event loop: append + broadcast atomically with
             # respect to subscribe(). If we appended on the worker thread
             # and broadcast separately, a late subscribe() could replay
             # the just-appended step AND receive the queued broadcast,
             # duplicating the event.
-            record.steps.append((step, msg))
-            record._broadcast(("progress", step, msg))
+            record.steps.append((timestamp, step, msg))
+            record._broadcast(("progress", timestamp, step, msg))
 
         def on_progress(step: str, msg: str) -> None:
-            loop.call_soon_threadsafe(_commit, step, msg)
+            loop.call_soon_threadsafe(_commit, _utcnow(), step, msg)
 
         async def _run() -> None:
             try:
@@ -133,7 +138,7 @@ class ActionRunner:
                 # on_progress → call_soon_threadsafe would queue _commit after
                 # the finally block's _broadcast("done"), so live SSE clients
                 # would see "done" before the exception step.
-                _commit("exception", str(e))
+                _commit(_utcnow(), "exception", str(e))
             finally:
                 record._done = True
                 record._broadcast(("done", record.status, ""))
