@@ -70,7 +70,7 @@
               <span>{{ c.race_name }}</span>
               <span>{{ c.level }}</span>
               <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
-              <span>{{ last_online(c.last_logout, c.online) }}</span>
+              <span>{{ last_online(c.last_logout, c.online, c.latency) }}</span>
             </div>
             {% endfor %}
           </div>

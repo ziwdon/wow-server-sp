@@ -311,15 +311,18 @@ def faction_color(name: str) -> str:
     return FACTION_COLORS.get(name, "")
 
 
-def relative_last_online(logout_time: int, online: bool, now: float | None = None) -> str:
+def relative_last_online(logout_time: int, online: bool, latency: int = 0, now: float | None = None) -> str:
     """Human-readable "last online" label for a character.
 
-    online            → "online" (its stored logout_time is the *previous* logout)
-    logout_time == 0  → "never"  (character has never logged in)
-    same UTC date     → "today"; 1 day → "yesterday"; N days → "N days ago"
+    online and latency > 0 → "online" (active session confirmed by ping)
+    online and latency == 0 → treat as offline — character just logged in and the
+                               first CMSG_PING hasn't landed yet (~30 s window);
+                               falls through to logout_time-based label.
+    logout_time == 0       → "never"  (character has never logged in)
+    same UTC date          → "today"; 1 day → "yesterday"; N days → "N days ago"
     Future logout_time (clock skew) clamps to 0 days → "today".
     """
-    if online:
+    if online and latency > 0:
         return "online"
     if not logout_time:
         return "never"

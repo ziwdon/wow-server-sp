@@ -67,8 +67,15 @@ _DAY = 86400
 
 
 def test_relative_last_online_online_char():
-    # An online character shows "online" regardless of its stored logout_time.
-    assert wr.relative_last_online(1000, True, now=10 * _DAY) == "online"
+    # online=True + latency > 0 → confirmed active session.
+    assert wr.relative_last_online(1000, True, latency=42, now=10 * _DAY) == "online"
+
+
+def test_relative_last_online_online_no_latency_yet():
+    # online=True but latency=0 → startup gap (first CMSG_PING not yet received);
+    # fall through to logout_time so the All-characters card matches Online-now.
+    now = 10 * _DAY + 3600
+    assert wr.relative_last_online(10 * _DAY, True, latency=0, now=now) == "today"
 
 
 def test_relative_last_online_never_logged_in():
