@@ -31,9 +31,16 @@ from app.state import db_credentials
 ProgressCb = Callable[[str, str], None]
 log = logging.getLogger(__name__)
 KNOWN_DBS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+MYSQL_TIMEOUT = 3600
+DOCKER_TIMEOUT = 180
+QUICK_TIMEOUT = 30
 CLEAR_SQL = Path(
     os.environ.get("CLEAR_RNDBOTS_SQL", "/app/app/data/clear_rndbots.sql")
 )
+
+
+class ActionTimeout(RuntimeError):
+    """A bounded external command exceeded its deadline."""
 
 
 class ActionResult(str, enum.Enum):
@@ -85,21 +92,29 @@ def read_manifest(archive: Path) -> dict | None:
 
 def _import_db(db: str, sql_path: Path, password: str, on_progress: ProgressCb) -> bool:
     on_progress("restore", f"restoring {db}")
-    drop = subprocess.run(
-        [
-            "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
-            "-e", f"DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db};",
-        ],
-        capture_output=True, text=True,
-    )
+    try:
+        drop = subprocess.run(
+            [
+                "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
+                "-e", f"DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db};",
+            ],
+            capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        on_progress("restore", f"{db}: drop/create timed out")
+        raise ActionTimeout(f"{db} drop/create timed out") from e
     if drop.returncode != 0:
         on_progress("restore", f"{db}: drop/create failed: {drop.stderr.strip()}")
         return False
     with sql_path.open("rb") as fh:
-        imp = subprocess.run(
-            ["docker", "exec", "-i", "ac-database", "mysql", "-uroot", f"-p{password}", db],
-            stdin=fh, capture_output=True, text=True,
-        )
+        try:
+            imp = subprocess.run(
+                ["docker", "exec", "-i", "ac-database", "mysql", "-uroot", f"-p{password}", db],
+                stdin=fh, capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            on_progress("restore", f"{db}: import timed out")
+            raise ActionTimeout(f"{db} import timed out") from e
     if imp.returncode != 0:
         on_progress("restore", f"{db}: import failed: {imp.stderr.strip()}")
         return False
@@ -147,9 +162,9 @@ def _count_query(sql: str, password: str) -> int:
                 "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
                 "-N", "-s", "-e", sql,
             ],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=QUICK_TIMEOUT,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return -1
     if r.returncode != 0:
         return -1
@@ -190,7 +205,7 @@ def run_clear_bots(*, on_progress: ProgressCb) -> ActionResult:
                     "docker", "exec", "-i", "ac-database", "mysql", "-uroot",
                     f"-p{password}",
                 ],
-                stdin=fh, capture_output=True, text=True,
+                stdin=fh, capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
             )
         if imp.returncode != 0:
             on_progress("clear", f"clear SQL FAILED: {imp.stderr.strip()}")
@@ -215,6 +230,10 @@ def run_clear_bots(*, on_progress: ProgressCb) -> ActionResult:
         )
         if any(n not in (0, -1) for n in (acc, chars, rb, at)):
             on_progress("verify", "WARNING: non-zero remaining rndbot rows after clear")
+    except subprocess.TimeoutExpired:
+        on_progress("clear", "clear SQL timed out")
+        _restart_after_restore_failure(on_progress)
+        return ActionResult.TIMEOUT
     except Exception as e:  # noqa: BLE001
         log.exception("clear-bots failed after stop")
         on_progress("clear", f"clear failed: {e}")
@@ -261,30 +280,19 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
         on_progress("validate", f"rejecting unknown DBs: {unknown}")
         return ActionResult.ERROR
     selected = [d for d in dbs if d in KNOWN_DBS]
+    if not selected:
+        on_progress("validate", "archive contains no database dumps")
+        return ActionResult.ERROR
     on_progress("validate", f"will restore: {selected}")
 
-    # 3. Stop worldserver (no backup on stop anymore).
-    stop = run_stop(on_progress=on_progress)
-    if stop not in (ActionResult.OK, ActionResult.ALREADY):
-        return stop
-
     stage: Path | None = None
+    stopped = False
     try:
-        # 4. Pre-restore safety backup — abort (and restart) if it fails.
-        on_progress("safety", "taking pre-restore safety backup")
-        safety = create_backup("prerestore", on_progress=on_progress)
-        if not safety.ok:
-            on_progress("safety", "pre-restore backup FAILED; aborting and restarting")
-            _restart_after_restore_failure(on_progress)
-            return ActionResult.ERROR
-
-        # 5. Extract + import.
-        password = str(db_credentials()["password"])
+        # Extract and validate all SQL before stopping or replacing anything.
         stage = Path(tempfile.mkdtemp(prefix="restore-"))
         with tarfile.open(archive, "r:gz") as tf:
             if _archive_has_unsafe_member(tf, stage):
                 on_progress("validate", "archive contains unsafe paths")
-                _restart_after_restore_failure(on_progress)
                 return ActionResult.ERROR
             tf.extractall(stage, filter="data")
         missing_sql = [
@@ -292,13 +300,32 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
             if not (stage / "sql" / f"{db}.sql").is_file()
         ]
         if missing_sql:
-            on_progress("restore", f"archive missing SQL dumps for: {missing_sql}")
+            on_progress("validate", f"archive missing SQL dumps for: {missing_sql}")
+            return ActionResult.ERROR
+        invalid_sql = []
+        for db in selected:
+            sql_path = stage / "sql" / f"{db}.sql"
+            if sql_path.stat().st_size == 0 or not sql_path.read_bytes().rstrip().endswith(b"-- Dump completed"):
+                invalid_sql.append(db)
+        if invalid_sql:
+            on_progress("validate", f"archive has empty or incomplete SQL dumps: {invalid_sql}")
+            return ActionResult.ERROR
+
+        stop = run_stop(on_progress=on_progress)
+        if stop not in (ActionResult.OK, ActionResult.ALREADY):
+            return stop
+        stopped = True
+        on_progress("safety", "taking pre-restore safety backup")
+        safety = create_backup("prerestore", on_progress=on_progress)
+        if not safety.ok:
+            on_progress("safety", "pre-restore backup FAILED; aborting and restarting")
             _restart_after_restore_failure(on_progress)
             return ActionResult.ERROR
+        password = str(db_credentials()["password"])
         for db in selected:
             sql_path = stage / "sql" / f"{db}.sql"
             if not _import_db(db, sql_path, password, on_progress):
-                _restart_after_restore_failure(on_progress)
+                on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
                 return ActionResult.ERROR
 
         # 6. Restore admin.yml if present (the one config the admin may write).
@@ -306,10 +333,16 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
         if admin_yml.is_file():
             on_progress("restore", "restoring docker-compose.admin.yml")
             _restore_admin_yml(admin_yml, ac_stack)
+    except ActionTimeout as e:
+        log.warning("restore command timed out: %s", e)
+        on_progress("restore", f"{e}; server remains stopped; restore the pre-restore archive to recover")
+        return ActionResult.TIMEOUT
     except Exception as e:  # noqa: BLE001
-        log.exception("restore failed after worldserver stop")
+        log.exception("restore failed")
         on_progress("restore", f"restore failed: {e}")
-        _restart_after_restore_failure(on_progress)
+        if not stopped:
+            return ActionResult.ERROR
+        on_progress("restore", "server remains stopped; restore the pre-restore archive to recover")
         return ActionResult.ERROR
     finally:
         if stage is not None:
@@ -378,14 +411,18 @@ def run_stop(
             console.send("saveall")
             time.sleep(1)
     except Exception as e:  # noqa: BLE001
-        on_progress("attach", f"console error: {e}")
-        return ActionResult.ERROR
+        log.warning("console warning phase failed; proceeding with docker stop: %s", e)
+        on_progress("attach", f"console warning phase failed ({e}); proceeding with docker stop")
 
     on_progress("docker_stop", "docker stop --time 60 ac-worldserver")
-    subprocess.run(
-        ["docker", "stop", "--time", "60", WORLDSERVER],
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ["docker", "stop", "--time", "60", WORLDSERVER],
+            check=False, timeout=DOCKER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        on_progress("docker_stop", "docker stop timed out")
+        return ActionResult.TIMEOUT
 
     on_progress("wait_exit", "waiting for exited state")
     if not _wait_for_status("exited", timeout=120, on_progress=on_progress):
@@ -509,11 +546,15 @@ def run_start(*, on_progress: ProgressCb) -> ActionResult:
     compose_args, extra_env = _ac_compose_base_args(ac_stack)
 
     on_progress("compose_up", "docker compose up -d ac-worldserver ac-database")
-    result = subprocess.run(
-        [*compose_args, "up", "-d", "ac-worldserver", "ac-database"],
-        capture_output=True, text=True,
-        env={**os.environ, **extra_env},
-    )
+    try:
+        result = subprocess.run(
+            [*compose_args, "up", "-d", "ac-worldserver", "ac-database"],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, **extra_env},
+        )
+    except subprocess.TimeoutExpired:
+        on_progress("compose_up", "docker compose up timed out")
+        return ActionResult.TIMEOUT
     if result.returncode != 0:
         on_progress("compose_up", f"compose up FAILED: {result.stderr}")
         return ActionResult.ERROR
@@ -542,13 +583,21 @@ def run_restart(
 
 def run_force_stop(*, on_progress: ProgressCb) -> ActionResult:
     on_progress("force_stop", "docker stop --time 60 ac-worldserver")
-    result = subprocess.run(
-        ["docker", "stop", "--time", "60", WORLDSERVER],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["docker", "stop", "--time", "60", WORLDSERVER],
+            capture_output=True, text=True, timeout=DOCKER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        on_progress("force_stop", "docker stop timed out")
+        return ActionResult.TIMEOUT
     if result.returncode != 0:
         on_progress("force_stop", f"docker stop failed: {result.stderr}; escalating to kill")
-        subprocess.run(["docker", "kill", WORLDSERVER], check=False)
+        try:
+            subprocess.run(["docker", "kill", WORLDSERVER], check=False, timeout=QUICK_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            on_progress("force_stop", "docker kill timed out")
+            return ActionResult.TIMEOUT
 
     if not _wait_for_status("exited", timeout=120, on_progress=on_progress):
         return ActionResult.TIMEOUT
@@ -575,16 +624,20 @@ def _read_loaded_config(on_progress: ProgressCb) -> set[str] | None:
     """Read every .conf actually loaded by the running worldserver and
     return the set of derived AC_* env-var names. Returns None on read
     error so callers can fail loudly."""
-    result = subprocess.run(
-        [
-            "docker", "exec", WORLDSERVER, "sh", "-c",
-            'cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null; '
-            'for f in /azerothcore/env/dist/etc/modules/*.conf; do '
-            '[ -f "$f" ] && cat "$f"; '
-            'done',
-        ],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "docker", "exec", WORLDSERVER, "sh", "-c",
+                'cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null; '
+                'for f in /azerothcore/env/dist/etc/modules/*.conf; do '
+                '[ -f "$f" ] && cat "$f"; '
+                'done',
+            ],
+            capture_output=True, text=True, timeout=QUICK_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        on_progress("verify", "timed out reading loaded configs")
+        return None
     if result.returncode != 0:
         on_progress("verify", f"could not read loaded configs: {result.stderr.strip()}")
         return None
@@ -597,10 +650,14 @@ def _read_loaded_config(on_progress: ProgressCb) -> set[str] | None:
 
 
 def _read_live_env(on_progress: ProgressCb) -> dict[str, str] | None:
-    result = subprocess.run(
-        ["docker", "exec", WORLDSERVER, "env"],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["docker", "exec", WORLDSERVER, "env"],
+            capture_output=True, text=True, timeout=QUICK_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        on_progress("verify", "timed out reading container env")
+        return None
     if result.returncode != 0:
         on_progress("verify", f"docker exec env failed: {result.stderr.strip()}")
         return None

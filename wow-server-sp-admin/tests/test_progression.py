@@ -111,8 +111,9 @@ def test_config_from_resolved_keys_parses_progression_values_and_defaults():
 @patch("app.services.progression.mysql.connector.connect")
 def test_apply_progression_inserts_missing_rows_and_deletes_nothing(mock_connect, tmp_path):
     cur = MagicMock()
-    # selected character re-read, existing rows, post-commit verification
+    # Cheap online pre-check, locking re-read, then post-commit verification.
     cur.fetchone.side_effect = [
+        (101, "CARLOS", "Sariel", 11, 4, 60, 0, 0),
         (101, "CARLOS", "Sariel", 11, 4, 60, 0, 0),
         (8,),
     ]
@@ -171,6 +172,7 @@ def test_apply_progression_rejects_online_without_write(mock_connect, tmp_path):
 def test_apply_progression_rolls_back_if_verification_fails(mock_connect, tmp_path):
     cur = MagicMock()
     cur.fetchone.side_effect = [
+        (101, "CARLOS", "Sariel", 11, 4, 60, 0, 0),
         (101, "CARLOS", "Sariel", 11, 4, 60, 0, 0),
         (7,),
     ]

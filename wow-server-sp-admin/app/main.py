@@ -34,6 +34,7 @@ from app.state import db_credentials, get_state, init_state, list_keys_resolved
 APP_DIR = Path(__file__).resolve().parent
 _AC_STACK = Path(os.environ.get("AC_STACK_DIR", "/ac"))
 _SNAPSHOTS = Path(os.environ.get("ADMIN_SNAPSHOTS_DIR", "/admin-snapshots"))
+_MAX_IMPORT_BYTES = int(os.environ.get("ADMIN_MAX_IMPORT_BYTES", str(8 * 1024 ** 3)))
 log = logging.getLogger(__name__)
 
 
@@ -147,7 +148,7 @@ async def api_keys() -> list[dict]:
 
 @app.get("/api/status", response_class=HTMLResponse)
 async def api_status(request: Request) -> HTMLResponse:
-    info = docker_client.inspect_worldserver()
+    info = await asyncio.to_thread(docker_client.inspect_worldserver)
     return templates.TemplateResponse(
         "partials/status.html",
         {
@@ -194,8 +195,10 @@ def _format_started_at(s: str | None) -> str:
 
 @app.get("/api/stats", response_class=HTMLResponse)
 async def api_stats(request: Request) -> HTMLResponse:
-    info = docker_client.inspect_worldserver()
-    raw = docker_client.stats_worldserver()
+    info, raw = await asyncio.gather(
+        asyncio.to_thread(docker_client.inspect_worldserver),
+        asyncio.to_thread(docker_client.stats_worldserver),
+    )
     stats = None
     if raw is not None:
         stats = {
@@ -326,7 +329,7 @@ async def maintenance_page(request: Request) -> HTMLResponse:
             "title": "azerothcore-admin · maintenance",
             "config": store.load_config(),
             "log": store.read_log(),
-            "hours": list(range(24)),
+            "hours": list(range(24)), "error": request.query_params.get("error"),
         },
     )
 
@@ -361,7 +364,8 @@ async def post_maintenance(
     try:
         store.save_config(cfg)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        from urllib.parse import quote
+        return RedirectResponse(f"/maintenance?error={quote(str(e))}", status_code=303)
     return RedirectResponse("/maintenance", status_code=303)
 
 
@@ -564,13 +568,24 @@ async def post_import_restore(file: UploadFile = File(...)):
     archive_name = f"azerothcore-backup-imported-{stamp}.tar.gz"
     dest = backups_dir / archive_name
 
-    content = await file.read()
+    if file.size is not None and file.size > _MAX_IMPORT_BYTES:
+        raise HTTPException(413, "uploaded archive exceeds the configured size limit")
     try:
-        dest.write_bytes(content)
+        total = 0
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > _MAX_IMPORT_BYTES:
+                    out.close()
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(413, "uploaded archive exceeds the configured size limit")
+                out.write(chunk)
     except OSError as e:
+        dest.unlink(missing_ok=True)
         raise HTTPException(500, f"could not save upload: {e}")
 
-    manifest = read_manifest(dest)
+    manifest = await asyncio.to_thread(read_manifest, dest)
     if manifest is None or manifest.get("format_version") != 1:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, "invalid or unsupported archive — missing or incompatible manifest")
@@ -635,7 +650,7 @@ async def api_players_data(request: Request) -> HTMLResponse:
     snap = None
     err = None
     try:
-        snap = players_svc.collect_players(**db_credentials())
+        snap = await asyncio.to_thread(players_svc.collect_players, **db_credentials())
     except Exception as e:  # noqa: BLE001 — DB down must not 500 the page
         err = str(e)
     return templates.TemplateResponse(
@@ -672,7 +687,7 @@ async def api_progression_characters(request: Request) -> HTMLResponse:
     err = None
     cfg = progression_svc.config_from_resolved_keys(list_keys_resolved())
     try:
-        rows = progression_svc.collect_characters(**db_credentials())
+        rows = await asyncio.to_thread(progression_svc.collect_characters, **db_credentials())
     except Exception as e:  # noqa: BLE001
         err = str(e)
     rows_json = json.dumps([
@@ -699,7 +714,7 @@ async def api_progression_characters(request: Request) -> HTMLResponse:
 async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
     cfg = progression_svc.config_from_resolved_keys(list_keys_resolved())
     try:
-        result = progression_svc.apply_progression(
+        result = await asyncio.to_thread(progression_svc.apply_progression,
             guid=payload.guid,
             target_expansion=payload.target_expansion,
             config=cfg,
@@ -866,7 +881,7 @@ def _run_apply_then_verify(state, on_progress) -> ActionResult:
     if current is not None:
         current.verify_failed = failed
 
-    # A bind failure does NOT downgrade the action's overall status to
-    # error — the restart itself was successful and the UI surfaces the
-    # bind failure separately via the verify_failed list.
+    if failed:
+        on_progress("verify", "post-apply env-var verification FAILED")
+        return ActionResult.ERROR
     return ActionResult.OK

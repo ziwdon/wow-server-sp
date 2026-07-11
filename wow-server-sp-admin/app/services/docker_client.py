@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import docker
 import docker.errors
+from requests.exceptions import ConnectionError, ReadTimeout
 
 WORLDSERVER = "ac-worldserver"
 DATABASE = "ac-database"
@@ -28,6 +29,8 @@ def inspect_worldserver() -> ContainerInfo:
         c = _client().containers.get(WORLDSERVER)
     except docker.errors.NotFound:
         return ContainerInfo(status="missing", started_at=None, exit_code=None, image=None)
+    except (docker.errors.APIError, ConnectionError, ReadTimeout):
+        return ContainerInfo(status="unknown", started_at=None, exit_code=None, image=None)
     state = c.attrs.get("State", {})
     return ContainerInfo(
         status=state.get("Status", "unknown"),
@@ -48,11 +51,14 @@ def stats_worldserver() -> ContainerStats | None:
     """One-shot non-streaming stats. Returns None if container is not running."""
     try:
         c = _client().containers.get(WORLDSERVER)
-    except docker.errors.NotFound:
+    except (docker.errors.NotFound, docker.errors.APIError, ConnectionError, ReadTimeout):
         return None
-    if c.status != "running":
+    try:
+        if c.status != "running":
+            return None
+        s = c.stats(stream=False)
+    except (docker.errors.APIError, ConnectionError, ReadTimeout):
         return None
-    s = c.stats(stream=False)
     cpu_stats = s.get("cpu_stats", {})
     precpu = s.get("precpu_stats", {})
     cpu_delta = (

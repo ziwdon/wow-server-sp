@@ -6,6 +6,11 @@ function showBanner(msg) {
   setTimeout(() => b.remove(), 8000);
 }
 
+async function responseDetail(response) {
+  const text = await response.text();
+  try { return JSON.parse(text).detail || text; } catch (_) { return text; }
+}
+
 // Escape user/operator-supplied strings before interpolating into innerHTML
 // or quoted attributes. Keys come from upstream .conf.dist files (trusted);
 // effective values come from admin.yml (operator-set, so technically
@@ -111,6 +116,8 @@ function _render() {
     else if (applied) rowClasses.push('key-row-applied');
     if (state.selected && k.key === state.selected.key) rowClasses.push('selected');
     row.className = rowClasses.join(' ');
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
     const value = pending ? state.pending[k.key] : k.effective_value;
     const inputClasses = ['key-input'];
     if (pending) inputClasses.push('key-input-pending');
@@ -125,6 +132,9 @@ function _render() {
       row.classList.add('show-meta');
     }
     row.addEventListener('click', () => selectKey(k));
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); row.click(); }
+    });
     list.appendChild(row);
   });
   if (filtered.length > 200) {
@@ -134,8 +144,14 @@ function _render() {
   }
 }
 
+let mobileDetailTrigger = null;
 function closeMobileDetail() {
-  document.getElementById('key-detail').classList.remove('mobile-visible');
+  const detail = document.getElementById('key-detail');
+  detail.classList.remove('mobile-visible');
+  detail.removeAttribute('role');
+  detail.removeAttribute('aria-modal');
+  if (mobileDetailTrigger) mobileDetailTrigger.focus();
+  mobileDetailTrigger = null;
   state.selected = null;
   const prev = document.querySelector('.key-row.selected');
   if (prev) prev.classList.remove('selected');
@@ -179,9 +195,17 @@ function selectKey(k) {
   `;
 
   if (window.innerWidth <= 768) {
+    mobileDetailTrigger = newRow;
+    detail.setAttribute('role', 'dialog');
+    detail.setAttribute('aria-modal', 'true');
     detail.classList.add('mobile-visible');
+    detail.querySelector('.mobile-back-btn')?.focus();
   }
 }
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && document.getElementById('key-detail').classList.contains('mobile-visible')) closeMobileDetail();
+});
 
 document.addEventListener('input', e => {
   if (e.target.classList.contains('key-input')) {
@@ -257,7 +281,7 @@ document.getElementById('apply-confirm').addEventListener('click', async () => {
     body: JSON.stringify({ pending: state.pending }),
   });
   if (!r.ok) {
-    showBanner('Apply failed: ' + await r.text());
+    showBanner('Apply failed: ' + await responseDetail(r));
     return;
   }
   const { id } = await r.json();
@@ -276,7 +300,7 @@ document.getElementById('rollback-btn').addEventListener('click', async () => {
   if (!confirm('Roll back to the most recent admin.yml snapshot and restart?')) return;
   const r = await fetch('/api/settings/rollback', { method: 'POST' });
   if (!r.ok) {
-    showBanner('Rollback failed: ' + await r.text());
+    showBanner('Rollback failed: ' + await responseDetail(r));
     return;
   }
   const { id } = await r.json();

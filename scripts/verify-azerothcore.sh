@@ -729,9 +729,9 @@ elif [ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]; then
 elif [ ! -x "$BACKUP_SCRIPT" ]; then
     info "Cannot check backup freshness: backup.sh missing/not executable (see Check 15)"
 else
-    newer_count="$(find "$BACKUPS_DIR" -type f -newer "$BACKUP_SCRIPT" 2>/dev/null | wc -l)"
-    if [ "$newer_count" -gt 0 ]; then
-        ok "Backups directory has $newer_count file(s) newer than backup.sh"
+    fresh_count="$(find "$BACKUPS_DIR" -type f -mmin -1500 2>/dev/null | wc -l)"
+    if [ "$fresh_count" -gt 0 ]; then
+        ok "Backups directory has $fresh_count file(s) from the last 25 hours"
     else
         fail "Backups directory has files but none newer than backup.sh (backup hasn't run since script was last written)"
     fi

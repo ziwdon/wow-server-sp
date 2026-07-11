@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from app.services import actions
@@ -183,3 +184,40 @@ def test_run_backup_manual_uses_manual_label(mock_backup):
     result = actions.run_backup_manual(on_progress=lambda *a: None)
     assert result == ActionResult.OK
     assert mock_backup.call_args.args[0] == "manual"
+
+
+@patch("app.services.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("docker", 300))
+@patch("app.services.actions.inspect_worldserver")
+def test_start_maps_compose_timeout_to_timeout(mock_inspect, mock_run):
+    from app.services.docker_client import ContainerInfo
+    from app.services.actions import run_start
+
+    mock_inspect.return_value = ContainerInfo("exited", None, 0, None)
+    assert run_start(on_progress=lambda *_: None) == ActionResult.TIMEOUT
+
+
+@patch("app.services.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("docker", 180))
+@patch("app.services.actions.WorldserverConsole")
+@patch("app.services.actions.inspect_worldserver")
+def test_stop_maps_docker_timeout_to_timeout(mock_inspect, mock_console, mock_run):
+    from app.services.docker_client import ContainerInfo
+
+    mock_inspect.return_value = ContainerInfo("running", None, None, None)
+    assert run_stop(on_progress=lambda *_: None, grace_seconds=0) == ActionResult.TIMEOUT
+
+
+@patch("app.services.actions.subprocess.run")
+@patch("app.services.actions._wait_for_status", return_value=True)
+def test_force_stop_escalates_to_kill(mock_wait, mock_run):
+    from app.services.actions import run_force_stop
+
+    mock_run.side_effect = [MagicMock(returncode=1, stderr="nope"), MagicMock(returncode=0)]
+    assert run_force_stop(on_progress=lambda *_: None) == ActionResult.OK
+    assert mock_run.call_args_list[1].args[0] == ["docker", "kill", "ac-worldserver"]
+
+
+@patch("app.services.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("docker", 180))
+def test_force_stop_maps_timeout_to_timeout(mock_run):
+    from app.services.actions import run_force_stop
+
+    assert run_force_stop(on_progress=lambda *_: None) == ActionResult.TIMEOUT

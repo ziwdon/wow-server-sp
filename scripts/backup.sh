@@ -70,6 +70,18 @@ for DB in ${DATABASES}; do
     fi
 done
 
+# Missing databases must never masquerade as a healthy backup or trigger
+# retention pruning. Preserve useful partial dumps under an explicit label.
+if [ -n "${skipped}" ]; then
+    if [ -n "${dumped}" ]; then
+        ARCHIVE="${BACKUP_DIR}/azerothcore-backup-${LABEL}-partial-${STAMP}.tar.gz"
+        log "ERROR: Partial backup; skipped:${skipped}. Writing ${ARCHIVE}." >&2
+    else
+        log "ERROR: No databases were dumped; skipped:${skipped}. No archive written." >&2
+        exit 1
+    fi
+fi
+
 # Stage config files (we only READ from STACK_DIR — safe on the admin's ro mount).
 for item in .env docker-compose.override.yml docker-compose.admin.yml; do
     if [ -f "${STACK_DIR}/${item}" ]; then
@@ -123,6 +135,11 @@ MANIFEST
 tar -czf "${ARCHIVE}" -C "${STAGE}" manifest.json sql config
 chmod 600 "${ARCHIVE}"
 log "Wrote ${ARCHIVE}"
+
+if [ -n "${skipped}" ]; then
+    log "ERROR: Backup is partial; retention pruning skipped." >&2
+    exit 1
+fi
 
 # Prune ONLY in daily mode (the cron's nightly run). Deletes EVERY label older
 # than RETENTION_DAYS, plus any legacy multi-file backups from before cutover.

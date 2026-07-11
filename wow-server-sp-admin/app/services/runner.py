@@ -42,6 +42,7 @@ class ActionRecord:
     verify_failed: list = field(default_factory=list)
     _subscribers: list[asyncio.Queue] = field(default_factory=list)
     _done: bool = False
+    _completion: asyncio.Event = field(default_factory=asyncio.Event)
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
@@ -59,6 +60,10 @@ class ActionRecord:
             self._subscribers.remove(q)
         except ValueError:
             pass
+
+    async def wait(self) -> None:
+        """Wait until the worker has emitted its terminal result."""
+        await self._completion.wait()
 
     def _broadcast(self, item: tuple) -> None:
         for q in list(self._subscribers):
@@ -145,6 +150,10 @@ class ActionRunner:
                 with self._lock:
                     self._last = record
                     self._current = None
+                # Completion is observed by the maintenance scheduler. Set it
+                # only after releasing single-flight, otherwise a queued
+                # same-hour job races and sees this record as still current.
+                record._completion.set()
 
         asyncio.create_task(_run())
         return record

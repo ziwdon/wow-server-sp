@@ -1,4 +1,5 @@
 import datetime as dt
+import asyncio
 from unittest.mock import Mock
 
 import pytest
@@ -195,3 +196,62 @@ def test_log_is_trimmed_to_limit(tmp_path):
         )
 
     assert [entry.message for entry in store.read_log()] == ["4", "3", "2"]
+
+
+@pytest.mark.asyncio
+async def test_same_hour_jobs_run_sequentially(tmp_path):
+    from app.services.runner import ActionRunner
+
+    store = MaintenanceStore(tmp_path)
+    store.save_config(MaintenanceConfig(
+        restart_enabled=True, restart_hour_utc=4,
+        window_enabled=True, window_stop_hour_utc=4, window_start_hour_utc=8,
+    ))
+    order = []
+    runner = ActionRunner()
+    scheduler = MaintenanceScheduler(
+        store, runner=runner,
+        run_restart=lambda **_kwargs: (order.append("restart"), ActionResult.OK)[1],
+        run_stop=lambda **_kwargs: (order.append("stop"), ActionResult.OK)[1],
+    )
+    scheduler.tick(dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC))
+    await asyncio.gather(*scheduler._pending_jobs)  # noqa: SLF001 - lifecycle contract
+    assert runner.current() is not None
+    await runner.current().wait()
+    assert order == ["restart", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_loop_continues_after_tick_exception(tmp_path, monkeypatch):
+    scheduler = MaintenanceScheduler(MaintenanceStore(tmp_path), interval_seconds=0)
+    calls = 0
+
+    def tick():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("temporary disk failure")
+        if calls == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(scheduler, "tick", tick)
+    task = asyncio.create_task(scheduler._run_loop())
+    for _ in range(10):
+        if calls >= 2:
+            break
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_scheduler_start_is_idempotent_and_stop_cancels_task(tmp_path):
+    scheduler = MaintenanceScheduler(MaintenanceStore(tmp_path), interval_seconds=3600)
+    scheduler.start()
+    task = scheduler._task  # noqa: SLF001 - lifecycle contract
+    scheduler.start()
+    assert scheduler._task is task
+    await scheduler.stop()
+    assert scheduler._task is None

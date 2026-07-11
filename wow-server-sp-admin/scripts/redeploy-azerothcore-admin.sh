@@ -46,6 +46,11 @@ if [ "$_htmx_size" -le 200 ]; then
     echo "  Run install-azerothcore-admin.sh to vendor HTMX, or fetch manually (see comment above)." >&2
     exit 1
 fi
+_htmx_sse_size="$(wc -c < "$STACK_DIR/build/app/static/htmx-sse.js" 2>/dev/null || echo 0)"
+if [ "$_htmx_sse_size" -le 200 ]; then
+    echo "ERROR: htmx-sse.js is a placeholder ($_htmx_sse_size bytes) — cannot build." >&2
+    exit 1
+fi
 
 mkdir -p "$STACK_DIR/build/dist"
 # Stage the canonical backup script into the build context (Dockerfile COPYs it).

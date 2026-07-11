@@ -196,7 +196,7 @@ class ApplyProgressionResult:
     message: str = ""
 
 
-def _fetch_character(cur, guid: int) -> CharacterProgressionRow | None:
+def _fetch_character(cur, guid: int, *, lock: bool = True) -> CharacterProgressionRow | None:
     cur.execute(
         "SELECT c.guid, a.username, c.name, c.class, c.race, c.level, c.online, "
         "COALESCE(("
@@ -206,8 +206,7 @@ def _fetch_character(cur, guid: int) -> CharacterProgressionRow | None:
         "), 0) AS progression_state "
         "FROM acore_characters.characters c "
         "JOIN acore_auth.account a ON a.id = c.account "
-        f"WHERE {REAL_ACCOUNT_SQL} AND c.guid = %s "
-        "FOR UPDATE",
+        f"WHERE {REAL_ACCOUNT_SQL} AND c.guid = %s " + ("FOR UPDATE" if lock else ""),
         (guid,),
     )
     row = cur.fetchone()
@@ -279,10 +278,21 @@ def apply_progression(
     conn = _connect(host=host, port=port, user=user, password=password)
     try:
         with conn.cursor() as cur:
-            row = _fetch_character(cur, guid)
+            row = _fetch_character(cur, guid, lock=False)
             if row is None:
                 conn.rollback()
                 return ApplyProgressionResult("rejected", target_state, 0, reason="not_found", message="Character not found.")
+
+            if row.online:
+                conn.rollback()
+                return ApplyProgressionResult("rejected", target_state, row.progression, reason="online", message="Character must be offline before changing progression.")
+
+            # Re-read under lock to retain the race guard after the cheap
+            # online pre-check above.
+            row = _fetch_character(cur, guid, lock=True)
+            if row is None or row.online:
+                conn.rollback()
+                return ApplyProgressionResult("rejected", target_state, 0, reason="online", message="Character must be offline before changing progression.")
 
             login_floor = login_floor_for_character(row, config)
             validation = validate_apply(

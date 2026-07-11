@@ -67,3 +67,30 @@ def test_console_uses_pty_stdin_for_tty_enabled_worldserver(
         call(10, b"saveall\n"),
         call(10, DETACH_BYTES),
     ])
+
+
+@patch("app.services.console.subprocess.Popen", side_effect=OSError("no docker"))
+def test_console_closes_both_fds_when_attach_cannot_start(mock_popen, monkeypatch):
+    closed = []
+    monkeypatch.setattr(console_mod.pty, "openpty", lambda: (10, 11))
+    monkeypatch.setattr(console_mod.tty, "setraw", lambda _fd: None)
+    monkeypatch.setattr(console_mod.os, "close", closed.append)
+    with __import__("pytest").raises(OSError, match="no docker"):
+        WorldserverConsole().__enter__()
+    assert closed == [10, 11]
+
+
+@patch("app.services.console.subprocess.Popen")
+@patch("app.services.console.time.sleep")
+def test_console_immediate_attach_failure_closes_master(mock_sleep, mock_popen, monkeypatch):
+    closed = []
+    monkeypatch.setattr(console_mod.pty, "openpty", lambda: (10, 11))
+    monkeypatch.setattr(console_mod.tty, "setraw", lambda _fd: None)
+    monkeypatch.setattr(console_mod.os, "close", closed.append)
+    proc = MagicMock()
+    proc.poll.return_value = 1
+    proc.stderr.read.return_value = b"attach failed"
+    mock_popen.return_value = proc
+    with __import__("pytest").raises(RuntimeError, match="attach failed"):
+        WorldserverConsole().__enter__()
+    assert 10 in closed and 11 in closed

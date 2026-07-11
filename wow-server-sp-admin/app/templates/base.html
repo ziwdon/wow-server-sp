@@ -30,7 +30,24 @@
   </div>
 </nav>
 <main>{% block main %}{% endblock %}</main>
+<div id="action-toast" class="action-toast" role="status" aria-live="polite" hidden></div>
 <script>
+  function showActionToast(message) {
+    var toast = document.getElementById('action-toast');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.hidden = false;
+    window.clearTimeout(window.actionToastTimer);
+    window.actionToastTimer = window.setTimeout(function () { toast.hidden = true; }, 6000);
+  }
+  window.showActionToast = showActionToast;
+  document.addEventListener('htmx:responseError', function (e) {
+    var xhr = e.detail.xhr;
+    var message = '';
+    try { message = JSON.parse(xhr.responseText).detail || ''; } catch (_) {}
+    showActionToast(message || ((e.detail.requestConfig.verb || 'Request') + ' failed (HTTP ' + xhr.status + ')'));
+  });
+  document.addEventListener('htmx:sendError', function () { showActionToast('Server unreachable'); });
   document.addEventListener('htmx:afterRequest', function(e) {
     if (e.detail.elt && e.detail.elt.id === 'nav-status-pill') {
       var tmp = document.createElement('div');
