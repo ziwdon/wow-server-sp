@@ -101,5 +101,5 @@ def test_maintenance_post_rejects_invalid_window(tmp_path, monkeypatch):
         },
     )
 
-    assert resp.status_code == 400
-    assert "start hour must be after stop hour" in resp.json()["detail"]
+    assert resp.status_code == 200
+    assert "start hour must be after stop hour" in resp.text

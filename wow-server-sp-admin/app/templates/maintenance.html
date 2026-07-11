@@ -10,6 +10,7 @@
     </div>
   </section>
 
+  {% if error %}<p class="settings-banner error">{{ error }}</p>{% endif %}
   <form class="maintenance-grid" method="post" action="/api/maintenance">
     <section class="panel maintenance-card">
       <div class="panel-header">
@@ -115,7 +116,7 @@ document.getElementById('reset-bots-btn').addEventListener('click', function () 
   if (!window.confirm(
     'Reset bots? This re-rolls the existing rndbot pool (playerbot rndbot init). ' +
     'No data is deleted. Consider a backup first. Continue?')) return;
-  fetch('/api/action/reset-bots', { method: 'POST' });
+  startAction('/api/action/reset-bots', 'Reset bots started — watch the dashboard activity log.');
 });
 
 const clearDlg = document.getElementById('clear-dialog');
@@ -134,7 +135,13 @@ document.getElementById('clear-cancel-btn').addEventListener('click', function (
 });
 clearConfirm.addEventListener('click', function () {
   clearDlg.close();
-  fetch('/api/action/clear-bots', { method: 'POST' });
+  startAction('/api/action/clear-bots', 'Clear bots started — watch the dashboard activity log.');
 });
+function startAction(url, success) {
+  fetch(url, { method: 'POST' }).then(function (response) {
+    if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || 'Action failed'); });
+    window.showActionToast ? window.showActionToast(success) : alert(success);
+  }).catch(function (error) { window.showActionToast ? window.showActionToast(error.message) : alert(error.message); });
+}
 </script>
 {% endblock %}

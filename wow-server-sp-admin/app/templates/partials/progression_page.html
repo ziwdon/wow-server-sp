@@ -72,6 +72,11 @@
 (function() {
   const dataEl = document.getElementById('progression-char-data');
   if (!dataEl) return;
+  const esc = function(value) {
+    return String(value ?? '').replace(/[&<>"']/g, function(ch) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+    });
+  };
   const chars = JSON.parse(dataEl.textContent || '[]');
   const expOrder = {vanilla: 0, tbc: 8, wotlk: 13};
   const expKeys = ['vanilla', 'tbc', 'wotlk'];
@@ -160,12 +165,17 @@
     filtered.forEach(function(c) {
       const row = document.createElement('div');
       row.className = 'char-row' + (c.online ? ' online' : '');
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
       row.dataset.guid = String(c.guid);
       const expLabel = labels[c.expansion] || c.expansion;
       const onlineBadge = c.online ? ' · <span style="color:#c97f7f">online</span>' : '';
-      row.innerHTML = '<span class="char-row-name">' + c.name + '</span>'
+      row.innerHTML = '<span class="char-row-name">' + esc(c.name) + '</span>'
         + '<span class="char-row-meta">Lvl ' + c.level + ' · ' + expLabel + onlineBadge + '</span>';
       row.addEventListener('click', function() { selectChar(c, row); });
+      row.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); row.click(); }
+      });
       charList.appendChild(row);
     });
   }

@@ -13,7 +13,7 @@ def _make_archive(backups: Path, name: str, dbs, with_admin_yml=True) -> Path:
     (stage / "sql").mkdir(parents=True, exist_ok=True)
     (stage / "config").mkdir(parents=True, exist_ok=True)
     for db in dbs:
-        (stage / "sql" / f"{db}.sql").write_text("-- dump --")
+        (stage / "sql" / f"{db}.sql").write_text("-- dump --\n-- Dump completed")
     if with_admin_yml:
         (stage / "config" / "docker-compose.admin.yml").write_text("services: {admin: true}\n")
     (stage / "manifest.json").write_text(json.dumps({
@@ -68,8 +68,8 @@ def test_run_restore_aborts_if_manifest_db_sql_is_missing(
     r = actions.run_restore("azerothcore-backup-manual-x.tar.gz", on_progress=lambda *a: None)
 
     assert r == ActionResult.ERROR
-    mock_stop.assert_called_once()
-    mock_start.assert_called_once()
+    mock_stop.assert_not_called()
+    mock_start.assert_not_called()
 
 
 @patch("app.services.actions.run_start", return_value=ActionResult.OK)
@@ -112,21 +112,21 @@ def test_run_restore_aborts_if_safety_backup_fails(
     mock_start.assert_called_once()  # server brought back up after abort
 
 
-@patch("app.services.actions.run_start", return_value=ActionResult.OK)
 @patch("app.services.actions.run_stop", return_value=ActionResult.OK)
 @patch("app.services.backup.run_backup")
 @patch("app.services.actions._restore_admin_yml", side_effect=OSError("write failed"))
+@patch("app.services.actions.subprocess.run")
 @patch("app.services.actions.db_credentials", return_value={"password": "pw"})
-def test_run_restore_restarts_if_restore_step_raises_after_stop(
-    mock_creds, mock_restore_admin, mock_backup, mock_stop, mock_start, tmp_path, monkeypatch
+def test_run_restore_leaves_server_stopped_if_restore_step_raises_after_stop(
+    mock_creds, mock_run, mock_restore_admin, mock_backup, mock_stop, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
     mock_backup.return_value = type("R", (), {"ok": True, "archive": "safety", "output": ""})()
-    _make_archive(tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", [])
+    mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    _make_archive(tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", ["acore_auth"])
 
     r = actions.run_restore("azerothcore-backup-manual-x.tar.gz", on_progress=lambda *a: None)
 
     assert r == ActionResult.ERROR
     mock_stop.assert_called_once()
     mock_restore_admin.assert_called_once()
-    mock_start.assert_called_once()

@@ -1174,3 +1174,4 @@ pre.logview {
   color: #bfe8c2;
   background: rgba(50, 95, 55, 0.28);
 }
+ .action-toast { position: fixed; right: 16px; bottom: 16px; z-index: 1000; max-width: 360px; padding: 12px 16px; border: 1px solid var(--gold); background: var(--bg-panel); color: var(--text-warm); box-shadow: 0 4px 16px #0008; }

@@ -39,3 +39,21 @@ async def test_action_record_replays_recorded_progress_timestamp(monkeypatch):
         "wait_init",
         "waiting for World initialized line",
     )
+
+
+@pytest.mark.asyncio
+async def test_runner_releases_single_flight_after_action_completes():
+    runner = ActionRunner()
+    release = __import__("threading").Event()
+
+    first = runner.start(
+        "slow", lambda _progress: (release.wait(), ActionResult.OK)[1]
+    )
+    with pytest.raises(RuntimeError, match="another action"):
+        runner.start("second", lambda _progress: ActionResult.OK)
+
+    release.set()
+    await first.wait()
+    third = runner.start("third", lambda _progress: ActionResult.OK)
+    await third.wait()
+    assert runner.current() is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -13,6 +14,7 @@ from app.services.actions import ActionResult, run_restart, run_start, run_stop
 from app.services.runner import runner as default_runner
 
 UTC = dt.timezone.utc
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,7 @@ class MaintenanceScheduler:
         }
         self.interval_seconds = interval_seconds
         self._task: asyncio.Task | None = None
+        self._pending_jobs: set[asyncio.Task] = set()
 
     def due_jobs(self, now: dt.datetime) -> list[DueJob]:
         now = _as_utc(now)
@@ -192,47 +195,74 @@ class MaintenanceScheduler:
         cfg = self.store.load_config()
         last_runs = dict(cfg.last_runs)
         last_runs[job.name] = _hour_stamp(now)
-        self.store.save_config(MaintenanceConfig(
-            restart_enabled=cfg.restart_enabled,
-            restart_hour_utc=cfg.restart_hour_utc,
-            window_enabled=cfg.window_enabled,
-            window_stop_hour_utc=cfg.window_stop_hour_utc,
-            window_start_hour_utc=cfg.window_start_hour_utc,
-            last_runs=last_runs,
-        ))
+        try:
+            self.store.save_config(MaintenanceConfig(
+                restart_enabled=cfg.restart_enabled,
+                restart_hour_utc=cfg.restart_hour_utc,
+                window_enabled=cfg.window_enabled,
+                window_stop_hour_utc=cfg.window_stop_hour_utc,
+                window_start_hour_utc=cfg.window_start_hour_utc,
+                last_runs=last_runs,
+            ))
+        except OSError:
+            log.exception("could not mark maintenance job %s attempted", job.name)
+
+    def _append_log(self, entry: MaintenanceLogEntry) -> None:
+        """Maintenance history is advisory; a transient disk error is not fatal."""
+        try:
+            self.store.append_log(entry)
+        except OSError:
+            log.exception("could not append maintenance log entry for %s", entry.job)
 
     def tick(self, now: dt.datetime | None = None) -> None:
         now = _as_utc(now or dt.datetime.now(UTC))
-        for job in self.due_jobs(now):
-            self.mark_attempted(job, now)
-            try:
-                self.runner.start(
-                    f"maintenance_{job.action}",
-                    self._build_runner_func(job),
-                )
-            except RuntimeError as e:
-                self.store.append_log(MaintenanceLogEntry(
-                    timestamp_utc=_display_stamp(now),
-                    job=job.name,
-                    action=job.action,
-                    status="skipped",
-                    message=str(e),
-                ))
-                continue
-            self.store.append_log(MaintenanceLogEntry(
-                timestamp_utc=_display_stamp(now),
-                job=job.name,
-                action=job.action,
-                status="started",
-                message="scheduled action started",
+        jobs = self.due_jobs(now)
+        if not jobs:
+            return
+        record = self._start_job(jobs[0], now)
+        if record is not None and len(jobs) > 1:
+            task = asyncio.create_task(self._run_following_jobs(record, jobs[1:], now))
+            self._pending_jobs.add(task)
+            task.add_done_callback(self._pending_jobs.discard)
+
+    def _start_job(self, job: DueJob, now: dt.datetime):
+        self.mark_attempted(job, now)
+        try:
+            record = self.runner.start(
+                f"maintenance_{job.action}", self._build_runner_func(job)
+            )
+        except RuntimeError as e:
+            self._append_log(MaintenanceLogEntry(
+                timestamp_utc=_display_stamp(now), job=job.name,
+                action=job.action, status="skipped", message=str(e),
             ))
+            return None
+        self._append_log(MaintenanceLogEntry(
+            timestamp_utc=_display_stamp(now), job=job.name,
+            action=job.action, status="started", message="scheduled action started",
+        ))
+        return record
+
+    async def _run_following_jobs(self, record, jobs: list[DueJob], now: dt.datetime) -> None:
+        """Run same-hour jobs back-to-back without competing with ourselves."""
+        for job in jobs:
+            wait = getattr(record, "wait", None)
+            if wait is None:
+                # Test doubles and third-party runners have no completion API.
+                # Treat them as complete rather than leaving an orphan task.
+                log.warning("maintenance runner record has no completion wait method")
+            else:
+                await wait()
+            record = self._start_job(job, now)
+            if record is None:
+                return
 
     def _build_runner_func(self, job: DueJob):
         def _run(on_progress):
             try:
                 result = self._actions[job.action](on_progress=on_progress)
             except Exception as e:  # noqa: BLE001
-                self.store.append_log(MaintenanceLogEntry(
+                self._append_log(MaintenanceLogEntry(
                     timestamp_utc=_display_stamp(dt.datetime.now(UTC)),
                     job=job.name,
                     action=job.action,
@@ -241,7 +271,7 @@ class MaintenanceScheduler:
                 ))
                 raise
             status = _result_status(result)
-            self.store.append_log(MaintenanceLogEntry(
+            self._append_log(MaintenanceLogEntry(
                 timestamp_utc=_display_stamp(dt.datetime.now(UTC)),
                 job=job.name,
                 action=job.action,
@@ -265,10 +295,18 @@ class MaintenanceScheduler:
         except asyncio.CancelledError:
             pass
         self._task = None
+        for task in list(self._pending_jobs):
+            task.cancel()
+        if self._pending_jobs:
+            await asyncio.gather(*self._pending_jobs, return_exceptions=True)
+        self._pending_jobs.clear()
 
     async def _run_loop(self) -> None:
         while True:
-            self.tick()
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001
+                log.exception("maintenance scheduler tick failed")
             await asyncio.sleep(self.interval_seconds)
 
 

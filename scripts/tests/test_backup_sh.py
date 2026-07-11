@@ -5,8 +5,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-BACKUP_SH = REPO_ROOT / "scripts" / "backup.sh"
+SCRIPTS_DIR = Path("/src") if Path("/src/backup.sh").is_file() else Path(__file__).resolve().parents[1]
+BACKUP_SH = SCRIPTS_DIR / "backup.sh"
 
 
 def _make_stub(path: Path, body: str) -> None:
@@ -131,3 +131,20 @@ def test_rejects_unknown_label(tmp_path):
     bind = _stubs(tmp_path)
     r = _run(stack, bind, "--label", "bogus")
     assert r.returncode == 2
+
+
+def test_partial_backup_is_labeled_and_does_not_prune(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    docker = bind / "docker"
+    docker.write_text(docker.read_text().replace(
+        "    # `mysql -e \"USE db\"` existence probe — succeed for all four.\n    exit 0 ;;",
+        "    if printf '%s ' \"$@\" | grep -q 'USE acore_world'; then exit 1; fi\n    exit 0 ;;",
+    ))
+    docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+    backups = stack / "backups"; backups.mkdir()
+    old = backups / "azerothcore-backup-daily-2000-01-01.tar.gz"; old.write_bytes(b"old")
+    r = _run(stack, bind, "--label", "daily")
+    assert r.returncode == 1
+    assert list(backups.glob("azerothcore-backup-daily-partial-*.tar.gz"))
+    assert old.exists()

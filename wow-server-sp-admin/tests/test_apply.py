@@ -1,9 +1,55 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.state import init_state
+
+
+def test_verify_env_vars_bound_reports_missing_and_silent_drop():
+    from app.services.actions import verify_env_vars_bound
+
+    with patch("app.services.actions._read_live_env", return_value={"AC_FOO_ENABLE": "1"}), \
+         patch("app.services.actions._read_loaded_config", return_value={"AC_FOO_ENABLE"}):
+        assert verify_env_vars_bound(
+            {"AC_FOO_ENABLE": "1"}, env_var_to_key={"AC_FOO_ENABLE": "Foo.Enable"},
+            on_progress=lambda *_: None,
+        ) == []
+    with patch("app.services.actions._read_live_env", return_value={}), \
+         patch("app.services.actions._read_loaded_config", return_value={"AC_FOO_ENABLE"}):
+        failed = verify_env_vars_bound(
+            {"AC_FOO_ENABLE": "1"}, env_var_to_key={"AC_FOO_ENABLE": "Foo.Enable"},
+            on_progress=lambda *_: None,
+        )
+        assert failed[0].env_var == "AC_FOO_ENABLE"
+        assert "mismatch" in failed[0].reason
+    with patch("app.services.actions._read_live_env", return_value={"AC_FOO_ENABLE": "1"}), \
+         patch("app.services.actions._read_loaded_config", return_value=set()):
+        failed = verify_env_vars_bound(
+            {"AC_FOO_ENABLE": "1"}, env_var_to_key={"AC_FOO_ENABLE": "Foo.Enable"},
+            on_progress=lambda *_: None,
+        )
+        assert "silently dropped" in failed[0].reason
+
+
+def test_apply_verification_failure_returns_error(tmp_path):
+    from app.main import _run_apply_then_verify
+    from app.services.actions import ActionResult, VerifyFailure
+
+    _init_apply_state(tmp_path)
+    import app.main as main
+    state = __import__("app.state", fromlist=["get_state"]).get_state()
+    current = MagicMock(verify_failed=[])
+    main.runner._current = current
+    try:
+        with patch("app.main.run_restart", return_value=ActionResult.OK), \
+             patch("app.main.verify_env_vars_bound", return_value=[
+                 VerifyFailure("AC_FOO_ENABLE", "Foo.Enable", "silently dropped")
+             ]):
+            assert _run_apply_then_verify(state, lambda *_: None) == ActionResult.ERROR
+        assert current.verify_failed[0].env_var == "AC_FOO_ENABLE"
+    finally:
+        main.runner._current = None
 
 
 def _init_apply_state(tmp_path, *, admin_yml_content: str | None = None):

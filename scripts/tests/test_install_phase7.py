@@ -1,7 +1,7 @@
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-INSTALLER = (REPO_ROOT / "scripts" / "install-azerothcore.sh").read_text()
+SCRIPTS_DIR = Path("/src") if Path("/src/install-azerothcore.sh").is_file() else Path(__file__).resolve().parents[1]
+INSTALLER = (SCRIPTS_DIR / "install-azerothcore.sh").read_text()
 
 
 def test_phase7_copies_canonical_script_not_heredoc():

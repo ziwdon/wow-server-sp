@@ -3,7 +3,7 @@
   {% if rows %}
   <ul class="backups-list">
   {% for row in rows %}
-    <li class="backup-row" data-archive="{{ row.filename }}" onclick="selectBackup(this)">
+    <li class="backup-row" data-archive="{{ row.filename }}" role="button" tabindex="0" onclick="selectBackup(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectBackup(this)}">
       <span class="backup-time">{{ row.created }}</span>
       <span class="backup-badge badge-{{ row.label }}">{{ row.label|capitalize }}</span>
       <span class="backup-size">{{ row.size_mb }} MB</span>

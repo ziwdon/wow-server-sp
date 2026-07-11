@@ -132,6 +132,25 @@ if [ ! -f "${STAGE}/manifest.json" ]; then
     echo "ERROR: Archive is missing manifest.json" >&2
     exit 1
 fi
+
+validate_dump_set() {
+    local db sql_file problems=""
+    for db in "${DATABASES[@]}"; do
+        sql_file="${STAGE}/sql/${db}.sql"
+        if [ ! -s "$sql_file" ]; then
+            problems="${problems} ${db}(missing-or-empty)"
+        elif ! tail -n 20 "$sql_file" | grep -q -- '-- Dump completed'; then
+            problems="${problems} ${db}(incomplete)"
+        fi
+    done
+    if [ -n "$problems" ]; then
+        echo "ERROR: Archive database dumps failed pre-flight validation:${problems}" >&2
+        return 1
+    fi
+}
+
+# Validate all destructive inputs before stopping the server or replacing data.
+validate_dump_set
 rm -f "${STAGE}/config/configs/mysql/custom.cnf"
 
 echo "AzerothCore restore preview"
@@ -198,7 +217,10 @@ for DB in "${DATABASES[@]}"; do
     log "Restoring ${DB}..."
     docker exec "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
         -e "DROP DATABASE IF EXISTS ${DB}; CREATE DATABASE ${DB};"
-    docker exec -i "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" "${DB}" < "$sql_file"
+    if ! docker exec -i "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" "${DB}" < "$sql_file"; then
+        echo "ERROR: Import of ${DB} failed. The server remains stopped; re-run restore with a known-good archive." >&2
+        exit 1
+    fi
 done
 
 if [ -n "$fresh_realmlist" ]; then

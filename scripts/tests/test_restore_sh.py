@@ -5,8 +5,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RESTORE_SH = REPO_ROOT / "scripts" / "restore-azerothcore.sh"
+SCRIPTS_DIR = Path("/src") if Path("/src/restore-azerothcore.sh").is_file() else Path(__file__).resolve().parents[1]
+RESTORE_SH = SCRIPTS_DIR / "restore-azerothcore.sh"
 
 
 def _make_stub(path: Path, body: str) -> None:
@@ -39,7 +39,7 @@ def _make_archive(tmp_path: Path) -> Path:
     (stage / "config" / "configs" / "mysql").mkdir(parents=True)
     (stage / "config" / "configs" / "modules").mkdir(parents=True)
     for db in ("acore_auth", "acore_characters", "acore_world", "acore_playerbots"):
-        (stage / "sql" / f"{db}.sql").write_text("-- dump --")
+        (stage / "sql" / f"{db}.sql").write_text("-- dump --\n-- Dump completed on 2026-01-01\n")
     (stage / "config" / ".env").write_text("DOCKER_DB_ROOT_PASSWORD=ARCHIVE_OLD\n")
     (stage / "config" / "docker-compose.override.yml").write_text("services: {from: archive}\n")
     (stage / "config" / "configs" / "mysql" / "custom.cnf").write_text("[mysqld]\n# archive 999G\n")
