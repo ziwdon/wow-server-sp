@@ -52,7 +52,12 @@ def _make_archive(tmp_path: Path, manifest=None, sql_files=None, include_admin_c
     (stage / "config" / "configs" / "mysql" / "custom.cnf").write_text("[mysqld]\n# archive 999G\n")
     (stage / "config" / "configs" / "modules" / "mod_ahbot.conf").write_text("AuctionHouseBot.GUIDs = 100\n")
     if manifest is None:
-        manifest = {"format_version": 1, "label": "manual"}
+        manifest = {
+            "format_version": 1,
+            "label": "manual",
+            "databases": list(DATABASES),
+            "skipped_databases": [],
+        }
     if isinstance(manifest, bytes):
         (stage / "manifest.json").write_bytes(manifest)
     else:
@@ -542,6 +547,7 @@ def test_dr_restore_rejects_archive_path_traversal_before_extract(tmp_path):
         ("{not-json", None, "not valid JSON"),
         (b'\xff', None, "not valid UTF-8"),
         ({"format_version": 99}, None, "not supported"),
+        ({"format_version": 1}, None, "database inventory is missing"),
         (
             {"format_version": 1, "databases": list(DATABASES[:-1]), "skipped_databases": []},
             None,
@@ -565,13 +571,15 @@ def test_dr_restore_rejects_archive_path_traversal_before_extract(tmp_path):
     ],
 )
 def test_dr_restore_rejects_incompatible_manifest_before_stop_or_mutation(
-    tmp_path, manifest, sql_files, expected_error,
+    tmp_path, manifest, sql_files, expected_error, monkeypatch,
 ):
     stack = _stack(tmp_path)
     archive = _make_archive(tmp_path, manifest=manifest, sql_files=sql_files)
     bind = tmp_path / "bin"; bind.mkdir()
     logf = tmp_path / "docker.log"
+    state = tmp_path / "worldserver-state"; state.write_text("running\n")
     _stateful_docker_stub(bind)
+    monkeypatch.setenv("DOCKER_STATE_FILE", str(state))
 
     r = _run(stack, archive, bind, logf)
 

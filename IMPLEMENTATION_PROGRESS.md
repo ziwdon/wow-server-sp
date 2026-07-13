@@ -231,3 +231,28 @@ Latest verified counts: admin suite **368 passed** (one Starlette dependency
 deprecation warning, 6 subtests); script suite **124 passed** (3 subtests);
 browser suite **6 passed**. The documented ShellCheck gate and `git diff
 --check` both exit zero.
+
+## Independent PR #25 review — 2026-07-13
+
+- Reviewed all 53 `IMPROVEMENT_PLAN.md` task headings against the branch
+  implementation and regression coverage. The only documented non-work
+  deferrals remain U-08 (log rotation/tail cap needs operational reproduction)
+  and T-12 (the approved policy is not to add a Python lint/coverage gate).
+- **D-04 / RS-15:** host restore previously accepted a v1 manifest containing
+  only `format_version`, despite every repository-produced v1 archive having
+  a canonical `databases` inventory and empty `skipped_databases` list. Restore
+  now rejects that incomplete manifest before reading the realmlist, stopping
+  worldserver, copying configuration, or mutating databases. Focused restore
+  fixture coverage passed (44), and the full hermetic script suite passed
+  (**125 passed, 3 subtests**).
+- **U-01 / A-22:** Settings key-index loading now handles network,
+  non-success, malformed-JSON, and invalid-payload responses through the
+  shared request parser. It replaces the indefinite Loading state with a
+  visible recovery message and an accessible status announcement. The new
+  real-browser regression passed; the complete development-only browser suite
+  passed (**7 passed**).
+- Removed six committed Markdown trailing-space errors found by reviewing the
+  PR diff, and corrected the stale TemplateResponse-warning documentation.
+  The actual fresh admin-suite output is **368 passed, 1 Starlette multipart
+  PendingDeprecationWarning, 6 subtests**; the remaining warning is the
+  approved FastAPI/Starlette dependency follow-up documented above.

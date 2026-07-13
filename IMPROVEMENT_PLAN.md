@@ -1,7 +1,7 @@
 # Reliability & Correctness Improvement Plan
 
-**Project:** `wow-server-sp`  
-**Source audit:** `AUDIT_FINDINGS.md` (2026-07-11)  
+**Project:** `wow-server-sp`
+**Source audit:** `AUDIT_FINDINGS.md` (2026-07-11)
 **Execution model:** This is a backlog of implementation briefs for later Codex sessions. No fixes are included here.
 
 ## Prioritization principles

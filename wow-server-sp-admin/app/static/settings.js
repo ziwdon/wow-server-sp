@@ -18,9 +18,27 @@ function esc(s) {
 const state = { keys: [], pending: {}, selected: null };
 
 async function load() {
-  const r = await fetch('/api/keys');
-  state.keys = await r.json();
+  const result = await window.requestActionJson('/api/keys');
+  const invalidData = result.ok && !Array.isArray(result.data);
+  if (!result.ok || invalidData) {
+    const message = invalidData
+      ? 'The server returned invalid settings data. Refresh the page and try again.'
+      : result.message;
+    const list = document.getElementById('key-list');
+    if (list) {
+      list.innerHTML = '';
+      const error = document.createElement('p');
+      error.className = 'empty-state banner error';
+      error.setAttribute('role', 'status');
+      error.textContent = `Could not load settings. ${message}`;
+      list.appendChild(error);
+    }
+    if (window.showActionToast) window.showActionToast(`Could not load settings. ${message}`);
+    return false;
+  }
+  state.keys = result.data;
   render();
+  return true;
 }
 
 function hasPending(k) {

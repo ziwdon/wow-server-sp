@@ -1,8 +1,8 @@
 # Codebase Reliability & Correctness Audit
 
-**Project:** `wow-server-sp`  
-**Audit date:** 2026-07-11  
-**Audited tree:** current working tree, including pre-existing uncommitted changes in `scripts/install-azerothcore.sh`, `scripts/tests/test_installer_consistency.py`, `wow-server-sp-admin/app/services/actions.py`, and `wow-server-sp-admin/tests/test_actions.py`  
+**Project:** `wow-server-sp`
+**Audit date:** 2026-07-11
+**Audited tree:** current working tree, including pre-existing uncommitted changes in `scripts/install-azerothcore.sh`, `scripts/tests/test_installer_consistency.py`, `wow-server-sp-admin/app/services/actions.py`, and `wow-server-sp-admin/tests/test_actions.py`
 **Scope:** AzerothCore installer/lifecycle/backup/restore scripts and the FastAPI + HTMX admin application. No fixes were implemented.
 
 **Severity scale:** Critical = data loss/corruption or crash on a common path; High = realistically encountered incorrect behavior or broken safety net; Medium = incorrect edge behavior or meaningful UX/performance degradation; Low = minor usability inconsistency or hardening. This audit found **15 High, 29 Medium, and 20 Low** items; no issue met the Critical threshold on the verified paths.

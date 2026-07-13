@@ -88,6 +88,15 @@ test('fetch failures leave the page available and expose recovery guidance', asy
   await expect(page.getByRole('button', { name: /rollback last apply/i })).toBeEnabled();
 });
 
+test('settings-key loading failure replaces the loading state with recovery guidance', async ({ page }) => {
+  await page.route('**/api/keys', (route) => route.abort('failed'));
+
+  await page.goto('/settings');
+
+  await expect(page.locator('#key-list').getByRole('status')).toContainText('Could not load settings');
+  await expect(page.locator('#key-list')).not.toContainText('Loading settings');
+});
+
 test('axe and HTML checks preserve core document and control semantics', async ({ page }) => {
   await page.goto('/settings');
   await page.addScriptTag({ path: axeSource });

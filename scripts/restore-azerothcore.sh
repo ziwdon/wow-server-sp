@@ -192,10 +192,11 @@ def require_no_skips(required):
 
 
 if format_version == 1:
-    # Early v1 archives did not declare inventory fields. Their four staged
-    # per-database dumps below remain the compatibility proof of completeness.
-    require_exact_inventory(False)
-    require_no_skips(False)
+    # Every repository-produced v1 archive declares its canonical inventory.
+    # Do not allow a manifest with omitted fields to bypass the compatibility
+    # preflight before destructive restore work begins.
+    require_exact_inventory(True)
+    require_no_skips(True)
 else:
     require_exact_inventory(True)
     require_no_skips(True)

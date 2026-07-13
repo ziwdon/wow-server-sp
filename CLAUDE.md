@@ -234,7 +234,7 @@ Invariants of `wow-server-sp-admin/` to know before touching admin code — or b
 
 **Midnight-crossing stop/start windows are unsupported.** `MaintenanceStore.validate` requires `window_start_hour_utc > window_stop_hour_utc` (strictly); "stop 23:00, start 02:00" is rejected 400. Both are 0–23; no cross-day arithmetic.
 
-**Expected admin test warnings.** Dockerized pytest may print pip's "running as root" + new-version notices (disposable container) and Starlette `multipart` / `TemplateResponse` deprecation warnings. The latter two are worth cleaning before a FastAPI/Starlette upgrade but are unrelated to the restart/apply console path.
+**Expected admin test warnings.** Dockerized pytest may print pip's "running as root" + new-version notices (disposable container) and one Starlette `multipart` pending-deprecation warning. The application uses `python-multipart==0.0.31`; the warning remains in the Starlette version resolved by `fastapi==0.115.0`. Upgrade FastAPI and Starlette together, then rerun the admin and browser suites; do not suppress the warning or downgrade the multipart dependency merely to hide it.
 
 **The top nav bar lives in `base.html`, not `dashboard.html`.** `#last-refresh` and `#nav-status-pill` are `<span>`s in `<nav class="topnav">`. The pill polls `/api/status` every 60 s via `hx-get`/`hx-swap="none"` + an `htmx:afterRequest` handler that updates its text/class — **not** `outerHTML`/`hx-select` (which would destroy the polling element after one swap). The `htmx:afterSwap` listener updates `#last-refresh` only when the dashboard `#status` card swaps (dashboard only; the pill polls independently on every page).
 
