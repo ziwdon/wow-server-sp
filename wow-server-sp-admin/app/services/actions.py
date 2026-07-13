@@ -31,9 +31,23 @@ from app.state import db_credentials
 ProgressCb = Callable[[str, str], None]
 log = logging.getLogger(__name__)
 KNOWN_DBS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+SQL_FOOTER_TAIL_BYTES = 8192
+V2_SECTION_LINE_MAX_BYTES = 4096
+MAX_EXPANDED_ARCHIVE_BYTES = 16 * 1024 ** 3
+MAX_ARCHIVE_MEMBER_COUNT = 10_000
+MAX_EXPANDED_MEMBER_BYTES = 8 * 1024 ** 3
+ADMIN_OVERLAY_ARCHIVE_MEMBER = "config/docker-compose.admin.yml"
+V2_CREATE_DATABASE_RE = re.compile(
+    r"^\s*CREATE\s+DATABASE\b(?:(?!;).)*?`(?P<database>[^`]+)`(?:(?!;).)*?;",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+V2_CREATE_DATABASE_START_RE = re.compile(rb"CREATE\s+DATABASE\b", re.IGNORECASE)
+V2_CREATE_DATABASE_SCAN_BYTES = 64 * 1024
+V2_CREATE_DATABASE_MAX_BYTES = 1024 * 1024
 MYSQL_TIMEOUT = 3600
 DOCKER_TIMEOUT = 180
 QUICK_TIMEOUT = 30
+STOPPED_WORLDSERVER_STATUSES = frozenset({"created", "dead", "exited", "missing"})
 CLEAR_SQL = Path(
     os.environ.get("CLEAR_RNDBOTS_SQL", "/app/app/data/clear_rndbots.sql")
 )
@@ -71,10 +85,28 @@ def run_backup_manual(*, on_progress: ProgressCb) -> ActionResult:
     on_progress("backup", "creating manual backup")
     result = run_backup("manual", on_progress=on_progress)
     if not result.ok:
+        if getattr(result, "timed_out", False):
+            on_progress("backup", "backup TIMED OUT")
+            return ActionResult.TIMEOUT
         on_progress("backup", "backup FAILED")
         return ActionResult.ERROR
     on_progress("done", f"backup OK: {result.archive}")
     return ActionResult.OK
+
+
+def _reject_duplicate_json_keys(pairs) -> dict:
+    """Build a JSON object while rejecting duplicate keys at every level."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_strict_json(payload):
+    """Decode JSON without silently accepting duplicate object keys."""
+    return json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
 
 
 def read_manifest(archive: Path) -> dict | None:
@@ -84,28 +116,190 @@ def read_manifest(archive: Path) -> dict | None:
             member = tf.extractfile("manifest.json")
             if member is None:
                 return None
-            return json.loads(member.read())
-    except (tarfile.TarError, KeyError, OSError, json.JSONDecodeError) as e:
+            return _load_strict_json(member.read())
+    except (tarfile.TarError, KeyError, OSError, UnicodeDecodeError, ValueError) as e:
         log.error("could not read manifest from %s: %s", archive, e)
         return None
 
 
+def _sql_has_canonical_completion_footer(sql_file, size: int) -> bool:
+    """Check only the bounded tail for mysqldump's completion footer."""
+    if size <= 0:
+        return False
+    sql_file.seek(max(0, size - SQL_FOOTER_TAIL_BYTES))
+    tail = sql_file.read(SQL_FOOTER_TAIL_BYTES)
+    return re.search(
+        rb"(?:^|\n)-- Dump completed on [^\r\n]+\s*\Z", tail,
+    ) is not None
+
+
+def _validate_v2_sql_stream_inventory(sql_file) -> str | None:
+    """Require exactly one canonical mysqldump database marker per v2 stream.
+
+    `readline(limit)` keeps preflight memory bounded even when a dump contains
+    exceptionally large INSERT rows. Only canonical ``-- Current Database``
+    marker lines contribute to the inventory, matching the disaster-recovery
+    restore contract.
+    """
+    expected_index = 0
+    at_line_start = True
+    prefix = b"-- Current Database:"
+    marker = b"-- Current Database: `"
+    try:
+        while line := sql_file.readline(V2_SECTION_LINE_MAX_BYTES + 1):
+            if at_line_start and line.startswith(prefix):
+                if len(line) > V2_SECTION_LINE_MAX_BYTES or not line.endswith(b"\n"):
+                    return "v2 multi-database SQL dump has an oversized database section header"
+                stripped = line.rstrip(b"\r\n")
+                if not (
+                    stripped.startswith(marker)
+                    and stripped.endswith(b"`")
+                    and stripped.count(b"`") == 2
+                ):
+                    return "v2 multi-database SQL dump has malformed database section header"
+                try:
+                    section = stripped.split(b"`", 2)[1].decode("utf-8")
+                except UnicodeDecodeError:
+                    return "v2 multi-database SQL dump has unreadable database sections"
+                if (
+                    expected_index >= len(KNOWN_DBS)
+                    or section != KNOWN_DBS[expected_index]
+                ):
+                    return (
+                        "v2 multi-database SQL dump database sections must exactly match "
+                        "the canonical databases once each"
+                    )
+                expected_index += 1
+            at_line_start = line.endswith(b"\n")
+    except (OSError, tarfile.TarError):
+        return "v2 multi-database SQL dump has unreadable database sections"
+
+    if expected_index != len(KNOWN_DBS):
+        return (
+            "v2 multi-database SQL dump database sections must exactly match "
+            "the canonical databases once each"
+        )
+    return None
+
+
+def _validate_archive_members(archive: tarfile.TarFile) -> str | None:
+    """Apply extraction limits and reject member types outside the format."""
+    total_size = 0
+    # Iterate lazily so a member-heavy archive is rejected at the limit rather
+    # than first materializing every header through getmembers().
+    for member_count, member in enumerate(archive, start=1):
+        if member_count > MAX_ARCHIVE_MEMBER_COUNT:
+            return "archive has too many members"
+        if (
+            member.name.rstrip("/") == ADMIN_OVERLAY_ARCHIVE_MEMBER
+            and not member.isfile()
+        ):
+            return "archive admin overlay is not a regular file"
+        if member.isdir():
+            continue
+        if not member.isfile():
+            return f"archive contains unsupported member type: {member.name}"
+        if member.size > MAX_EXPANDED_MEMBER_BYTES:
+            return f"archive member exceeds the expanded-size limit: {member.name}"
+        total_size += member.size
+        if total_size > MAX_EXPANDED_ARCHIVE_BYTES:
+            return "archive exceeds the total expanded-size limit"
+    return None
+
+
+def validate_canonical_backup(archive: Path) -> str | None:
+    """Return an error unless *archive* is a complete canonical v1 or v2 backup."""
+    try:
+        with tarfile.open(archive, "r:gz") as tf:
+            member_error = _validate_archive_members(tf)
+            if member_error is not None:
+                return member_error
+            manifest_file = tf.extractfile("manifest.json")
+            if manifest_file is None:
+                return "archive is missing manifest.json"
+            try:
+                manifest = _load_strict_json(manifest_file.read())
+            except (UnicodeDecodeError, ValueError):
+                return "archive manifest is malformed"
+            if not isinstance(manifest, dict) or manifest.get("format_version") not in (1, 2):
+                return "archive has an unsupported manifest format"
+            if tuple(manifest.get("databases", ())) != KNOWN_DBS:
+                return "archive must contain exactly the four canonical databases"
+            if manifest.get("skipped_databases") != []:
+                return "partial archives are not restorable"
+
+            if manifest["format_version"] == 2:
+                if manifest.get("dump_layout") != "single-multi-database":
+                    return "archive has an unsupported v2 dump layout"
+                try:
+                    sql_member = tf.getmember("sql/azerothcore.sql")
+                except KeyError:
+                    return "archive is missing the v2 multi-database SQL dump"
+                sql_file = tf.extractfile(sql_member)
+                if not sql_member.isfile() or sql_file is None or not _sql_has_canonical_completion_footer(sql_file, sql_member.size):
+                    return "archive multi-database SQL dump is empty or incomplete"
+                inventory_file = tf.extractfile(sql_member)
+                if inventory_file is None:
+                    return "archive is missing the v2 multi-database SQL dump"
+                inventory_error = _validate_v2_sql_stream_inventory(inventory_file)
+                if inventory_error is not None:
+                    return inventory_error
+                return None
+
+            for db in KNOWN_DBS:
+                try:
+                    sql_member = tf.getmember(f"sql/{db}.sql")
+                except KeyError:
+                    return f"archive is missing SQL dump for {db}"
+                if not sql_member.isfile():
+                    return f"archive SQL dump for {db} is not a regular file"
+                sql_file = tf.extractfile(sql_member)
+                if sql_file is None or not _sql_has_canonical_completion_footer(
+                    sql_file, sql_member.size,
+                ):
+                    return f"archive SQL dump for {db} is empty or incomplete"
+    except (tarfile.TarError, OSError) as e:
+        log.error("could not validate backup archive %s: %s", archive, e)
+        return "archive cannot be read"
+    return None
+
+
+def _validate_restored_admin_yml(admin_yml: Path) -> str | None:
+    """Validate archive overlay keys against the initialized admin key index."""
+    from app.services.compose_admin import validate_restored_overlay
+    from app.state import get_state
+
+    try:
+        allowed_env_vars = {
+            entry.env_var for entry in get_state().key_index.values()
+        }
+    except RuntimeError:
+        # Direct action tests do not initialize the web-app singleton. An empty
+        # overlay remains safe, while any setting must fail closed.
+        allowed_env_vars = set()
+    return validate_restored_overlay(admin_yml, allowed_env_vars=allowed_env_vars)
+
+
 def _import_db(db: str, sql_path: Path, password: str, on_progress: ProgressCb) -> bool:
     on_progress("restore", f"restoring {db}")
-    try:
-        drop = subprocess.run(
-            [
-                "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
-                "-e", f"DROP DATABASE IF EXISTS {db}; CREATE DATABASE {db};",
-            ],
-            capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired as e:
-        on_progress("restore", f"{db}: drop/create timed out")
-        raise ActionTimeout(f"{db} drop/create timed out") from e
-    if drop.returncode != 0:
-        on_progress("restore", f"{db}: drop/create failed: {drop.stderr.strip()}")
-        return False
+    for phase, statement in (
+        ("drop", f"DROP DATABASE IF EXISTS {db};"),
+        ("create", f"CREATE DATABASE {db};"),
+    ):
+        try:
+            result = subprocess.run(
+                [
+                    "docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
+                    "-e", statement,
+                ],
+                capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            on_progress("restore", f"{db}: {phase} timed out")
+            raise ActionTimeout(f"{db} {phase} timed out") from e
+        if result.returncode != 0:
+            on_progress("restore", f"{db}: {phase} failed: {result.stderr.strip()}")
+            return False
     with sql_path.open("rb") as fh:
         try:
             imp = subprocess.run(
@@ -117,6 +311,84 @@ def _import_db(db: str, sql_path: Path, password: str, on_progress: ProgressCb) 
             raise ActionTimeout(f"{db} import timed out") from e
     if imp.returncode != 0:
         on_progress("restore", f"{db}: import failed: {imp.stderr.strip()}")
+        return False
+    return True
+
+
+def _v2_create_database_statements(sql_path: Path) -> str:
+    """Return the v2 dump's canonical CREATE DATABASE DDL verbatim."""
+    definitions: dict[str, str] = {}
+    pending = b""
+    with sql_path.open("rb") as dump:
+        while chunk := dump.read(V2_CREATE_DATABASE_SCAN_BYTES):
+            pending += chunk
+            while True:
+                start = V2_CREATE_DATABASE_START_RE.search(pending)
+                if start is None:
+                    pending = pending[-len(b"CREATE DATABASE"):]
+                    break
+                end = pending.find(b";", start.start())
+                if end < 0:
+                    if len(pending) - start.start() > V2_CREATE_DATABASE_MAX_BYTES:
+                        raise ValueError("v2 CREATE DATABASE statement exceeds the scan limit")
+                    pending = pending[start.start():]
+                    break
+                statement = pending[start.start():end + 1]
+                pending = pending[end + 1:]
+                match = V2_CREATE_DATABASE_RE.fullmatch(statement.decode("utf-8"))
+                if match is None:
+                    continue
+                database = match.group("database")
+                if database not in KNOWN_DBS:
+                    continue
+                if database in definitions:
+                    raise ValueError(f"v2 dump defines {database} more than once")
+                definitions[database] = match.group(0).strip()
+    missing = [database for database in KNOWN_DBS if database not in definitions]
+    if missing:
+        raise ValueError(f"v2 dump is missing CREATE DATABASE for: {', '.join(missing)}")
+    return "\n".join(definitions[database] for database in KNOWN_DBS)
+
+
+def _import_multi_database(sql_path: Path, password: str, on_progress: ProgressCb) -> bool:
+    """Restore a v2 mysqldump --databases archive as one SQL stream."""
+    on_progress("restore", "restoring consistent multi-database snapshot")
+    try:
+        create_sql = _v2_create_database_statements(sql_path)
+    except (OSError, UnicodeError, ValueError) as e:
+        on_progress("restore", f"v2 create failed: {e}")
+        return False
+    for phase, statement in (
+        ("drop", " ".join(f"DROP DATABASE IF EXISTS {db};" for db in KNOWN_DBS)),
+        ("create", create_sql),
+    ):
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "ac-database", "mysql", "-uroot", f"-p{password}",
+                 "-e", statement],
+                capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            on_progress("restore", f"v2 {phase} timed out")
+            raise ActionTimeout(f"v2 {phase} timed out") from e
+        if result.returncode != 0:
+            on_progress("restore", f"v2 {phase} failed: {result.stderr.strip()}")
+            return False
+
+    # Replaying the dump's idempotent database DDL preserves its charset and
+    # collation defaults. The same statements are harmless no-ops in the full
+    # consistent-snapshot stream imported below.
+    try:
+        with sql_path.open("rb") as fh:
+            imp = subprocess.run(
+                ["docker", "exec", "-i", "ac-database", "mysql", "-uroot", f"-p{password}"],
+                stdin=fh, capture_output=True, text=True, timeout=MYSQL_TIMEOUT,
+            )
+    except subprocess.TimeoutExpired as e:
+        on_progress("restore", "v2 import timed out")
+        raise ActionTimeout("v2 import timed out") from e
+    if imp.returncode != 0:
+        on_progress("restore", f"v2 import failed: {imp.stderr.strip()}")
         return False
     return True
 
@@ -269,21 +541,16 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
         on_progress("validate", "archive not found")
         return ActionResult.ERROR
 
-    # 2. Manifest + DB-set validation.
-    manifest = read_manifest(archive)
-    if manifest is None or manifest.get("format_version") != 1:
-        on_progress("validate", "unsupported or missing manifest")
+    # 2. Validate the complete canonical archive before stopping worldserver.
+    validation_error = validate_canonical_backup(archive)
+    if validation_error is not None:
+        on_progress("validate", validation_error)
         return ActionResult.ERROR
-    dbs = manifest.get("databases", [])
-    unknown = [d for d in dbs if d not in KNOWN_DBS]
-    if unknown:
-        on_progress("validate", f"rejecting unknown DBs: {unknown}")
-        return ActionResult.ERROR
-    selected = [d for d in dbs if d in KNOWN_DBS]
-    if not selected:
-        on_progress("validate", "archive contains no database dumps")
-        return ActionResult.ERROR
-    on_progress("validate", f"will restore: {selected}")
+    with tarfile.open(archive, "r:gz") as tf:
+        manifest = _load_strict_json(tf.extractfile("manifest.json").read())
+    v2 = manifest["format_version"] == 2
+    selected = list(KNOWN_DBS)
+    on_progress("validate", f"will restore: {selected} ({'v2 consistent snapshot' if v2 else 'v1'})")
 
     stage: Path | None = None
     stopped = False
@@ -291,26 +558,23 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
         # Extract and validate all SQL before stopping or replacing anything.
         stage = Path(tempfile.mkdtemp(prefix="restore-"))
         with tarfile.open(archive, "r:gz") as tf:
+            member_error = _validate_archive_members(tf)
+            if member_error is not None:
+                on_progress("validate", member_error)
+                return ActionResult.ERROR
             if _archive_has_unsafe_member(tf, stage):
                 on_progress("validate", "archive contains unsafe paths")
                 return ActionResult.ERROR
             tf.extractall(stage, filter="data")
-        missing_sql = [
-            db for db in selected
-            if not (stage / "sql" / f"{db}.sql").is_file()
-        ]
-        if missing_sql:
-            on_progress("validate", f"archive missing SQL dumps for: {missing_sql}")
+        admin_yml = stage / "config" / "docker-compose.admin.yml"
+        if admin_yml.exists() and not admin_yml.is_file():
+            on_progress("validate", "archive admin overlay is not a regular file")
             return ActionResult.ERROR
-        invalid_sql = []
-        for db in selected:
-            sql_path = stage / "sql" / f"{db}.sql"
-            if sql_path.stat().st_size == 0 or not sql_path.read_bytes().rstrip().endswith(b"-- Dump completed"):
-                invalid_sql.append(db)
-        if invalid_sql:
-            on_progress("validate", f"archive has empty or incomplete SQL dumps: {invalid_sql}")
-            return ActionResult.ERROR
-
+        if admin_yml.is_file():
+            overlay_error = _validate_restored_admin_yml(admin_yml)
+            if overlay_error is not None:
+                on_progress("validate", overlay_error)
+                return ActionResult.ERROR
         stop = run_stop(on_progress=on_progress)
         if stop not in (ActionResult.OK, ActionResult.ALREADY):
             return stop
@@ -322,14 +586,19 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
             _restart_after_restore_failure(on_progress)
             return ActionResult.ERROR
         password = str(db_credentials()["password"])
-        for db in selected:
-            sql_path = stage / "sql" / f"{db}.sql"
-            if not _import_db(db, sql_path, password, on_progress):
+        if v2:
+            imported = _import_multi_database(stage / "sql" / "azerothcore.sql", password, on_progress)
+            if not imported:
                 on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
                 return ActionResult.ERROR
+        else:
+            for db in selected:
+                sql_path = stage / "sql" / f"{db}.sql"
+                if not _import_db(db, sql_path, password, on_progress):
+                    on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
+                    return ActionResult.ERROR
 
         # 6. Restore admin.yml if present (the one config the admin may write).
-        admin_yml = stage / "config" / "docker-compose.admin.yml"
         if admin_yml.is_file():
             on_progress("restore", "restoring docker-compose.admin.yml")
             _restore_admin_yml(admin_yml, ac_stack)
@@ -351,6 +620,10 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
     # 7. Start.
     start = run_start(on_progress=on_progress)
     if start not in (ActionResult.OK, ActionResult.ALREADY):
+        on_progress(
+            "restore",
+            "server remains stopped; restore the pre-restore archive to recover",
+        )
         return start
     on_progress("done", "restore complete")
     return ActionResult.OK
@@ -380,7 +653,7 @@ def run_stop(
     the SIGTERM `docker stop` sends, defeating its purpose.
     """
     info = inspect_worldserver()
-    if info.status in ("exited", "missing"):
+    if info.status in STOPPED_WORLDSERVER_STATUSES:
         on_progress("inspect", f"already {info.status}")
         return ActionResult.OK
 
@@ -411,6 +684,14 @@ def run_stop(
             console.send("saveall")
             time.sleep(1)
     except Exception as e:  # noqa: BLE001
+        # A Docker daemon restart or another lifecycle action can stop the
+        # container between the initial inspect and the PTY attach. Do not
+        # turn that completed stop into a misleading attach warning followed
+        # by a pointless wait for an already non-running container.
+        latest = inspect_worldserver()
+        if latest.status in STOPPED_WORLDSERVER_STATUSES:
+            on_progress("inspect", f"already {latest.status}")
+            return ActionResult.OK
         log.warning("console warning phase failed; proceeding with docker stop: %s", e)
         on_progress("attach", f"console warning phase failed ({e}); proceeding with docker stop")
 

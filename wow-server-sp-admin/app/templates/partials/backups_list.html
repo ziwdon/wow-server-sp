@@ -3,10 +3,13 @@
   {% if rows %}
   <ul class="backups-list">
   {% for row in rows %}
-    <li class="backup-row" data-archive="{{ row.filename }}" role="button" tabindex="0" onclick="selectBackup(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectBackup(this)}">
+    <li class="backup-row backup-{{ row.health }}" data-archive="{{ row.filename }}" data-restorable="{{ 'true' if row.restorable else 'false' }}"{% if row.restorable %} role="button" tabindex="0" onclick="selectBackup(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectBackup(this)}"{% else %} aria-disabled="true"{% endif %}>
       <span class="backup-time">{{ row.created }}</span>
       <span class="backup-badge badge-{{ row.label }}">{{ row.label|capitalize }}</span>
+      <span class="backup-badge badge-health-{{ row.health }}">{{ row.health|capitalize }}</span>
+      {% if not row.restorable %}<span class="backup-health-detail">{{ row.health_detail }} — not restorable</span>{% endif %}
       <span class="backup-size">{{ row.size_mb }} MB</span>
+      <a class="backup-download" href="/api/backups/download/{{ row.filename }}">Download</a>
     </li>
   {% endfor %}
   </ul>

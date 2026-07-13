@@ -7,7 +7,7 @@
 
 set -u   # NOT -e: we want to run every check, even if one fails.
 
-STACK_DIR="/opt/stacks/azerothcore"
+STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore}"
 PASS=0
 FAIL=0
 TOTAL=0   # OK + FAIL only; INFO is excluded
@@ -36,10 +36,25 @@ fi
 # shellcheck disable=SC1091
 source "${STACK_DIR}/.env"
 
+# Verify variables required by this checker before expanding them. Keep going
+# after failures so the final report remains useful rather than aborting under
+# `set -u` on a partially written .env.
+for required_env in \
+    DOCKER_DB_ROOT_PASSWORD \
+    DOCKER_DB_EXTERNAL_PORT \
+    DOCKER_SOAP_EXTERNAL_PORT \
+    DOCKER_AUTH_EXTERNAL_PORT \
+    DOCKER_WORLD_EXTERNAL_PORT; do
+    if [ -z "${!required_env:-}" ]; then
+        fail ".env is missing required ${required_env}"
+    fi
+done
+
 # Expected Tailscale IP comes from .env, not from `tailscale ip -4 | head -1`.
 # A host can hold more than one Tailscale IPv4 (multi-tailnet, re-auth, exit
 # node), so the install-time value is the only authoritative source.
-EXPECTED_TS_IP="${DOCKER_AUTH_EXTERNAL_PORT%%:*}"
+EXPECTED_TS_IP="${DOCKER_AUTH_EXTERNAL_PORT:-}"
+EXPECTED_TS_IP="${EXPECTED_TS_IP%%:*}"
 
 # ============================================================================
 # Helpers
@@ -50,7 +65,7 @@ EXPECTED_TS_IP="${DOCKER_AUTH_EXTERNAL_PORT%%:*}"
 # Checks 1 and 3 should run first so any connection failure is already flagged.
 mysql_exec() {
     docker exec ac-database mysql \
-        -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" -N -B -e "$1" 2>/dev/null
+        -uroot -p"${DOCKER_DB_ROOT_PASSWORD:-}" -N -B -e "$1" 2>/dev/null
 }
 
 # Read a single MySQL global variable via SHOW VARIABLES LIKE. Returns the
@@ -188,6 +203,16 @@ for c in ac-database ac-authserver ac-worldserver; do
     fi
 done
 
+# A running process can still be stalled during bootstrap. Server.log is
+# truncated on every worldserver boot, so this marker proves this boot reached
+# the ready state rather than merely inheriting an old success marker.
+if [ -f "${STACK_DIR}/logs/Server.log" ] \
+    && grep -q 'World Initialized' "${STACK_DIR}/logs/Server.log" 2>/dev/null; then
+    ok "ac-worldserver reached World Initialized"
+else
+    fail "ac-worldserver has not reached World Initialized"
+fi
+
 # ============================================================================
 # Check 2 — short-lived init containers exited 0
 # ============================================================================
@@ -318,7 +343,7 @@ verify_mysql_static innodb_flush_log_at_trx_commit 2
 # the same to the user otherwise.
 # ============================================================================
 if ! printf '%s' "$EXPECTED_TS_IP" | grep -Eq '^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
-    fail "DOCKER_AUTH_EXTERNAL_PORT in .env does not start with a valid Tailscale CGNAT IPv4: '${DOCKER_AUTH_EXTERNAL_PORT}'"
+    fail "DOCKER_AUTH_EXTERNAL_PORT in .env does not start with a valid Tailscale CGNAT IPv4: '${DOCKER_AUTH_EXTERNAL_PORT:-}'"
 else
     realm_addr="$(mysql_exec "SELECT address FROM acore_auth.realmlist WHERE id=1;" || echo "")"
     if [ "$realm_addr" = "$EXPECTED_TS_IP" ]; then
@@ -718,10 +743,114 @@ else
 fi
 
 # ============================================================================
-# Check 16 — backups directory present, with at least one fresh file
-# Three deterministic paths; no silent skip if backup.sh is missing.
+# Check 16 — backups directory contains a fresh, complete canonical archive
+# A file's name, mtime, or successful tar listing alone is not recovery
+# evidence. Match the restore validator's canonical contract here: all four
+# databases, no skipped databases, completion footer(s), and for v2 the exact
+# ordered multi-database SQL stream inventory.
 # ============================================================================
 BACKUPS_DIR="${STACK_DIR}/backups"
+
+is_complete_canonical_backup() {
+    local archive="$1" format db sql_tail
+
+    tar -tzf "$archive" >/dev/null 2>&1 || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    if ! format="$(python3 - "$archive" <<'PY'
+import json
+import sys
+import tarfile
+
+DATABASES = ["acore_auth", "acore_characters", "acore_world", "acore_playerbots"]
+
+
+def reject_duplicate_object_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+try:
+    with tarfile.open(sys.argv[1], "r:gz") as backup:
+        manifest_file = backup.extractfile("manifest.json")
+        if manifest_file is None:
+            raise ValueError("missing manifest")
+        manifest = json.load(manifest_file, object_pairs_hook=reject_duplicate_object_keys)
+except (OSError, tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    raise SystemExit(1)
+
+if not isinstance(manifest, dict):
+    raise SystemExit(1)
+format_version = manifest.get("format_version")
+if isinstance(format_version, bool) or not isinstance(format_version, int):
+    raise SystemExit(1)
+if format_version not in (1, 2):
+    raise SystemExit(1)
+if manifest.get("databases") != DATABASES or manifest.get("skipped_databases") != []:
+    raise SystemExit(1)
+if format_version == 2 and manifest.get("dump_layout") != "single-multi-database":
+    raise SystemExit(1)
+print(format_version)
+PY
+    )"; then
+        return 1
+    fi
+
+    if [ "$format" = 2 ]; then
+        tar -tzf "$archive" 2>/dev/null | grep -qx 'sql/azerothcore.sql' || return 1
+        sql_tail="$(tar -xOzf "$archive" sql/azerothcore.sql 2>/dev/null | tail -c 8192)" || return 1
+        printf '%s\n' "$sql_tail" | grep -Eq -- '-- Dump completed on .+$' || return 1
+        python3 - "$archive" <<'PY'
+import sys
+import tarfile
+
+DATABASES = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+PREFIX = b"-- Current Database:"
+MARKER = b"-- Current Database: `"
+MAX_LINE_BYTES = 4096
+
+try:
+    with tarfile.open(sys.argv[1], "r:gz") as backup:
+        stream = backup.extractfile("sql/azerothcore.sql")
+        if stream is None:
+            raise ValueError("missing SQL stream")
+        expected_index = 0
+        at_line_start = True
+        while line := stream.readline(MAX_LINE_BYTES + 1):
+            line_ended = line.endswith(b"\n")
+            if at_line_start and line.startswith(PREFIX):
+                if len(line) > MAX_LINE_BYTES or not line.endswith(b"\n"):
+                    raise ValueError("oversized database section header")
+                line = line.rstrip(b"\r\n")
+                if not (
+                    line.startswith(MARKER)
+                    and line.endswith(b"`")
+                    and line.count(b"`") == 2
+                ):
+                    raise ValueError("malformed database section header")
+                section = line.split(b"`", 2)[1].decode("utf-8")
+                if expected_index >= len(DATABASES) or section != DATABASES[expected_index]:
+                    raise ValueError("noncanonical database section inventory")
+                expected_index += 1
+            at_line_start = line_ended
+except (OSError, tarfile.TarError, UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+
+raise SystemExit(0 if expected_index == len(DATABASES) else 1)
+PY
+        return
+    fi
+
+    for db in acore_auth acore_characters acore_world acore_playerbots; do
+        tar -tzf "$archive" 2>/dev/null | grep -qx "sql/${db}.sql" || return 1
+        sql_tail="$(tar -xOzf "$archive" "sql/${db}.sql" 2>/dev/null | tail -c 8192)" || return 1
+        printf '%s\n' "$sql_tail" | grep -Eq -- '-- Dump completed on .+$' || return 1
+    done
+}
+
 if [ ! -d "$BACKUPS_DIR" ]; then
     fail "Backups directory missing at $BACKUPS_DIR"
 elif [ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]; then
@@ -729,11 +858,44 @@ elif [ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]; then
 elif [ ! -x "$BACKUP_SCRIPT" ]; then
     info "Cannot check backup freshness: backup.sh missing/not executable (see Check 15)"
 else
-    fresh_count="$(find "$BACKUPS_DIR" -type f -mmin -1500 2>/dev/null | wc -l)"
-    if [ "$fresh_count" -gt 0 ]; then
-        ok "Backups directory has $fresh_count file(s) from the last 25 hours"
+    complete_count=0
+    fresh_complete_count=0
+    while IFS= read -r -d '' archive; do
+        if is_complete_canonical_backup "$archive"; then
+            complete_count=$((complete_count + 1))
+            if [ -n "$(find "$archive" -mmin -1500 -print -quit 2>/dev/null)" ]; then
+                fresh_complete_count=$((fresh_complete_count + 1))
+            fi
+        fi
+    done < <(find "$BACKUPS_DIR" -maxdepth 1 -type f -name 'azerothcore-backup-*.tar.gz' -print0 2>/dev/null)
+
+    if [ "$fresh_complete_count" -gt 0 ]; then
+        ok "Backups directory has $fresh_complete_count fresh complete canonical archive(s) (last 25 hours)"
+    elif [ "$complete_count" -gt 0 ]; then
+        fail "Backups directory has complete canonical archive(s), but none from the last 25 hours"
     else
-        fail "Backups directory has files but none newer than backup.sh (backup hasn't run since script was last written)"
+        fail "Backups directory has no complete readable canonical archive (partial, corrupt, or arbitrary files do not count)"
+    fi
+fi
+
+# ==========================================================================
+# Check 16b — actionable worldserver errors since this boot
+# Errors.log is truncated on boot.  A non-empty file is actionable except for
+# the documented graveyard-zone data gap, which is advisory when it is the
+# only content.  Mixed content still fails so a benign line cannot hide an
+# unrelated runtime error.
+# ==========================================================================
+ERRORS_LOG="${STACK_DIR}/logs/Errors.log"
+if [ ! -f "$ERRORS_LOG" ]; then
+    fail "Errors.log missing at $ERRORS_LOG"
+elif [ ! -s "$ERRORS_LOG" ]; then
+    ok "Errors.log is empty (no actionable runtime errors)"
+else
+    actionable_errors="$(grep -vE 'Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard' "$ERRORS_LOG" 2>/dev/null || true)"
+    if [ -n "$actionable_errors" ]; then
+        fail "Errors.log has actionable runtime errors (inspect $ERRORS_LOG)"
+    else
+        info "Errors.log contains only the known graveyard_zone data-gap warning"
     fi
 fi
 
@@ -795,10 +957,10 @@ done
 # Catches the failure mode where Docker silently exposes 3306/SOAP on
 # 0.0.0.0 because .env values were not honored on the last recreate.
 # ============================================================================
-verify_port_scope_from_env "MySQL"       "$DOCKER_DB_EXTERNAL_PORT"
-verify_port_scope_from_env "SOAP"        "$DOCKER_SOAP_EXTERNAL_PORT"
-verify_port_scope_from_env "authserver"  "$DOCKER_AUTH_EXTERNAL_PORT"
-verify_port_scope_from_env "worldserver" "$DOCKER_WORLD_EXTERNAL_PORT"
+verify_port_scope_from_env "MySQL"       "${DOCKER_DB_EXTERNAL_PORT:-}"
+verify_port_scope_from_env "SOAP"        "${DOCKER_SOAP_EXTERNAL_PORT:-}"
+verify_port_scope_from_env "authserver"  "${DOCKER_AUTH_EXTERNAL_PORT:-}"
+verify_port_scope_from_env "worldserver" "${DOCKER_WORLD_EXTERNAL_PORT:-}"
 
 # ============================================================================
 # Check 22 — auctions count (informational, with stale-empty warning)

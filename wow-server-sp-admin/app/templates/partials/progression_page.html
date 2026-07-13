@@ -32,14 +32,15 @@
 
         <!-- Right column: expansion icon picker -->
         <div class="right-col">
-          <label class="field-label">Target expansion</label>
-          <div class="exp-picker-horiz" id="exp-picker">
+          <span class="field-label" id="exp-picker-label">Target expansion</span>
+          <div class="exp-picker-horiz" id="exp-picker" role="group" aria-labelledby="exp-picker-label">
             {% for exp_key in ['vanilla', 'tbc', 'wotlk'] %}
-            <div class="exp-tile state-downgrade" data-expansion="{{ exp_key }}" id="exp-tile-{{ exp_key }}">
-              <img src="/static/assets/{{ icons[exp_key] }}.png" alt="{{ labels[exp_key] }}">
+            <button type="button" class="exp-tile state-downgrade" data-expansion="{{ exp_key }}" id="exp-tile-{{ exp_key }}"
+                    aria-label="Select {{ labels[exp_key] }} target expansion" aria-pressed="false" disabled>
+              <img src="/static/assets/{{ icons[exp_key] }}.png" alt="">
               <span class="exp-label">{{ labels[exp_key] }}</span>
               <span class="exp-badge" id="exp-badge-{{ exp_key }}"></span>
-            </div>
+            </button>
             {% endfor %}
           </div>
         </div>
@@ -48,11 +49,12 @@
     </div>
   </div>
   <!-- Confirmation modal -->
-  <div id="prog-confirm-overlay" class="prog-confirm-overlay hidden" role="dialog" aria-modal="true">
-    <div class="prog-confirm-dialog">
-      <h3 class="prog-confirm-title">Confirm Progression Change</h3>
+  <div id="prog-confirm-overlay" class="prog-confirm-overlay hidden" aria-hidden="true">
+    <div class="prog-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="prog-confirm-title"
+         aria-describedby="prog-confirm-body prog-confirm-notes" tabindex="-1">
+      <h3 class="prog-confirm-title" id="prog-confirm-title">Confirm Progression Change</h3>
       <p class="prog-confirm-body" id="prog-confirm-body"></p>
-      <ul class="prog-confirm-notes">
+      <ul class="prog-confirm-notes" id="prog-confirm-notes">
         <li>This action is irreversible.</li>
         <li>Existing max level restrictions remain in place.</li>
         <li>Your character's level will not be boosted.</li>
@@ -83,6 +85,7 @@
   const labels = {{ labels | tojson }};
   let selectedChar = null;
   let selectedExpansion = null;
+  let confirmationOpen = false;
 
   const accountSel = document.getElementById('prog-account');
   const charList = document.getElementById('prog-char-list');
@@ -125,7 +128,9 @@
       const badge = document.getElementById('exp-badge-' + key);
       if (!tile || !badge) return;
       badge.textContent = '';
-      tile.onclick = null;
+      tile.disabled = true;
+      tile.setAttribute('aria-pressed', 'false');
+      tile.removeAttribute('aria-current');
 
       if (!selectedChar) {
         tile.className = 'exp-tile state-downgrade';
@@ -135,15 +140,17 @@
       if (key === selectedChar.expansion) {
         tile.className = 'exp-tile state-current';
         badge.textContent = 'current';
+        tile.setAttribute('aria-current', 'true');
       } else if (key === selectedExpansion) {
         tile.className = 'exp-tile state-selected';
-        tile.onclick = function() { pickExpansion(key); };
       } else if (expOrder[key] < selectedChar.progression) {
         tile.className = 'exp-tile state-downgrade';
       } else {
         tile.className = 'exp-tile state-available';
-        tile.onclick = function() { pickExpansion(key); };
       }
+      const available = key !== selectedChar.expansion && expOrder[key] >= selectedChar.progression;
+      tile.disabled = !available;
+      tile.setAttribute('aria-pressed', String(key === selectedExpansion));
     });
   }
 
@@ -202,22 +209,30 @@
     updateApply();
   }
 
+  expKeys.forEach(function(key) {
+    const tile = document.getElementById('exp-tile-' + key);
+    if (tile) tile.addEventListener('click', function() { pickExpansion(key); });
+  });
+
   function showConfirmModal(charName, expLabel) {
     return new Promise(function(resolve) {
       const overlay = document.getElementById('prog-confirm-overlay');
+      const dialog = overlay && overlay.querySelector('.prog-confirm-dialog');
       const body = document.getElementById('prog-confirm-body');
       const yesBtn = document.getElementById('prog-confirm-yes');
       const cancelBtn = document.getElementById('prog-confirm-cancel');
-      if (!overlay || !body || !yesBtn || !cancelBtn) { resolve(true); return; }
+      if (!overlay || !dialog || !body || !yesBtn || !cancelBtn) { resolve(false); return; }
 
       body.textContent = 'Applying ' + expLabel + ' progression to ' + charName
         + ' will progress this character toward that expansion and unlock previously restricted content.';
 
       overlay.classList.remove('hidden');
+      overlay.setAttribute('aria-hidden', 'false');
       yesBtn.focus();
 
       function cleanup(result) {
         overlay.classList.add('hidden');
+        overlay.setAttribute('aria-hidden', 'true');
         yesBtn.removeEventListener('click', onYes);
         cancelBtn.removeEventListener('click', onCancel);
         overlay.removeEventListener('click', onOverlay);
@@ -227,7 +242,18 @@
       function onYes() { cleanup(true); }
       function onCancel() { cleanup(false); }
       function onOverlay(e) { if (e.target === overlay) cleanup(false); }
-      function onKey(e) { if (e.key === 'Escape') cleanup(false); }
+      function trapFocus(e) {
+        const focusable = dialog.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!first || !last) { e.preventDefault(); dialog.focus(); return; }
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+        if (e.key === 'Tab') trapFocus(e);
+      }
 
       yesBtn.addEventListener('click', onYes);
       cancelBtn.addEventListener('click', onCancel);
@@ -241,11 +267,13 @@
   });
 
   applyBtn.addEventListener('click', async function() {
-    if (!selectedChar || !selectedExpansion) return;
+    if (!selectedChar || !selectedExpansion || confirmationOpen) return;
+    confirmationOpen = true;
+    applyBtn.disabled = true;
     const expLabel = labels[selectedExpansion] || selectedExpansion;
     const confirmed = await showConfirmModal(selectedChar.name, expLabel);
-    if (!confirmed) return;
-    applyBtn.disabled = true;
+    confirmationOpen = false;
+    if (!confirmed) { updateApply(); applyBtn.focus(); return; }
     try {
       const response = await fetch('/api/progression/apply', {
         method: 'POST',

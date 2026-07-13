@@ -69,3 +69,81 @@ def test_xp_field_order_and_uninstall_safety_are_pinned():
         assert "--remove-orphans" not in admin_code
     else:
         pytest.skip("admin sibling is not mounted in the standalone scripts test container")
+
+
+def test_systemd_stack_unit_recovers_from_docker_restarts():
+    """The Compose launcher must survive a daemon/package restart mid-start."""
+    systemd_unit = re.search(
+        r"sudo tee /etc/systemd/system/azerothcore\.service <<'EOF' >/dev/null\n(.*?)\nEOF",
+        INSTALL,
+        re.S,
+    )
+    assert systemd_unit, "azerothcore.service heredoc not found"
+    unit = systemd_unit.group(1)
+    assert "PartOf=docker.service" in unit
+    assert "Restart=on-failure" in unit
+    assert "RestartSec=10s" in unit
+
+
+def test_systemd_stack_unit_gives_worldserver_a_save_grace_period():
+    systemd_unit = re.search(
+        r"sudo tee /etc/systemd/system/azerothcore\.service <<'EOF' >/dev/null\n(.*?)\nEOF",
+        INSTALL,
+        re.S,
+    )
+    assert systemd_unit, "azerothcore.service heredoc not found"
+    unit = systemd_unit.group(1)
+    assert "ExecStop=/usr/bin/docker compose down --timeout 60" in unit
+    assert "TimeoutStopSec=75" in unit
+
+
+def test_intentional_shellcheck_cases_are_narrowly_suppressed_and_documented():
+    claude = (SCRIPTS.parent / "CLAUDE.md").read_text()
+
+    assert INSTALL.count("# shellcheck disable=SC2001") == 1
+    assert INSTALL.count("# shellcheck disable=SC2016") == 1
+    assert INSTALL.count("# shellcheck disable=SC2012") == 3
+    assert "shellcheck scripts/*.sh wow-server-sp-admin/scripts/*.sh" in claude
+    assert "narrow local suppressions" in claude
+
+
+def test_manual_compose_override_guidance_recreates_only_worldserver():
+    readme = (SCRIPTS.parent / "README.md").read_text()
+    post_install_tuning = INSTALL.split('echo "Post-install tuning:"', 1)[1]
+    worldserver_reference = (
+        SCRIPTS.parent / "skills/wow-server-sp-gamemaster/references/ref-config-worldserver.md"
+    ).read_text()
+    manual_override_guidance = worldserver_reference.split("## Where to Edit Config", 1)[1].split(
+        "## Key worldserver.conf Settings", 1
+    )[0]
+
+    assert "docker compose up -d --force-recreate ac-worldserver" in readme
+    assert "docker compose up -d --force-recreate ac-worldserver" in post_install_tuning
+    assert "docker compose restart ac-worldserver" not in post_install_tuning
+    assert "docker compose up -d --force-recreate ac-worldserver" in manual_override_guidance
+    assert "docker compose restart ac-worldserver" not in manual_override_guidance
+    assert "docker logs --tail 50 ac-worldserver" in manual_override_guidance
+    assert "Confirm the logs include `WORLD: World Initialized`." in manual_override_guidance
+
+
+def test_installer_profile_default_and_installation_reference_stay_aligned():
+    reference = (SCRIPTS.parent / "skills/wow-server-sp-gamemaster/references/ref-installation.md").read_text()
+
+    assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1500' in INSTALL
+    assert 'Random bot count (1-2000, applied to both MIN and MAX)" 1 2000 1500' in INSTALL
+    assert "Server XP rate (x1, x3, x5, or x7)" in reference
+    assert "Playerbot count (default: 1500)" in reference
+
+
+def test_capacity_warning_override_is_documented():
+    readme = (SCRIPTS.parent / "README.md").read_text()
+    reference = (SCRIPTS.parent / "skills/wow-server-sp-gamemaster/references/ref-installation.md").read_text()
+
+    assert "--allow-capacity-warnings" in readme
+    assert "--allow-capacity-warnings" in reference
+
+
+def test_capacity_metric_test_seams_are_not_available_to_production_installs():
+    assert "INSTALLER_TEST_OPT_FREE_KIB" not in INSTALL
+    assert "INSTALLER_TEST_MEM_TOTAL_KIB" not in INSTALL
+    assert "INSTALLER_TEST_ASSUME_INTERACTIVE" not in INSTALL

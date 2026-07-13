@@ -20,11 +20,58 @@ write tears, the most recent snapshot is the recovery target.
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 from pathlib import Path
 
 import yaml
 
+from app.services.config_policy import BLOCKED_KEYS
+from app.services.env_var import config_key_to_ac_env_var
+
 SERVICE = "ac-worldserver"
+_EXPECTED_TOP_LEVEL_KEYS = frozenset({"services"})
+_EXPECTED_SERVICE_KEYS = frozenset({"environment"})
+_BLOCKED_ENV_VARS = frozenset(config_key_to_ac_env_var(key) for key in BLOCKED_KEYS)
+
+
+def validate_restored_overlay(path: Path, *, allowed_env_vars: Collection[str]) -> str | None:
+    """Return an error unless a restored overlay matches the admin-only contract.
+
+    The overlay is an untrusted archive member during restore.  It may only
+    describe the worldserver environment that the settings UI itself can
+    produce; accepting other Compose constructs would let an archive change
+    container topology or override unrelated runtime settings.
+    """
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return "restored admin overlay is malformed"
+
+    if not isinstance(data, dict) or set(data) != _EXPECTED_TOP_LEVEL_KEYS:
+        return "restored admin overlay has unsupported top-level keys"
+    services = data["services"]
+    if not isinstance(services, dict):
+        return "restored admin overlay services must be a mapping"
+    if not services:
+        return None
+    if set(services) != {SERVICE}:
+        return "restored admin overlay contains extra services"
+    worldserver = services[SERVICE]
+    if not isinstance(worldserver, dict) or set(worldserver) != _EXPECTED_SERVICE_KEYS:
+        return "restored admin overlay has unsupported worldserver settings"
+    env = worldserver["environment"]
+    if not isinstance(env, dict):
+        return "restored admin overlay environment must be a mapping"
+
+    allowed = set(allowed_env_vars)
+    for key, value in env.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            return "restored admin overlay environment entries must be strings"
+        if key in _BLOCKED_ENV_VARS:
+            return f"restored admin overlay contains blocked key: {key}"
+        if key not in allowed:
+            return f"restored admin overlay key is not approved: {key}"
+    return None
 
 
 class AdminCompose:

@@ -6,7 +6,7 @@ ARG HOST_GID=1000
 # Docker CE CLI + Compose v2 plugin so the admin app can shell out to
 # `docker compose ...` against the bind-mounted host socket.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git && \
+        ca-certificates curl gnupg git util-linux && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg | \
         gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
@@ -20,8 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir pytest==8.3.3 pytest-asyncio==0.24.0 httpx==0.27.2
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Bake the .conf.dist files for offline key-index parsing.
 COPY dist/ /app/dist/

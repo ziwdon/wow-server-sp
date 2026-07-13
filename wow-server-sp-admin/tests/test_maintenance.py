@@ -1,5 +1,7 @@
 import datetime as dt
 import asyncio
+import os
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -44,6 +46,168 @@ def test_config_round_trips_to_json(tmp_path):
     store.save_config(cfg)
 
     assert store.load_config() == cfg
+
+
+def test_corrupt_config_is_quarantined_and_disables_scheduled_jobs(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    store.config_path.write_text("{not json")
+    runner = Mock()
+    scheduler = MaintenanceScheduler(store, runner=runner)
+
+    scheduler.tick(dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC))
+
+    assert store.load_config() == MaintenanceConfig()
+    assert store.degradation_diagnostic() == (
+        "Maintenance state is corrupt and was preserved as maintenance.json.corrupt. "
+        "Save maintenance settings to repair it."
+    )
+    assert (tmp_path / "maintenance.json.corrupt").read_text() == "{not json"
+    assert not store.config_path.exists()
+    runner.start.assert_not_called()
+
+
+def test_corrupt_config_reports_when_preservation_cannot_complete(tmp_path, monkeypatch):
+    store = MaintenanceStore(tmp_path)
+    store.config_path.write_text("{not json")
+    original_link = os.link
+
+    def fail_config_quarantine(source, target, *args, **kwargs):
+        if Path(source) == store.config_path:
+            raise OSError("disk failure")
+        return original_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr("app.services.maintenance.os.link", fail_config_quarantine)
+
+    assert store.load_config() == MaintenanceConfig()
+
+    assert store.degradation_diagnostic() == (
+        "Maintenance state is corrupt but could not be preserved; "
+        "maintenance.json was left in place. Save maintenance settings to repair it."
+    )
+    assert store.config_path.read_text() == "{not json"
+    assert not (tmp_path / "maintenance.json.corrupt").exists()
+
+
+def test_unreadable_config_is_disabled_and_reports_repair_guidance(tmp_path, monkeypatch):
+    store = MaintenanceStore(tmp_path)
+    store.config_path.write_text('{"restart_enabled": true}')
+    original_read_text = Path.read_text
+
+    def fail_config_read(path, *args, **kwargs):
+        if path == store.config_path:
+            raise PermissionError("permission denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_config_read)
+
+    assert store.load_config() == MaintenanceConfig()
+    assert MaintenanceScheduler(store, runner=Mock()).due_jobs(
+        dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC)
+    ) == []
+    assert store.degradation_diagnostic() == (
+        "Maintenance state could not be read and was preserved as maintenance.json.corrupt. "
+        "Save maintenance settings to repair it."
+    )
+
+
+def test_schema_invalid_config_is_disabled_and_reports_repair_guidance(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    broken = '{"restart_enabled": "yes"}'
+    store.config_path.write_text(broken)
+
+    assert store.load_config() == MaintenanceConfig()
+    assert MaintenanceScheduler(store, runner=Mock()).due_jobs(
+        dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC)
+    ) == []
+    assert store.corrupt_path.read_text() == broken
+    assert store.degradation_diagnostic() == (
+        "Maintenance state is invalid and was preserved as maintenance.json.corrupt. "
+        "Save maintenance settings to repair it."
+    )
+
+
+def test_preexisting_quarantine_is_never_overwritten_and_stays_disabled(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    broken = "{not json"
+    preserved = "earlier corrupt state"
+    store.config_path.write_text(broken)
+    store.corrupt_path.write_text(preserved)
+
+    assert store.load_config() == MaintenanceConfig()
+
+    assert store.config_path.read_text() == broken
+    assert store.corrupt_path.read_text() == preserved
+    assert MaintenanceStore(tmp_path).load_config() == MaintenanceConfig()
+    assert store.degradation_diagnostic() == (
+        "Maintenance state is corrupt and maintenance.json.corrupt already exists; "
+        "maintenance.json was left in place. Save maintenance settings to repair it."
+    )
+
+
+def test_marker_persistence_failure_restores_corrupt_source_for_next_load(tmp_path, monkeypatch):
+    store = MaintenanceStore(tmp_path)
+    broken = "{not json"
+    store.config_path.write_text(broken)
+    original_replace = os.replace
+
+    def fail_outcome_marker_replace(source, target):
+        if Path(target) == store.degraded_path:
+            raise OSError("disk failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr("app.services.maintenance.os.replace", fail_outcome_marker_replace)
+
+    assert store.load_config() == MaintenanceConfig()
+
+    assert store.config_path.read_text() == broken
+    assert store.corrupt_path.read_text() == broken
+    reloaded = MaintenanceStore(tmp_path)
+    assert reloaded.load_config() == MaintenanceConfig()
+    assert "Save maintenance settings to repair it." in reloaded.degradation_diagnostic()
+
+
+def test_marker_persistence_failure_keeps_source_without_restoration(tmp_path, monkeypatch):
+    store = MaintenanceStore(tmp_path)
+    broken = "{not json"
+    store.config_path.write_text(broken)
+    original_link = os.link
+    original_replace = os.replace
+
+    def reject_source_restoration(source, target, *args, **kwargs):
+        if Path(source) == store.corrupt_path and Path(target) == store.config_path:
+            raise AssertionError("corrupt source restoration was attempted")
+        return original_link(source, target, *args, **kwargs)
+
+    def fail_outcome_marker_replace(source, target):
+        if Path(target) == store.degraded_path:
+            raise OSError("disk failure")
+        return original_replace(source, target)
+
+    monkeypatch.setattr("app.services.maintenance.os.link", reject_source_restoration)
+    monkeypatch.setattr("app.services.maintenance.os.replace", fail_outcome_marker_replace)
+
+    assert store.load_config() == MaintenanceConfig()
+    assert store.config_path.read_text() == broken
+
+    reloaded = MaintenanceStore(tmp_path)
+    assert reloaded.load_config() == MaintenanceConfig()
+    assert "Maintenance state is corrupt" in reloaded.degradation_diagnostic()
+
+
+def test_save_repairs_degraded_state_and_allows_scheduling_again(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    store.config_path.write_text("{not json")
+    assert store.load_config() == MaintenanceConfig()
+    repaired = MaintenanceConfig(restart_enabled=True, restart_hour_utc=4)
+
+    store.save_config(repaired)
+
+    reloaded = MaintenanceStore(tmp_path)
+    assert reloaded.load_config() == repaired
+    assert reloaded.degradation_diagnostic() is None
+    assert MaintenanceScheduler(reloaded, runner=Mock()).due_jobs(
+        dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC)
+    ) == [DueJob("restart", "restart")]
 
 
 def test_validate_rejects_bad_hours_and_reversed_window(tmp_path):
@@ -244,6 +408,31 @@ async def test_scheduler_loop_continues_after_tick_exception(tmp_path, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_scheduler_loop_stays_alive_with_corrupt_persisted_state(tmp_path, monkeypatch):
+    store = MaintenanceStore(tmp_path)
+    store.config_path.write_text("{not json")
+    runner = Mock()
+    scheduler = MaintenanceScheduler(store, runner=runner, interval_seconds=0)
+    calls = 0
+    original_tick = scheduler.tick
+
+    def tick():
+        nonlocal calls
+        calls += 1
+        original_tick(dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC))
+        if calls == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(scheduler, "tick", tick)
+    task = asyncio.create_task(scheduler._run_loop())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == 2
+    runner.start.assert_not_called()
 
 
 @pytest.mark.asyncio

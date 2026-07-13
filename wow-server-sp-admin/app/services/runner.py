@@ -78,6 +78,7 @@ class ActionRunner:
         self._lock = threading.Lock()
         self._current: ActionRecord | None = None
         self._last: ActionRecord | None = None
+        self._mutation_reserved = False
 
     def current(self) -> ActionRecord | None:
         return self._current
@@ -90,6 +91,26 @@ class ActionRunner:
             if r is not None and r.id == action_id:
                 return r
         return None
+
+    def try_acquire_mutation(self) -> bool:
+        """Reserve the action domain for a synchronous database mutation.
+
+        Progression applies return their result in the request response, so
+        they cannot use ``start`` without changing that API. This reservation
+        shares its lock with ``start`` and prevents either operation from
+        beginning while the other owns the mutation domain.
+        """
+        with self._lock:
+            if self._current is not None or self._mutation_reserved:
+                return False
+            self._mutation_reserved = True
+            return True
+
+    def release_mutation(self) -> None:
+        with self._lock:
+            if not self._mutation_reserved:
+                raise RuntimeError("no external mutation is reserved")
+            self._mutation_reserved = False
 
     def start(
         self,
@@ -112,7 +133,7 @@ class ActionRunner:
         If `pre` raises, no record is registered and no task is spawned.
         """
         with self._lock:
-            if self._current is not None:
+            if self._current is not None or self._mutation_reserved:
                 raise RuntimeError("another action already running")
             if pre is not None:
                 pre()

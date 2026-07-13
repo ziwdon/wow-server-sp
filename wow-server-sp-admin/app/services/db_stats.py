@@ -30,6 +30,7 @@ def count_online(*, host: str, port: int, user: str, password: str) -> OnlineCou
         user=user,
         password=password,
         connection_timeout=2,
+        read_timeout=2,
         autocommit=True,
     )
     try:

@@ -5,8 +5,9 @@
     {% else %}<div class="stat-value" style="color:var(--text-muted)">None</div>{% endif %}
   </div>
   <div class="stat-card">
-    <div class="stat-label">Total Backups</div>
-    <div class="stat-value">{{ total_count }}</div>
+    <div class="stat-label">Usable Backups</div>
+    <div class="stat-value">{{ healthy_count }}</div>
+    <div class="stat-sub">{{ total_count }} archived{% if unusable_count %}; {{ unusable_count }} unusable{% endif %}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Disk Used</div>

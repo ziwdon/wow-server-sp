@@ -8,6 +8,7 @@ Vanilla=0, TBC=8, WotLK=13.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,10 @@ EXPANSION_ICONS = {
     "wotlk": "wotlk",
 }
 REAL_ACCOUNT_SQL = "a.username NOT LIKE 'RNDBOT%%' AND a.username <> 'ahbot'"
+PROGRESSION_AUDIT_DIRNAME = "progression-audit"
+PROGRESSION_AUDIT_MAX_RECORDS = 100
+PROGRESSION_AUDIT_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+log = logging.getLogger(__name__)
 
 
 def expansion_from_state(state: int) -> str:
@@ -230,11 +235,14 @@ def _write_audit_snapshot(
     target_state: int,
     existing_quests: set[int],
 ) -> Path:
+    snapshots_dir = snapshots_dir / PROGRESSION_AUDIT_DIRNAME
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     created_unix = int(time.time())
     path = snapshots_dir / f"progression-{row.guid}-{time.time_ns()}.json"
     payload = {
         "format_version": 1,
+        "record_type": "progression_audit",
+        "outcome": "pending",
         "guid": row.guid,
         "account": row.account,
         "character": row.name,
@@ -250,6 +258,95 @@ def _write_audit_snapshot(
     with path.open("x", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return path
+
+
+def _finalize_audit_snapshot(
+    path: Path,
+    *,
+    outcome: str,
+    effective_state: int | None = None,
+    exception: Exception | None = None,
+    reason: str | None = None,
+) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["outcome"] = outcome
+    payload["completed_unix"] = int(time.time())
+    if effective_state is not None:
+        payload["effective_state"] = effective_state
+    if exception is not None:
+        payload["exception_type"] = type(exception).__name__
+        payload["exception_message"] = str(exception)
+    if reason is not None:
+        payload["reason"] = reason
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _prune_progression_audit_records(audit_dir: Path, *, now: int | None = None) -> int:
+    """Retain only current, valid progression audit records in their own directory."""
+    if not audit_dir.exists():
+        return 0
+    cutoff = (int(time.time()) if now is None else now) - PROGRESSION_AUDIT_MAX_AGE_SECONDS
+    records: list[tuple[int, Path]] = []
+    for path in audit_dir.glob("progression-*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            created_unix = payload["created_unix"]
+            if (
+                not isinstance(payload, dict)
+                or payload.get("record_type") != "progression_audit"
+                or isinstance(created_unix, bool)
+                or not isinstance(created_unix, int)
+            ):
+                continue
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        records.append((created_unix, path))
+
+    expired = [(created, path) for created, path in records if created < cutoff]
+    current = [(created, path) for created, path in records if created >= cutoff]
+    excess = sorted(current, key=lambda record: (record[0], record[1].name))[:-PROGRESSION_AUDIT_MAX_RECORDS]
+    removed = 0
+    for _, path in expired + excess:
+        try:
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+    return removed
+
+
+def _complete_audit_snapshot(
+    path: Path,
+    *,
+    outcome: str,
+    effective_state: int | None = None,
+    exception: Exception | None = None,
+    reason: str | None = None,
+) -> None:
+    try:
+        _finalize_audit_snapshot(
+            path,
+            outcome=outcome,
+            effective_state=effective_state,
+            exception=exception,
+            reason=reason,
+        )
+    except Exception:
+        log.warning("could not finalize progression audit record %s", path, exc_info=True)
+    try:
+        _prune_progression_audit_records(path.parent)
+    except Exception:
+        log.warning("could not prune progression audit records in %s", path.parent, exc_info=True)
+
+
+def _write_audit_snapshot_best_effort(**kwargs) -> Path | None:
+    try:
+        return _write_audit_snapshot(**kwargs)
+    except Exception:
+        log.warning("could not write progression audit record", exc_info=True)
+        return None
 
 
 def _verify_effective_state(cur, guid: int) -> int:
@@ -276,6 +373,7 @@ def apply_progression(
 ) -> ApplyProgressionResult:
     target_state = target_state_for_expansion(target_expansion)
     conn = _connect(host=host, port=port, user=user, password=password)
+    audit_snapshot: Path | None = None
     try:
         with conn.cursor() as cur:
             row = _fetch_character(cur, guid, lock=False)
@@ -302,14 +400,29 @@ def apply_progression(
                 login_floor=login_floor,
             )
             if not validation.ok:
+                existing = _existing_progression_quests(cur, guid)
+                audit_snapshot = _write_audit_snapshot_best_effort(
+                    snapshots_dir=snapshots_dir,
+                    row=row,
+                    target_expansion=target_expansion,
+                    target_state=target_state,
+                    existing_quests=existing,
+                )
                 conn.rollback()
+                if audit_snapshot is not None:
+                    _complete_audit_snapshot(
+                        audit_snapshot,
+                        outcome="validation_rejected",
+                        effective_state=row.progression,
+                        reason=validation.reason,
+                    )
                 return ApplyProgressionResult("rejected", target_state, row.progression, reason=validation.reason, message=validation.message)
             if validation.noop:
                 conn.rollback()
                 return ApplyProgressionResult("noop", target_state, row.progression, message=validation.message)
 
             existing = _existing_progression_quests(cur, guid)
-            _write_audit_snapshot(
+            audit_snapshot = _write_audit_snapshot_best_effort(
                 snapshots_dir=snapshots_dir,
                 row=row,
                 target_expansion=target_expansion,
@@ -327,15 +440,25 @@ def apply_progression(
             effective = _verify_effective_state(cur, guid)
             if effective < target_state:
                 conn.rollback()
+                if audit_snapshot is not None:
+                    _complete_audit_snapshot(
+                        audit_snapshot,
+                        outcome="verification_failed_rolled_back",
+                        effective_state=effective,
+                    )
                 return ApplyProgressionResult("error", target_state, effective, reason="verify_failed", message="Progression verification did not reach target; no changes were committed.")
 
             conn.commit()
+            if audit_snapshot is not None:
+                _complete_audit_snapshot(audit_snapshot, outcome="applied", effective_state=effective)
             return ApplyProgressionResult("applied", target_state, effective, message="Progression updated.")
-    except Exception:
+    except Exception as exc:
         try:
             conn.rollback()
         except Exception:
             pass
+        if audit_snapshot is not None:
+            _complete_audit_snapshot(audit_snapshot, outcome="exception", exception=exc)
         raise
     finally:
         try:

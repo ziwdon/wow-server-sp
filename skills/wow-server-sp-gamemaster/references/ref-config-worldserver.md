@@ -46,11 +46,14 @@ docker exec ac-worldserver env | grep AC_AI_PLAYERBOT
 
 ## Where to Edit Config
 
-**For permanent changes:** Edit `docker-compose.override.yml` and restart the worldserver:
+**For permanent changes:** Edit `docker-compose.override.yml`, then recreate only the worldserver so it receives the new environment:
 ```bash
 cd /opt/stacks/azerothcore
-docker compose restart ac-worldserver
+docker compose up -d --force-recreate ac-worldserver
+docker logs --tail 50 ac-worldserver
 ```
+
+Confirm the logs include `WORLD: World Initialized`.
 
 **For admin-UI changes:** Use the Settings page in the admin web app. It writes to `docker-compose.admin.yml`.
 

@@ -33,8 +33,9 @@ else
     STAMP="$(date +%FT%H-%M-%S)"
 fi
 ARCHIVE="${BACKUP_DIR}/azerothcore-backup-${LABEL}-${STAMP}.tar.gz"
+TMP_ARCHIVE=""
 
-DATABASES="acore_auth acore_characters acore_world acore_playerbots"
+DATABASES=(acore_auth acore_characters acore_world acore_playerbots)
 log() { echo "[$(date '+%F %T')] $*"; }
 
 # shellcheck disable=SC1091
@@ -43,44 +44,43 @@ source "${STACK_DIR}/.env"
 mkdir -p "${BACKUP_DIR}"
 chmod 700 "${BACKUP_DIR}"
 
+# Host cron and the admin container share this mount.  One writer at a time
+# prevents daily-name collisions and makes the archive publication below safe.
+LOCK_FILE="${BACKUP_DIR}/.backup.lock"
+exec 9>"${LOCK_FILE}"
+if ! flock -n 9; then
+    log "ERROR: another backup is already running; retry after it completes." >&2
+    exit 75
+fi
+
 if ! docker inspect "${DB_CONTAINER}" >/dev/null 2>&1; then
     log "ERROR: ${DB_CONTAINER} container does not exist."
     exit 1
 fi
 
 STAGE="$(mktemp -d)"
-trap 'rm -rf "${STAGE}"' EXIT
+trap 'rm -rf "${STAGE}"; [ -n "${TMP_ARCHIVE}" ] && rm -f "${TMP_ARCHIVE}"' EXIT
 mkdir -p "${STAGE}/sql" "${STAGE}/config"
 
 log "Starting backup (label=${LABEL})..."
 
-dumped=""
-skipped=""
-for DB in ${DATABASES}; do
-    if docker exec "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
-            -e "USE ${DB};" >/dev/null 2>&1; then
-        docker exec "${DB_CONTAINER}" mysqldump -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
-            --single-transaction --routines --triggers --events "${DB}" \
-            > "${STAGE}/sql/${DB}.sql"
-        dumped="${dumped} ${DB}"
-        log "Dumped ${DB}"
-    else
-        skipped="${skipped} ${DB}"
-        log "WARNING: ${DB} not present; skipping."
+for DB in "${DATABASES[@]}"; do
+    if ! docker exec "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
+        -e "USE ${DB};" >/dev/null 2>&1; then
+        log "ERROR: ${DB} is missing; no backup was published." >&2
+        exit 1
     fi
 done
 
-# Missing databases must never masquerade as a healthy backup or trigger
-# retention pruning. Preserve useful partial dumps under an explicit label.
-if [ -n "${skipped}" ]; then
-    if [ -n "${dumped}" ]; then
-        ARCHIVE="${BACKUP_DIR}/azerothcore-backup-${LABEL}-partial-${STAMP}.tar.gz"
-        log "ERROR: Partial backup; skipped:${skipped}. Writing ${ARCHIVE}." >&2
-    else
-        log "ERROR: No databases were dumped; skipped:${skipped}. No archive written." >&2
-        exit 1
-    fi
-fi
+# One mysqldump invocation creates one InnoDB transaction snapshot spanning
+# all four schemas. Separate --single-transaction invocations can otherwise
+# capture cross-database rows at different moments.
+docker exec "${DB_CONTAINER}" mysqldump -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
+    --single-transaction --routines --triggers --events --databases "${DATABASES[@]}" \
+    > "${STAGE}/sql/azerothcore.sql"
+log "Dumped all four databases from one consistent transaction snapshot"
+
+TMP_ARCHIVE="${BACKUP_DIR}/.${ARCHIVE##*/}.tmp.$$"
 
 # Stage config files (we only READ from STACK_DIR — safe on the admin's ro mount).
 for item in .env docker-compose.override.yml docker-compose.admin.yml; do
@@ -108,7 +108,7 @@ ac_image="${DOCKER_IMAGE_TAG:-unknown}"
 
 json_array() {
     local out="" first=1 x
-    for x in $1; do
+    for x in "$@"; do
         if [ "$first" = 1 ]; then out="\"${x}\""; first=0; else out="${out}, \"${x}\""; fi
     done
     echo "[${out}]"
@@ -116,11 +116,12 @@ json_array() {
 
 cat > "${STAGE}/manifest.json" <<MANIFEST
 {
-  "format_version": 1,
+  "format_version": 2,
   "created_at": "$(date -u +%FT%TZ)",
   "label": "${LABEL}",
-  "databases": $(json_array "${dumped}"),
-  "skipped_databases": $(json_array "${skipped}"),
+  "databases": $(json_array "${DATABASES[@]}"),
+  "skipped_databases": [],
+  "dump_layout": "single-multi-database",
   "git_revisions": {
     "core": "${core_rev}",
     "mod-playerbots": "${pb_rev}",
@@ -132,14 +133,16 @@ cat > "${STAGE}/manifest.json" <<MANIFEST
 }
 MANIFEST
 
-tar -czf "${ARCHIVE}" -C "${STAGE}" manifest.json sql config
-chmod 600 "${ARCHIVE}"
-log "Wrote ${ARCHIVE}"
-
-if [ -n "${skipped}" ]; then
-    log "ERROR: Backup is partial; retention pruning skipped." >&2
+tar -czf "${TMP_ARCHIVE}" -C "${STAGE}" manifest.json sql config
+if ! tar -tzf "${TMP_ARCHIVE}" >/dev/null 2>&1 \
+    || ! tar -xOzf "${TMP_ARCHIVE}" manifest.json 2>/dev/null | grep -Eq '"format_version"[[:space:]]*:[[:space:]]*2([[:space:]]*[,}])'; then
+    log "ERROR: generated archive failed validation; existing backups were left untouched." >&2
     exit 1
 fi
+chmod 600 "${TMP_ARCHIVE}"
+mv -f "${TMP_ARCHIVE}" "${ARCHIVE}"
+TMP_ARCHIVE=""
+log "Wrote ${ARCHIVE}"
 
 # Prune ONLY in daily mode (the cron's nightly run). Deletes EVERY label older
 # than RETENTION_DAYS, plus any legacy multi-file backups from before cutover.

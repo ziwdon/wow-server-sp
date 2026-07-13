@@ -17,6 +17,10 @@
   --yellow-bg:   #2a2410;
   --log-bg:      #15130a;
   --input-bg:    #12100a;
+  /* Compatibility names used by the Progression UI and action toast. */
+  --line:        var(--border);
+  --muted:       var(--text-muted);
+  --bg-panel:    var(--panel-bg);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -403,6 +407,24 @@ pre.logview {
 .key-row:hover { background: #211e12; }
 .key-row.selected { background: #2a2412; border-left: 2px solid var(--gold); }
 .key-row.read-only .key-input { background: var(--sidebar-bg); color: var(--text-dim); cursor: not-allowed; }
+.key-row-select {
+  grid-column: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.key-row-select:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.key-row.show-meta .key-row-select {
+  grid-column: 1 / span 3;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 80px 100px;
+  gap: 0.5rem;
+  align-items: center;
+}
 .key-name {
   font-family: 'Consolas', 'Menlo', monospace;
   font-size: 0.83rem;
@@ -641,6 +663,10 @@ pre.logview {
   .key-row.show-meta { grid-template-columns: minmax(0, 5fr) minmax(0, 2fr); }
   .key-row.show-meta .key-source,
   .key-row.show-meta .key-flags { display: none; }
+  .key-row.show-meta .key-row-select {
+    grid-column: 1;
+    grid-template-columns: minmax(0, 1fr);
+  }
 
   /* Detail panel: full-screen slide-in overlay */
   .settings-detail {
@@ -704,13 +730,20 @@ pre.logview {
 }
 .backup-row:hover { background: var(--row-hover, rgba(255,255,255,0.04)); }
 .backup-row.selected { background: var(--row-selected, rgba(212,175,55,0.18)); }
+.backup-row[aria-disabled="true"] { cursor: not-allowed; opacity: 0.8; }
+.backup-row[aria-disabled="true"]:hover { background: transparent; }
 .backup-time { flex: 1; font-variant-numeric: tabular-nums; }
 .backup-size { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.backup-health-detail { color: var(--red); font-size: 0.8rem; }
+.backup-download { color: var(--gold-bright); font-size: 0.85rem; }
 .backup-badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 4px; }
 .badge-daily { background: #2d4a63; }
 .badge-manual { background: #3a5a3a; }
 .badge-prerestore { background: #63482d; }
 .badge-preclear { background: #6a2d2d; }
+.badge-health-complete { background: #3a5a3a; }
+.badge-health-partial { background: #63482d; }
+.badge-health-corrupt { background: #6a2d2d; }
 .backups-disclaimer {
   font-size: 0.8rem; color: var(--text-muted);
   padding: 0.75rem; border-top: 1px solid var(--border, #2a2a2a);
@@ -1042,12 +1075,20 @@ pre.logview {
   align-items: center;
   gap: 0.4rem;
   cursor: pointer;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   padding: 0.5rem;
   border-radius: 8px;
   border: 2px solid transparent;
   transition: border-color 0.2s, opacity 0.2s, filter 0.2s, box-shadow 0.2s;
   user-select: none;
 }
+.exp-tile:focus-visible {
+  outline: 3px solid var(--gold-bright);
+  outline-offset: 3px;
+}
+.exp-tile:disabled { cursor: not-allowed; }
 
 .exp-tile img {
   width: 90px;
@@ -1073,7 +1114,6 @@ pre.logview {
   opacity: 0.8;
   border-color: var(--line);
   filter: brightness(0.85);
-  pointer-events: none;
 }
 .exp-tile.state-selected {
   opacity: 1;
@@ -1083,7 +1123,6 @@ pre.logview {
 .exp-tile.state-downgrade {
   opacity: 0.35;
   filter: grayscale(1) brightness(0.5);
-  pointer-events: none;
 }
 
 @media (max-width: 768px) {

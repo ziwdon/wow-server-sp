@@ -43,10 +43,21 @@ document.addEventListener('htmx:afterSwap', function (e) {
 
 document.getElementById('refresh-stats-btn').addEventListener('click', async function () {
   const spin = document.getElementById('stats-spinner');
+  const button = this;
+  button.disabled = true;
   if (spin) spin.style.display = '';
-  await fetch('/api/stats/refresh', { method: 'POST' });
-  refreshData();
-  pollWhileRefreshing();
+  try {
+    const result = await window.requestActionJson('/api/stats/refresh', { method: 'POST' });
+    if (!result.ok) {
+      window.showActionFailure('Stats refresh failed', result);
+      if (spin) spin.style.display = 'none';
+      return;
+    }
+    refreshData();
+    pollWhileRefreshing();
+  } finally {
+    button.disabled = false;
+  }
 });
 
 // On SSE done, refresh the stats data so counts reflect post-action state.

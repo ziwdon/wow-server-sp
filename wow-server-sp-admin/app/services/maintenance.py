@@ -37,16 +37,35 @@ class MaintenanceConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "MaintenanceConfig":
+        if not isinstance(raw, dict):
+            raise ValueError("maintenance state must be an object")
+
+        def bool_value(name: str, default: bool) -> bool:
+            value = raw.get(name, default)
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} must be a boolean")
+            return value
+
+        def hour_value(name: str, default: int) -> int:
+            value = raw.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer")
+            return value
+
+        last_runs = raw.get("last_runs", {})
+        if not isinstance(last_runs, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in last_runs.items()
+        ):
+            raise ValueError("last_runs must map strings to strings")
+
         return cls(
-            restart_enabled=bool(raw.get("restart_enabled", False)),
-            restart_hour_utc=int(raw.get("restart_hour_utc", 4)),
-            window_enabled=bool(raw.get("window_enabled", False)),
-            window_stop_hour_utc=int(raw.get("window_stop_hour_utc", 3)),
-            window_start_hour_utc=int(raw.get("window_start_hour_utc", 8)),
-            last_runs={
-                str(k): str(v)
-                for k, v in dict(raw.get("last_runs", {})).items()
-            },
+            restart_enabled=bool_value("restart_enabled", False),
+            restart_hour_utc=hour_value("restart_hour_utc", 4),
+            window_enabled=bool_value("window_enabled", False),
+            window_stop_hour_utc=hour_value("window_stop_hour_utc", 3),
+            window_start_hour_utc=hour_value("window_start_hour_utc", 8),
+            last_runs=dict(last_runs),
         )
 
 
@@ -60,16 +79,30 @@ class MaintenanceStore:
     def __init__(self, data_dir: Path, *, log_limit: int = 20) -> None:
         self.data_dir = data_dir
         self.config_path = data_dir / "maintenance.json"
+        self.corrupt_path = data_dir / "maintenance.json.corrupt"
+        self.degraded_path = data_dir / "maintenance.json.degraded"
         self.log_path = data_dir / "maintenance-log.jsonl"
         self.log_limit = log_limit
+        self._diagnostic: str | None = None
 
     def load_config(self) -> MaintenanceConfig:
+        if self.degradation_diagnostic() is not None:
+            return MaintenanceConfig()
         try:
             raw = json.loads(self.config_path.read_text())
             cfg = MaintenanceConfig.from_dict(raw)
             self.validate(cfg)
             return cfg
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        except FileNotFoundError:
+            return MaintenanceConfig()
+        except (OSError, UnicodeDecodeError):
+            self._degrade_corrupt_config("could not be read")
+            return MaintenanceConfig()
+        except json.JSONDecodeError:
+            self._degrade_corrupt_config("is corrupt")
+            return MaintenanceConfig()
+        except (TypeError, ValueError):
+            self._degrade_corrupt_config("is invalid")
             return MaintenanceConfig()
 
     def save_config(self, cfg: MaintenanceConfig) -> None:
@@ -78,6 +111,87 @@ class MaintenanceStore:
         tmp = self.config_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(asdict(cfg), indent=2, sort_keys=True) + "\n")
         os.replace(tmp, self.config_path)
+        try:
+            self.degraded_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise OSError("could not clear maintenance degraded state") from e
+        self._diagnostic = None
+
+    def degradation_diagnostic(self) -> str | None:
+        if self._diagnostic is not None:
+            return self._diagnostic
+        try:
+            message = self.degraded_path.read_text().strip()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return "Maintenance state is degraded; save maintenance settings to repair it."
+        return message or "Maintenance state is degraded; save maintenance settings to repair it."
+
+    def _degrade_corrupt_config(self, condition: str) -> None:
+        preserved = False
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            os.link(self.config_path, self.corrupt_path)
+        except FileExistsError:
+            message = (
+                f"Maintenance state {condition} and maintenance.json.corrupt already exists; "
+                "maintenance.json was left in place. Save maintenance settings to repair it."
+            )
+        except OSError:
+            message = (
+                f"Maintenance state {condition} but could not be preserved; "
+                "maintenance.json was left in place. Save maintenance settings to repair it."
+            )
+        else:
+            preserved = True
+            message = (
+                f"Maintenance state {condition} and was preserved as maintenance.json.corrupt. "
+                "Save maintenance settings to repair it."
+            )
+        try:
+            if not self._persist_degradation_diagnostic(message):
+                raise OSError("could not persist maintenance degraded state")
+        except OSError:
+            self._diagnostic = (
+                f"{message} The degraded diagnostic could not be recorded; "
+                "maintenance.json was retained for the next load."
+            )
+            return
+        self._diagnostic = message
+        if not preserved:
+            return
+        try:
+            self.config_path.unlink()
+        except OSError:
+            log.warning("Could not remove corrupt maintenance state after marking it degraded")
+
+    def _persist_degradation_diagnostic(self, message: str) -> bool:
+        tmp = self.degraded_path.with_name(f"{self.degraded_path.name}.tmp")
+        try:
+            with tmp.open("w") as marker:
+                marker.write(message + "\n")
+                marker.flush()
+                os.fsync(marker.fileno())
+            os.replace(tmp, self.degraded_path)
+            self._fsync_data_dir()
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return False
+        return True
+
+    def _fsync_data_dir(self) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(self.data_dir, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def validate(self, cfg: MaintenanceConfig) -> None:
         _validate_hour("restart hour", cfg.restart_hour_utc)

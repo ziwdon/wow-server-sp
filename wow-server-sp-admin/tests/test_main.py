@@ -1,10 +1,38 @@
+import ast
 import datetime as dt
+import asyncio
+from pathlib import Path
+import threading
+import time
 
-from app.main import _format_started_at, _render_progress
+import app.main as main
+from app.main import _format_started_at, _render_done, _render_progress
+from app.services.runner import ActionRecord
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from app.main import app
 from app.services.backups import BackupStatus
+from starlette.requests import Request
+import pytest
+
+
+def test_template_responses_use_the_request_first_signature():
+    source = (Path(main.__file__).resolve()).read_text()
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "TemplateResponse"
+    ]
+
+    assert calls
+    assert all(
+        call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "request"
+        for call in calls
+    )
 
 
 def test_format_started_at_nanosecond_docker_timestamp():
@@ -35,6 +63,13 @@ def test_render_progress_uses_event_timestamp():
     result = _render_progress("wait_init", "waiting", event_time)
 
     assert "[19 Jun 05:00]" in result
+
+
+def test_render_done_is_a_list_item_for_the_shared_sse_activity_log():
+    result = _render_done(ActionRecord(id="done", name="restart", status="ok"))
+
+    assert result.startswith('<li class="action-done action-ok"')
+    assert result.endswith("</li>")
 
 
 def test_api_backups_timestamp_includes_utc():
@@ -89,6 +124,46 @@ def test_stats_page_renders_and_nav_between_dashboard_and_settings():
     assert body.index('href="/"') < body.index('href="/stats"')
 
 
+def test_stats_player_card_keeps_its_polling_wrapper_after_a_swap():
+    template = (Path(__file__).resolve().parents[1] / "app/templates/partials/stats_page.html").read_text()
+
+    assert 'hx-get="/api/players"' in template
+    assert 'hx-trigger="load, every 10s"' in template
+    assert 'hx-swap="innerHTML"' in template
+
+
+@pytest.mark.asyncio
+async def test_blocked_online_count_keeps_liveness_and_sse_responsive_then_renders_unavailable():
+    closed = threading.Event()
+
+    def blocked_count(**_):
+        try:
+            time.sleep(0.2)
+            raise TimeoutError("query timed out")
+        finally:
+            closed.set()
+
+    request = Request({"type": "http", "method": "GET", "path": "/api/players", "headers": []})
+    with patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
+         patch("app.main.db_stats.count_online", side_effect=blocked_count), \
+         patch("app.main.runner.current", return_value=None), \
+         patch("app.main.runner.last", return_value=None):
+        started = time.monotonic()
+        players_task = asyncio.create_task(main.api_players(request))
+        await asyncio.sleep(0)
+        health = await main.healthz()
+        stream = await main.stream_action()
+        heartbeat = await anext(stream.body_iterator)
+        responsive_after = time.monotonic()
+        players_response = await players_task
+
+    assert responsive_after - started < 0.1
+    assert health == {"status": "ok"}
+    assert heartbeat["event"] == "heartbeat"
+    assert "DB unreachable" in players_response.body.decode()
+    assert closed.is_set()
+
+
 def test_progression_page_renders_and_nav_between_stats_and_settings():
     client = TestClient(app)
     resp = client.get("/progression")
@@ -113,6 +188,22 @@ def test_api_progression_apply_uses_service():
     assert resp.json()["status"] == "applied"
     assert mock_apply.call_args.kwargs["guid"] == 101
     assert mock_apply.call_args.kwargs["target_expansion"] == "tbc"
+
+
+def test_api_progression_apply_rejects_while_an_action_is_running():
+    from app.services.progression import ApplyProgressionResult, ProgressionConfig
+
+    with patch("app.main.runner.try_acquire_mutation", return_value=False) as acquire, \
+         patch("app.main.progression_svc.config_from_resolved_keys", return_value=ProgressionConfig()), \
+         patch("app.main.list_keys_resolved", return_value=[]), \
+         patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
+         patch("app.main.progression_svc.apply_progression", return_value=ApplyProgressionResult("applied", 8, 8)) as apply:
+        client = TestClient(app)
+        resp = client.post("/api/progression/apply", json={"guid": 101, "target_expansion": "tbc"})
+
+    assert resp.status_code == 409
+    acquire.assert_called_once_with()
+    apply.assert_not_called()
 
 
 def test_api_stats_refresh_returns_immediately():
@@ -147,6 +238,33 @@ def test_api_stats_data_renders_with_snapshot():
     assert "Rndslayer" in resp.text
     assert resp.text.index("Top PvE") < resp.text.index("Online now")
     assert resp.text.index("Top PvP") < resp.text.index("Bot pool")
+
+
+def test_api_stats_data_hides_stale_error_during_retry():
+    with patch("app.main.stats_refresher.get", return_value=None), \
+         patch("app.main.stats_refresher.is_stale", return_value=False), \
+         patch.object(main.stats_refresher, "status", "refreshing"), \
+         patch.object(main.stats_refresher, "error", "first failure"):
+        client = TestClient(app)
+        resp = client.get("/api/stats/data")
+
+    assert resp.status_code == 200
+    assert 'data-status="refreshing"' in resp.text
+    assert "Last refresh failed" not in resp.text
+    assert "first failure" not in resp.text
+
+
+def test_api_stats_data_renders_latest_error_after_retry_failure():
+    with patch("app.main.stats_refresher.get", return_value=None), \
+         patch("app.main.stats_refresher.is_stale", return_value=False), \
+         patch.object(main.stats_refresher, "status", "idle"), \
+         patch.object(main.stats_refresher, "error", "latest failure"):
+        client = TestClient(app)
+        resp = client.get("/api/stats/data")
+
+    assert resp.status_code == 200
+    assert 'data-status="idle"' in resp.text
+    assert "Last refresh failed: latest failure" in resp.text
 
 
 def test_existing_resources_card_endpoint_still_works():

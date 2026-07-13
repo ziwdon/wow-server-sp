@@ -48,6 +48,8 @@ Run as your normal user — **do not use `sudo`**. The script calls `sudo` inter
 
 > **Heads up:** the install includes 3 manual pauses — Tailscale authentication, account creation via the worldserver console, and AH bot character setup. The script guides you through each one.
 
+The phase `0.0` preflight refuses to continue with less than 25 GiB free on `/opt`, and asks for confirmation from 25 GiB through less than 50 GiB. It also asks for confirmation if the selected MySQL InnoDB buffer pool is more than half of physical RAM. In noninteractive runs, either warning fails safely; use `--allow-capacity-warnings` only when you have reviewed the host capacity and intentionally accept the risk.
+
 ## Admin
 
 Install the web admin after the server is running:
@@ -72,6 +74,7 @@ Verify it's working:
 | `./scripts/install-azerothcore.sh --resume-from=<phase>` | Re-run from a specific phase |
 | `./scripts/install-azerothcore.sh --adopt` | Adopt an existing install with no state file |
 | `./scripts/install-azerothcore.sh --force-fresh` | Wipe state and start over (asks for confirmation) |
+| `./scripts/install-azerothcore.sh --allow-capacity-warnings` | Explicitly continue past capacity warnings in automation |
 | `./scripts/install-azerothcore.sh --help` | List all phases |
 | `./scripts/verify-azerothcore.sh` | Post-install health check (exits 0 = pass) |
 | `./scripts/uninstall-azerothcore.sh --dry-run` | Preview what uninstall would remove |
@@ -83,4 +86,12 @@ AzerothCore reads settings from its `.conf` files, but the installer uses `AC_*`
 
 The easiest way to change settings after install is the admin's **Settings** page: search for any config key, edit its value, and Apply — the admin writes the override and restarts the server automatically.
 
-For manual edits, add or change `AC_*` lines under `ac-worldserver.environment:` in `/opt/stacks/azerothcore/docker-compose.override.yml`, then restart the worldserver. See `CLAUDE.md` for the full reference, the key-to-env-var conversion rule, and the MySQL tuning options.
+For manual edits, add or change `AC_*` lines under `ac-worldserver.environment:` in `/opt/stacks/azerothcore/docker-compose.override.yml`, then recreate only the worldserver so it receives the new environment:
+
+```bash
+cd /opt/stacks/azerothcore
+docker compose up -d --force-recreate ac-worldserver
+docker logs --tail 50 ac-worldserver
+```
+
+Confirm the logs include `WORLD: World Initialized`. See `CLAUDE.md` for the full reference, the key-to-env-var conversion rule, and the MySQL tuning options.

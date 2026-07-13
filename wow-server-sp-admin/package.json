@@ -1,0 +1,12 @@
+{
+  "name": "wow-server-sp-admin-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "axe-core": "4.10.3",
+    "htmx.org": "2.0.3"
+  }
+}

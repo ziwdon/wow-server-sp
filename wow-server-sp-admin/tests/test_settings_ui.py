@@ -73,5 +73,22 @@ def test_settings_js_redirects_to_dashboard_on_success():
     script = _read("app/static/settings.js")
     assert "window.location.href = '/'" in script
     assert "hardError" in script
-    assert "resolve(true)" in script
-    assert "resolve(false)" in script
+    assert "resolve(status !== 'ok')" in script
+
+
+def test_settings_js_redirects_only_for_explicit_ok_action_status():
+    script = _read("app/static/settings.js")
+
+    assert "function actionStatusFromDone" in script
+    assert "return match?.[1] || 'unknown'" in script
+    assert "if (status !== 'ok')" in script
+    assert "es.addEventListener('idle'" in script
+    assert "es.addEventListener('error'" in script
+
+
+def test_settings_rows_use_native_detail_buttons_separate_from_text_inputs():
+    script = _read("app/static/settings.js")
+
+    assert 'class="key-row-select"' in script
+    assert "row.querySelector('.key-row-select').addEventListener('click'" in script
+    assert "row.setAttribute('role', 'button');" not in script

@@ -14,6 +14,8 @@ _BOOL_KEY_RE = re.compile(
     r"(^|[._])(enable|enabled|disable|disabled|logininfo)([._]|$)",
     re.IGNORECASE,
 )
+_INT_VALUE_RE = re.compile(r"[+-]?\d+\Z")
+_FLOAT_VALUE_RE = re.compile(r"[+-]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[eE][+-]?\d+)?\Z")
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,19 @@ class KeyEntry:
     source_file: str
     line_number: int
     env_var: str
+
+
+def validate_value(entry: KeyEntry, value: str) -> str | None:
+    """Return a user-facing error for a non-empty invalid typed setting."""
+    if value == "" or entry.inferred_type == "string":
+        return None
+    if entry.inferred_type == "bool":
+        return None if value in {"true", "false", "0", "1"} else "must be true, false, 0, or 1"
+    if entry.inferred_type == "int":
+        return None if _INT_VALUE_RE.fullmatch(value) else "must be a signed decimal integer"
+    if entry.inferred_type == "float":
+        return None if _FLOAT_VALUE_RE.fullmatch(value) else "must be a finite decimal number"
+    return None
 
 
 def _infer_type(key: str, default: str, comment: str = "") -> str:

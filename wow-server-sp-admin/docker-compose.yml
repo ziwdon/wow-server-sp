@@ -4,7 +4,9 @@
 services:
   azerothcore-admin:
     container_name: azerothcore-admin
-    image: azerothcore-admin:local
+    # Redeploy builds a uniquely tagged candidate before replacing the live
+    # container. Normal installs keep the stable local tag.
+    image: "${ADMIN_IMAGE:-azerothcore-admin:local}"
     build:
       context: .
       args:

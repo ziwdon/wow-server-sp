@@ -7,9 +7,46 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 Two sibling sub-projects on Docker:
 
 - **`scripts/`** — single-file bash installer for AzerothCore (WoW 3.3.5a) + mod-playerbots + mod-ah-bot-plus + mod-individual-progression. AC stack installs under `/opt/stacks/azerothcore/`.
-- **`wow-server-sp-admin/`** — FastAPI + HTMX web admin for monitoring/editing the running AC server. Installs to `/opt/stacks/azerothcore-admin/` (separate stack dir so its lifecycle never disturbs AC's). Every config edit becomes an `AC_*` env var in `docker-compose.admin.yml`, the LAST-precedence Compose layer. Authoritative design spec: `docs/superpowers/specs/2026-05-20-wow-server-sp-admin-design.md` — read before touching admin code.
+- **`wow-server-sp-admin/`** — FastAPI + HTMX web admin for monitoring/editing the running AC server. Installs to `/opt/stacks/azerothcore-admin/` (separate stack dir so its lifecycle never disturbs AC's). Every config edit becomes an `AC_*` env var in `docker-compose.admin.yml`, the LAST-precedence Compose layer. Use the current implementation and its tests as the authoritative behavior.
 
 **Target environment:** Ubuntu 22.04 LTS (recommended; 24.04 allowed only after explicit user confirmation — "possible, maybe", not supported). Ryzen 5 7430U, 16 GB RAM, 512 GB SSD. Tailscale required for all WoW clients (no public IP / port forwarding / direct-LAN path). Use case: ~2 humans + a few hundred playerbots.
+
+## Mandatory live-stack test safety
+
+The following rules were added after the 2026-07-13 incident in which a direct
+Compose-style teardown removed the live AzerothCore containers and default
+network. The persistent database data survived, but the service was unavailable.
+Docker logs did not preserve the initiating process, so do not claim a specific
+actor without evidence. A test isolation path was found that could call host
+Docker; this guard prevents that class of failure.
+
+`/opt/stacks/azerothcore`, `/opt/stacks/azerothcore-admin`, the local Docker
+daemon/socket, `azerothcore.service`, and all `ac-*` / `azerothcore-*`
+containers, networks, and volumes are live production state. Only perform a
+live lifecycle operation when the user has explicitly requested it.
+
+When testing an installer, uninstaller, backup/restore path, or any script that
+can remove, stop, restart, or reconfigure services:
+
+- Never let the test reach the host Docker daemon or `/opt/stacks`. It must not
+  invoke real `docker compose down`, `docker rm`, `docker network rm`, `docker
+  volume rm`, `sudo`, `systemctl`, destructive `rm`, or `crontab` operations;
+  `--yes` does not make a host-side test acceptable.
+- Copy the script into a temporary sandbox and isolate or rewrite every
+  hard-coded live path. Passing environment overrides alone is insufficient:
+  inspect the script to prove it uses them.
+- Use a stub-only `PATH` for `docker`, `sudo`, `systemctl`, `rm`, and `crontab`,
+  or a sandboxed VM/container with no `/var/run/docker.sock`, no privileged
+  access, and no host `/opt` mount. A destructive test must fail closed if any
+  of those protections is absent.
+- Before execution, explicitly confirm the target canonicalizes outside
+  `/opt/stacks`, each dangerous command resolves to its test stub, and no host
+  Docker socket/daemon is accessible. Exercise `--dry-run` first whenever it
+  exists.
+- After every lifecycle-related test or attempted command, run a non-mutating
+  live health check. If an expected AC or admin container is down, stop all
+  testing and report it. Do not restart, restore, redeploy, or otherwise change
+  the live service without explicit user direction.
 
 ## Linting
 
@@ -24,7 +61,7 @@ docker run --rm -v "$(pwd)/wow-server-sp-admin:/src" -w /src python:3.12-slim \
     bash -c "pip install -r requirements-dev.txt -q && python -m pytest -q"
 ```
 
-`# shellcheck disable=SC1091` is used only for dynamic `source` calls. These warnings are intentional — do not "fix" them:
+`# shellcheck disable=SC1091` is used only for dynamic `source` calls. The other intentional cases use narrow local suppressions so the documented ShellCheck command remains a green gate:
 
 - **SC2016 on `escape_regex_metachars`** (~`install-azerothcore.sh:775`): `sed 's/[.[\*^$()+?{}|]/\\&/g'` MUST use single quotes — `\&` is sed's back-reference; double quotes would let the shell eat the backslash and break escaping.
 - **SC2001 multi-line prefixing via `sed 's/^/    - /'`:** bash parameter expansion can't cleanly prefix each line of a multi-line string.
@@ -234,7 +271,6 @@ Invariants of `wow-server-sp-admin/` to know before touching admin code — or b
 | `docs/wikis/mod-individual-progression-wiki/` | Progression: install, tiers, changes, extras |
 | `docs/superpowers/plans/` | In-progress implementation plans |
 | `docs/superpowers/specs/` | In-progress design specs |
-| `…/specs/2026-05-20-wow-server-sp-admin-design.md` | **Authoritative admin spec** — read before changing the action runner, apply/rollback, post-apply verification, snapshot/write semantics, or mount layout |
 | `…/specs/2026-05-22-admin-ui-overhaul-design.md` | UI/UX overhaul (Classic palette, nav, stat cards, settings layout) — read before touching `app/templates/`, `app/static/app.css`, `app/static/settings.js` |
 | `…/specs/2026-05-24-settings-description-and-mobile-design.md` | Settings description parsing + mobile layout — read before touching `config_index.py` parsing or mobile CSS/JS |
 

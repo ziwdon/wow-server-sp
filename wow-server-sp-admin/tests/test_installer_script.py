@@ -60,7 +60,94 @@ def _systemd_prompt_script(tmp_path: Path) -> Path:
     return script
 
 
+def _installer_stubs(tmp_path: Path) -> Path:
+    """Provide the external commands needed before the script's early exit."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    _write_stub(stubs / "tailscale", "#!/bin/sh\nprintf '100.64.0.1\\n'\n")
+    _write_stub(stubs / "ss", "#!/bin/sh\nexit 1\n")
+    _write_stub(
+        stubs / "sudo",
+        "#!/bin/sh\n"
+        "if [ \"${FAIL_ENV_REWRITE:-0}\" = 1 ] && [ \"${1:-}\" = mv ]; then\n"
+        "    exit 42\n"
+        "fi\n"
+        "exec \"$@\"\n",
+    )
+    return stubs
+
+
+def _run_through_admin_yml(
+    script: Path, stubs: Path, *, fail_env_rewrite: bool = False
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PATH"] = f"{stubs}:{env['PATH']}"
+    if fail_env_rewrite:
+        env["FAIL_ENV_REWRITE"] = "1"
+    return subprocess.run(
+        [str(script)], text=True, capture_output=True, env=env, check=False
+    )
+
+
 class InstallerScriptTest(unittest.TestCase):
+    def test_compose_file_append_preserves_env_metadata_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            script, ac_stack = _installer_copy_through_admin_yml(tmp_path)
+            ac_stack.mkdir()
+            env_file = ac_stack / ".env"
+            env_file.write_text(
+                "MYSQL_PASSWORD=secret\n"
+                "COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml\n"
+                "UNRELATED=value\n"
+            )
+            env_file.chmod(0o600)
+            if os.geteuid() == 0:
+                os.chown(env_file, 1234, 2345)
+            before = env_file.stat()
+
+            stubs = _installer_stubs(tmp_path)
+            first = _run_through_admin_yml(script, stubs)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(
+                env_file.read_text(),
+                "MYSQL_PASSWORD=secret\n"
+                "COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.admin.yml\n"
+                "UNRELATED=value\n",
+            )
+            after = env_file.stat()
+            self.assertEqual(after.st_uid, before.st_uid)
+            self.assertEqual(after.st_gid, before.st_gid)
+            self.assertEqual(stat.S_IMODE(after.st_mode), stat.S_IMODE(before.st_mode))
+
+            second = _run_through_admin_yml(script, stubs)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(env_file.read_text().count("docker-compose.admin.yml"), 1)
+
+    def test_failed_compose_file_rewrite_leaves_env_intact_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            script, ac_stack = _installer_copy_through_admin_yml(tmp_path)
+            ac_stack.mkdir()
+            env_file = ac_stack / ".env"
+            original = "COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml\n"
+            env_file.write_text(original)
+            env_file.chmod(0o600)
+            before = env_file.stat()
+
+            result = _run_through_admin_yml(
+                script, _installer_stubs(tmp_path), fail_env_rewrite=True
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(env_file.read_text(), original)
+            after = env_file.stat()
+            self.assertEqual(after.st_uid, before.st_uid)
+            self.assertEqual(after.st_gid, before.st_gid)
+            self.assertEqual(stat.S_IMODE(after.st_mode), stat.S_IMODE(before.st_mode))
+            self.assertEqual(list(ac_stack.glob(".env.tmp*")), [])
+
     def test_installer_refuses_admin_yml_directory_without_removing_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

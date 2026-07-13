@@ -38,13 +38,13 @@
 {% endmacro %}
 
 <div id="stats-data-inner" data-status="{{ status }}">
-  {% if error %}<div class="banner error">Last refresh failed: {{ error }}</div>{% endif %}
+  {% if error and status != "refreshing" %}<div class="banner error">Last refresh failed: {{ error }}</div>{% endif %}
 
   {% if snap %}
   <div class="stat-row stats-headline">
     <div class="stat-card"><div class="stat-label">Bots</div>
       <div class="stat-value">{{ snap.bots_total }} total</div></div>
-    <div hx-get="/api/players" hx-trigger="load, every 10s" hx-swap="outerHTML">
+    <div hx-get="/api/players" hx-trigger="load, every 10s" hx-swap="innerHTML">
       <div class="stat-card"><div class="stat-label">Players</div>
         <div class="stat-value" style="color:var(--text-muted)">Loading…</div></div></div>
     <div class="stat-card"><div class="stat-label">AH bot</div>

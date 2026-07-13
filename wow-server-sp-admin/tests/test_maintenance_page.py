@@ -64,6 +64,47 @@ def test_maintenance_api_returns_config_and_log(tmp_path, monkeypatch):
     assert data["log"] == []
 
 
+def test_maintenance_page_and_api_warn_about_corrupt_saved_state(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    data_dir = tmp_path / "admin-data"
+    data_dir.mkdir()
+    (data_dir / "maintenance.json").write_text("{not json")
+
+    page = client.get("/maintenance")
+    api = client.get("/api/maintenance")
+
+    assert page.status_code == 200
+    assert "Maintenance state is corrupt" in page.text
+    assert api.json()["diagnostic"] == (
+        "Maintenance state is corrupt and was preserved as maintenance.json.corrupt. "
+        "Save maintenance settings to repair it."
+    )
+
+
+def test_maintenance_post_repairs_corrupt_saved_state(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    data_dir = tmp_path / "admin-data"
+    data_dir.mkdir()
+    (data_dir / "maintenance.json").write_text("{not json")
+
+    assert client.get("/api/maintenance").json()["diagnostic"] is not None
+    resp = client.post(
+        "/api/maintenance",
+        data={
+            "restart_enabled": "on",
+            "restart_hour_utc": "5",
+            "window_stop_hour_utc": "3",
+            "window_start_hour_utc": "8",
+        },
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    repaired = client.get("/api/maintenance").json()
+    assert repaired["diagnostic"] is None
+    assert repaired["config"]["restart_enabled"] is True
+
+
 def test_maintenance_post_persists_config(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
 

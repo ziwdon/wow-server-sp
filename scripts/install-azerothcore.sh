@@ -26,6 +26,87 @@ STACK_DIR="/opt/stacks/azerothcore"
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_FILE="${HOME}/.azerothcore-install-state"
 CONFIG_FILE="${HOME}/.azerothcore-install-config"
+INSTALL_LOCK_FILE="${HOME}/.azerothcore-install.lock"
+INSTALL_LOCK_HOLDER_PID=""
+INSTALL_LOCK_HANDOFF_MARKER="azerothcore-installer-lock-handoff"
+
+# The lock-holder is the only process with the advisory-lock descriptor.
+# `flock --close` closes it before starting this script, so neither the
+# installer nor any descendant can accidentally prolong the lock lifetime.
+stop_installer_lock_holder() {
+    local status="${1:-143}"
+
+    if [ -n "$INSTALL_LOCK_HOLDER_PID" ]; then
+        kill -- "-$INSTALL_LOCK_HOLDER_PID" 2>/dev/null || true
+        wait "$INSTALL_LOCK_HOLDER_PID" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+
+acquire_installer_lock() {
+    local handoff_file="" handoff_fd="" owner="" status
+
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: Cannot enforce a single installer run because 'flock' is unavailable." >&2
+        exit 1
+    fi
+    if ! command -v setsid >/dev/null 2>&1; then
+        echo "ERROR: Cannot enforce a single installer run because 'setsid' is unavailable." >&2
+        exit 1
+    fi
+
+    umask 077
+    if [[ "${INSTALLER_LOCK_HANDOFF_FD:-}" =~ ^[0-9]+$ ]] \
+        && IFS= read -r -u "$INSTALLER_LOCK_HANDOFF_FD" handoff_marker \
+        && [ "$handoff_marker" = "$INSTALL_LOCK_HANDOFF_MARKER" ]; then
+        : > "$INSTALL_LOCK_FILE"
+        printf 'pid=%s\nstarted=%s\ncontext=%q\n' \
+            "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$0 $*" > "$INSTALL_LOCK_FILE"
+        return
+    fi
+
+    # Use a distinct conflict code so an installer failure remains transparent
+    # while this parent can still report the recorded lock owner.
+    handoff_file="$(mktemp "${TMPDIR:-/tmp}/azerothcore-install-lock.XXXXXX")"
+    printf '%s\n' "$INSTALL_LOCK_HANDOFF_MARKER" > "$handoff_file"
+    exec {handoff_fd}<"$handoff_file"
+    rm -f "$handoff_file"
+    setsid flock -n -E 75 --close "$INSTALL_LOCK_FILE" \
+        env INSTALLER_LOCK_HANDOFF_FD="$handoff_fd" "$0" "$@" <&0 &
+    INSTALL_LOCK_HOLDER_PID=$!
+    exec {handoff_fd}<&-
+    trap 'stop_installer_lock_holder 129' HUP
+    trap 'stop_installer_lock_holder 130' INT
+    trap 'stop_installer_lock_holder 143' TERM
+    if wait "$INSTALL_LOCK_HOLDER_PID"; then
+        status=0
+    else
+        status=$?
+    fi
+    trap - HUP INT TERM
+    INSTALL_LOCK_HOLDER_PID=""
+
+    if [ "$status" -eq 75 ]; then
+        if [ -s "$INSTALL_LOCK_FILE" ]; then
+            owner="$(tr '\n' ' ' < "$INSTALL_LOCK_FILE" 2>/dev/null || true)"
+        fi
+        echo "ERROR: Another AzerothCore installer is already running for this user." >&2
+        if [ -n "$owner" ]; then
+            echo "Lock owner: $owner" >&2
+        else
+            echo "Lock owner: unavailable (the active installer has not recorded its context yet)." >&2
+        fi
+        echo "Wait for that installer to finish, then re-run this command." >&2
+        exit 1
+    fi
+
+    exit "$status"
+}
+
+# Lock before creating the installer log or touching preflight, state, or
+# configuration data. Do not delete the lock file on exit: retaining the path
+# avoids a remove/recreate race between invocations.
+acquire_installer_lock "$@"
 
 UNIX_TS="$(date +%s)"
 LOG_FILE="/tmp/azerothcore-install-${UNIX_TS}.log"
@@ -385,6 +466,7 @@ verify_playerbots_schema_now() {
 
     if [ -n "$missing" ]; then
         echo "  ✗ acore_playerbots is missing required table(s):"
+        # shellcheck disable=SC2001 # Prefixes each line of a multi-line diagnostic.
         echo "$missing" | sed 's/^/    - /'
         return 1
     fi
@@ -773,6 +855,7 @@ verify_mysql_tuning_active() {
 # set_conf_key remains for values like AuctionHouseBot.GUIDs discovered later.
 # ==========================================================================
 escape_regex_metachars() {
+    # shellcheck disable=SC2016 # sed's \& back-reference must remain single-quoted.
     printf '%s' "$1" | sed 's/[.[\*^$()+?{}|]/\\&/g'
 }
 
@@ -1174,6 +1257,7 @@ set_config_value() {
 RESUME_FROM=""
 FORCE_FRESH=false
 ADOPT=false
+ALLOW_CAPACITY_WARNINGS=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -1187,6 +1271,9 @@ for arg in "$@"; do
         --adopt)
             ADOPT=true
             ;;
+        --allow-capacity-warnings)
+            ALLOW_CAPACITY_WARNINGS=true
+            ;;
         -h|--help)
             cat <<'HELP'
 Usage: ./install-azerothcore.sh [OPTIONS]
@@ -1196,6 +1283,8 @@ Usage: ./install-azerothcore.sh [OPTIONS]
   --force-fresh             Wipe state + stack dir + config, start over
   --adopt                   Adopt an existing install (run phase 0-4 VERIFY
                             blocks against disk before marking complete)
+  --allow-capacity-warnings Continue past low-space or high-MySQL-memory
+                            warnings without an interactive confirmation
   -h, --help                Show this help
 
 With no flags: auto-resume from last completed phase if state file exists;
@@ -1700,7 +1789,11 @@ if [ "$FORCE_FRESH" = true ]; then
     if [ -d "$STACK_DIR" ]; then
         # Try to stop containers gracefully first
         if [ -f "${STACK_DIR}/docker-compose.yml" ] || [ -f "${STACK_DIR}/docker-compose.override.yml" ]; then
-            (cd "$STACK_DIR" && docker compose down 2>/dev/null) || true
+            if ! (cd "$STACK_DIR" && docker compose down); then
+                echo "ERROR: Could not stop the existing stack. Preserving $STACK_DIR and install state." >&2
+                echo "Fix Docker, then re-run --force-fresh." >&2
+                clean_exit 1
+            fi
         fi
         sudo rm -rf "$STACK_DIR"
     fi
@@ -1765,7 +1858,7 @@ elif [ "$ADOPT" = false ] && [ "${RESUME_FROM:-}" = "8" ] && [ -f "${STACK_DIR}/
     GM_USERNAME="UNUSED"
     GM_PASSWORD="UnusedPass123"
     AHBOT_PASSWORD="UnusedPass123"
-    PLAYERBOT_COUNT="${AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1000}"
+    PLAYERBOT_COUNT="${AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1500}"
     SERVER_XP_RATE="x5"
     SERVER_PVP="y"
     INNODB_BUFFER_POOL_SIZE="6G"
@@ -1803,7 +1896,7 @@ else
     prompt_password "AHBOT account password (8+ chars, no spaces/quotes/\\/\$/\`)"
     AHBOT_PASSWORD="$PROMPT_RESULT"
 
-    prompt_integer_range "Random bot count (1-2000, applied to both MIN and MAX)" 1 2000 1000
+    prompt_integer_range "Random bot count (1-2000, applied to both MIN and MAX)" 1 2000 1500
     PLAYERBOT_COUNT="$PROMPT_RESULT"
 
     prompt_xp_rate
@@ -1853,6 +1946,75 @@ SERVER_PVP="${SERVER_PVP:-y}"
 # from INNODB_BUFFER_POOL_SIZE so a stale value in a saved config can't drift
 # out of sync with the size.
 INNODB_BUFFER_POOL_INSTANCES="${INNODB_BUFFER_POOL_SIZE%G}"
+
+# ============================================================================
+# Capacity preflight
+# ============================================================================
+
+GIB_IN_KIB=$((1024 * 1024))
+
+opt_free_kib() {
+    awk "NR == 2 { print \$4; exit }" < <(df -Pk /opt 2>/dev/null)
+}
+
+physical_ram_kib() {
+    awk "/^MemTotal:[[:space:]]/ { print \$2; exit }" /proc/meminfo 2>/dev/null || true
+}
+
+capacity_warning_requires_confirmation() {
+    local warning="$1"
+    local response
+
+    echo "WARNING: ${warning}"
+    if [ "$ALLOW_CAPACITY_WARNINGS" = true ]; then
+        echo "Capacity warnings explicitly overridden."
+        return 0
+    fi
+
+    if [ -t 0 ]; then
+        read -rp "Continue despite this capacity warning? [y/N]: " response || true
+        case "${response,,}" in
+            y|yes)
+                echo "Capacity warning acknowledged."
+                return 0
+                ;;
+        esac
+        echo "ERROR: Capacity warning was not acknowledged." >&2
+        clean_exit 1
+    fi
+
+    echo "ERROR: Capacity warning requires interactive confirmation. Re-run with --allow-capacity-warnings to explicitly override it." >&2
+    clean_exit 1
+}
+
+run_capacity_preflight() {
+    local free_kib ram_kib free_gib buffer_gib
+
+    free_kib="$(opt_free_kib)"
+    if ! [[ "$free_kib" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Unable to determine free space on /opt in KiB." >&2
+        clean_exit 1
+    fi
+    free_gib=$((free_kib / GIB_IN_KIB))
+
+    if [ "$free_kib" -lt $((25 * GIB_IN_KIB)) ]; then
+        echo "ERROR: /opt has less than 25 GiB free (${free_gib} GiB available); installation cannot continue." >&2
+        clean_exit 1
+    fi
+    if [ "$free_kib" -lt $((50 * GIB_IN_KIB)) ]; then
+        capacity_warning_requires_confirmation "/opt has only ${free_gib} GiB free; 50 GiB or more is recommended."
+    fi
+
+    ram_kib="$(physical_ram_kib)"
+    if ! [[ "$ram_kib" =~ ^[0-9]+$ ]] || [ "$ram_kib" -eq 0 ]; then
+        echo "ERROR: Unable to determine physical RAM from /proc/meminfo." >&2
+        clean_exit 1
+    fi
+    buffer_gib="${INNODB_BUFFER_POOL_SIZE%G}"
+    if [ $((buffer_gib * GIB_IN_KIB * 2)) -gt "$ram_kib" ]; then
+        capacity_warning_requires_confirmation "InnoDB buffer pool size ${INNODB_BUFFER_POOL_SIZE} exceeds 50% of physical RAM (${ram_kib} KiB)."
+    fi
+}
 
 # ============================================================================
 # --adopt: verify existing install and mark phases 0-4 complete
@@ -2079,6 +2241,8 @@ fi
 # ============================================================================
 if should_run_phase "0.0"; then
     banner "0.0" "Pre-flight checks"
+
+    run_capacity_preflight
 
     echo "OS version:"
     lsb_release -a 2>/dev/null || true
@@ -2412,8 +2576,11 @@ if should_run_phase "1"; then
     pwd
     git remote get-url origin
     git branch
+    # shellcheck disable=SC2012 # Informational listing of known alphanumeric module directories.
     ls modules/mod-playerbots/ | head -10
+    # shellcheck disable=SC2012 # Informational listing of known alphanumeric module directories.
     ls modules/mod-ah-bot-plus/ | head -10
+    # shellcheck disable=SC2012 # Informational listing of known alphanumeric module directories.
     ls modules/mod-individual-progression/ | head -10
     ls modules/mod-ah-bot-plus/conf/
 
@@ -3342,8 +3509,10 @@ if should_run_phase "pause-2"; then
         echo ""
         read -rp "When done, press Enter to continue..." _ignored
 
-        # SQL verification — both accounts must exist.
-        # AzerothCore stores usernames uppercase via SRP6; query with toupper.
+        # SQL verification — both accounts must exist and the intended GM must
+        # have global (RealmID=-1) level-3 access. AzerothCore stores usernames
+        # uppercase via SRP6; query with toupper. Do not revalidate passwords:
+        # account access is the only state needed to verify this manual step.
         echo ""
         echo "Verifying accounts in acore_auth.account..."
         GM_UPPER="$(echo "$GM_USERNAME" | tr '[:lower:]' '[:upper:]')"
@@ -3358,11 +3527,22 @@ if should_run_phase "pause-2"; then
 
         if [ "$FOUND_GM" -eq 1 ] && [ "$FOUND_AHBOT" -eq 1 ]; then
             echo "  ✓ Both accounts present: $GM_UPPER, AHBOT"
-            break
-        fi
 
-        echo "  ✗ Expected to find: $GM_UPPER, AHBOT"
-        echo "    Actually found:   $(echo "$FOUND" | paste -sd, -)"
+            GM_ACCESS="$(docker exec ac-database mysql -N -B \
+                -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
+                -e "SELECT gmlevel, RealmID FROM acore_auth.account_access WHERE id = (SELECT id FROM acore_auth.account WHERE username = '${GM_UPPER}') AND gmlevel = 3 AND RealmID = -1;" \
+                2>/dev/null || echo "")"
+            if echo "$GM_ACCESS" | grep -qFx $'3\t-1'; then
+                echo "  ✓ GM account has global security level 3 access"
+                break
+            fi
+
+            echo "  ✗ GM account has no global security level 3 access"
+            echo "    Retry command: account set gmlevel ${GM_USERNAME} 3 -1"
+        else
+            echo "  ✗ Expected to find: $GM_UPPER, AHBOT"
+            echo "    Actually found:   $(echo "$FOUND" | paste -sd, -)"
+        fi
 
         if [ "$PAUSE2_ATTEMPT" -ge "$PAUSE2_MAX" ]; then
             echo "ERROR: ${PAUSE2_MAX} attempts exhausted. Aborting."
@@ -3765,6 +3945,10 @@ if should_run_phase "8"; then
 [Unit]
 Description=AzerothCore + Playerbots Docker Stack
 Requires=docker.service tailscaled.service
+# Propagate a Docker daemon restart to this dependent Compose stack. With the
+# After= ordering below, compose is stopped while Docker is still available,
+# then started only after Docker is active again.
+PartOf=docker.service
 Wants=network-online.target
 After=docker.service tailscaled.service network-online.target
 
@@ -3780,8 +3964,18 @@ WorkingDirectory=/opt/stacks/azerothcore
 ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore/.env; TS_IP="${DOCKER_AUTH_EXTERNAL_PORT%%:*}"; if [ -z "$TS_IP" ]; then echo "ERROR: DOCKER_AUTH_EXTERNAL_PORT is empty or missing in /opt/stacks/azerothcore/.env"; exit 1; fi; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TS_IP" && exit 0; ip -4 -o addr show dev tailscale0 2>/dev/null | grep -Eq "inet ${TS_IP//./\\.}/[0-9]+" && exit 0; echo "Waiting for Tailscale IP $TS_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TS_IP is not assigned locally"; echo "tailscale ip -4:"; tailscale ip -4 2>/dev/null || true; echo "tailscale0 IPv4 addresses:"; ip -4 -o addr show dev tailscale0 2>/dev/null || true; exit 1'
 
 ExecStart=/usr/bin/docker compose up -d --no-build REPLACE_WITH_SCALE_FRAGMENT
-ExecStop=/usr/bin/docker compose down
+ExecStop=/usr/bin/docker compose down --timeout 60
 TimeoutStartSec=300
+# Worldserver's saveall can take 30-45 seconds under a large bot load. Give
+# Docker a 60-second container grace, then leave systemd additional headroom
+# to let the Compose command return cleanly instead of killing it mid-stop.
+TimeoutStopSec=75
+# Docker package upgrades can interrupt `docker compose up` after containers
+# have been created but before their dependency chain has started. Retry that
+# transient failure once Docker has finished restarting; normal `systemctl
+# stop` exits successfully and is never restarted.
+Restart=on-failure
+RestartSec=10s
 
 [Install]
 WantedBy=multi-user.target
@@ -3819,7 +4013,8 @@ echo "State file:      ${STATE_FILE}"
 echo ""
 echo "Post-install tuning:"
 echo "  - AC tuning:    edit ${STACK_DIR}/docker-compose.override.yml, then"
-echo "                  'docker compose restart ac-worldserver'."
+echo "                  'docker compose up -d --force-recreate ac-worldserver'."
+echo "                  Confirm 'WORLD: World Initialized' in docker logs afterward."
 echo "  - AH bot GUIDs: stored in ${STACK_DIR}/configs/modules/mod_ahbot.conf."
 echo "                  Other non-env AH bot tweaks can use '.ahbot reload'."
 echo "  - Playerbots:   installer-managed tuning is in docker-compose.override.yml;"
