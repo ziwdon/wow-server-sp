@@ -1,3 +1,4 @@
+import fcntl
 import os
 import stat
 import subprocess
@@ -36,6 +37,9 @@ if [ "$1" = compose ]; then
             if [ ! -f "$ADMIN_REDEPLOY_STATE" ]; then echo candidate > "$ADMIN_REDEPLOY_STATE"; else echo rollback > "$ADMIN_REDEPLOY_STATE"; fi
         fi
     done
+    exit 0
+fi
+if [ "$1" = image ]; then
     exit 0
 fi
 if [ "$1" = inspect ]; then
@@ -145,3 +149,25 @@ def test_candidate_staging_recreates_dist_after_rsync_delete(tmp_path):
     assert result.returncode == 0, result.stderr
     assert calls.count(" up") == 1, f"calls={calls!r}\nstdout={result.stdout}\nstderr={result.stderr}"
     assert " down" not in calls
+
+
+def test_healthy_candidate_is_promoted_to_durable_local_tag(tmp_path):
+    stack = _stack(tmp_path)
+    result, calls = _run(stack, _stubs(tmp_path), "healthy")
+    assert result.returncode == 0, result.stderr
+    assert "image tag azerothcore-admin:redeploy-" in calls
+    assert "azerothcore-admin:local" in calls
+    assert "image rm azerothcore-admin:redeploy-" in calls
+
+
+def test_redeploy_lock_contention_is_non_disruptive(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    lock = stack / ".redeploy.lock"
+    lock.touch()
+    with lock.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, calls = _run(stack, bind, "healthy")
+    assert result.returncode == 75
+    assert "another admin redeploy is already running" in result.stderr
+    assert calls == ""
