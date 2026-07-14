@@ -45,17 +45,42 @@ if [ "$1" = compose ]; then exit {compose_exit}; fi
 exit 0
 """)
     _exe(bind / "systemctl", f"#!/bin/sh\necho \"$@\" >> \"$TEST_ROOT/systemctl.calls\"\nexit {42 if fail_systemctl else 0}\n")
-    # /tmp/ac-build.log is a fixed, hardcoded literal in safe_remove_literal's
-    # own case statement (not one of the env-controlled paths this task closes
-    # off) -- the script always attempts to remove it on a full run. It sits
-    # outside $TEST_ROOT by construction, so it is allow-listed here too,
-    # alongside the $TEST_ROOT/* containment check that guards everything else.
+    # /tmp/ac-build.log and the safe_remove_glob targets below are fixed,
+    # hardcoded literals/patterns in the script itself (not one of the
+    # env-controlled paths this task closes off) -- a full run always
+    # attempts them regardless of $STACK_DIR. They sit outside $TEST_ROOT by
+    # construction, so they are allow-listed here too, alongside the
+    # $TEST_ROOT/* containment check that guards everything else. The
+    # install-temp-file glob targets are real host state in a shared test
+    # container (another test in the same pytest session may have left one
+    # behind, possibly owned by a different uid than this test drops to), so
+    # they are treated as always-successful no-ops here rather than delegated
+    # to the real binary -- this test's assertions are about $STACK_DIR/
+    # $STATE_FILE/$CONFIG_FILE removal, not about unrelated system temp-file
+    # cleanup. /tmp/ac-build.log and $TEST_ROOT/* are still delegated to the
+    # real /bin/rm since those are exactly what this test verifies.
     _exe(bind / "rm", """#!/bin/sh
 echo "$@" >> "$TEST_ROOT/rm.calls"
+args=""
+has_real_target=0
 for arg in "$@"; do
-  case "$arg" in -*) continue ;; "$TEST_ROOT"/*) ;; /tmp/ac-build.log) ;; *) echo "unsafe rm: $arg" >&2; exit 97 ;; esac
+  case "$arg" in
+    -*) args="$args $arg" ;;
+    "$TEST_ROOT"/*) args="$args $arg"; has_real_target=1 ;;
+    /tmp/ac-build.log) args="$args $arg"; has_real_target=1 ;;
+    /tmp/azerothcore-install-*.log) ;;
+    /tmp/ac-compose-effective.*.yml) ;;
+    /tmp/ac-xp-rate-overrides.*) ;;
+    /tmp/ac-playerbots-schema-check.out) ;;
+    /opt/stacks/.azerothcore-clone-*) ;;
+    *) echo "unsafe rm: $arg" >&2; exit 97 ;;
+  esac
 done
-exec /bin/rm "$@"
+if [ "$has_real_target" = 1 ]; then
+  # shellcheck disable=SC2086
+  exec /bin/rm $args
+fi
+exit 0
 """)
     _exe(bind / "crontab", "#!/bin/sh\necho \"$@\" >> \"$TEST_ROOT/crontab.calls\"\nexit 1\n")
     _exe(bind / "sudo", """#!/bin/sh
