@@ -54,11 +54,20 @@ can remove, stop, restart, or reconfigure services:
 shellcheck scripts/*.sh wow-server-sp-admin/scripts/*.sh
 ```
 
+Root shell-script test suite (132 tests, sandboxed — no Docker socket, no `/opt/stacks` mount):
+
+```bash
+docker run --rm -v "$(pwd):/repo:ro" -w /repo python:3.12-slim bash -c \
+    "test ! -S /var/run/docker.sock && test ! -e /opt/stacks/azerothcore && \
+     pip install pytest -q && python -m pytest -q scripts/tests/"
+```
+
 Admin Python tests run under Docker (no local venv):
 
 ```bash
-docker run --rm -v "$(pwd)/wow-server-sp-admin:/src" -w /src python:3.12-slim \
-    bash -c "pip install -r requirements-dev.txt -q && python -m pytest -q"
+docker run --rm -v "$(pwd)/wow-server-sp-admin:/src:ro" -w /src python:3.12-slim bash -c \
+    "test ! -S /var/run/docker.sock && test ! -e /opt/stacks/azerothcore && \
+     pip install -r requirements-dev.txt -q && python -m pytest -q"
 ```
 
 `# shellcheck disable=SC1091` is used only for dynamic `source` calls. The other intentional cases use narrow local suppressions so the documented ShellCheck command remains a green gate:
@@ -103,7 +112,7 @@ chmod +x scripts/*.sh
 
 **`scripts/verify-azerothcore.sh`** — `set -u` (not `-e`) so every check runs after a failure. Reports `[OK]`/`[FAIL]`/`[INFO]` per check; INFO is advisory, excluded from pass/fail totals.
 
-**`scripts/redeploy-azerothcore.sh`** — isolated graceful recompile + redeploy of only `ac-worldserver` after a source/module edit: `docker compose build ac-worldserver` (ccache-fast) → graceful stop (clean saveall) → recreate. Never touches `.env`/`override.yml`/`admin.yml`/the DBs. Use this instead of `install-azerothcore.sh --resume-from=3`, which would also run Phase 4 DB-init, the account-creation pauses, networking, etc.
+**`scripts/redeploy-azerothcore.sh`** — isolated graceful recompile + redeploy of only `ac-worldserver` after a source/module edit: `docker compose build ac-worldserver` (ccache-fast) → graceful stop (clean saveall) → recreate. Never touches `.env`/`override.yml`/`admin.yml`/the DBs. Use this instead of `install-azerothcore.sh --resume-from=3`, which would also run Phase 4 DB-init, the account-creation pauses, networking, etc. Readiness polls `docker logs --since "$StartedAt" ac-worldserver` for `World Initialized` (current-container evidence via `docker inspect -f '{{.State.StartedAt}}'`) — not the host-mounted `Server.log`, which isn't guaranteed truncated by the time polling starts. `restore-azerothcore.sh` uses the same current-boot-evidence pattern.
 
 **`scripts/uninstall-azerothcore.sh`** — `docker compose -p azerothcore down` + explicit named-container cleanup; never `--remove-orphans` (see Constraints).
 
@@ -224,9 +233,17 @@ Invariants of `wow-server-sp-admin/` to know before touching admin code — or b
 
 **Backup architecture is one shared script.** `scripts/backup.sh` is canonical. Phase 7 copies it to `/opt/stacks/azerothcore/backup.sh` for host cron; admin install/redeploy bundle the same file as `/app/scripts/backup.sh` with `STACK_DIR=/ac`. It produces one consolidated `azerothcore-backup-<label>-<stamp>.tar.gz` (manifest.json + SQL dumps + staged configs). No `backup_runner.py`, no per-DB/config-tarball multi-file format.
 
+**`${STACK_DIR}/backups/.backup.lock` is one shared cross-process lock**, non-blocking `flock`. Three call sites hold it: `backup.sh` itself, host `restore-azerothcore.sh`, and the admin's in-app restore (`actions.py`'s `_backup_mutation_lock`). The admin acquires it only *after* its own pre-restore safety backup completes — that safety backup shells out to `backup.sh`, which takes/releases the same lock itself, so acquiring earlier would self-deadlock. Contention → busy failure, no mutation, not a wait.
+
+**Admin redeploy uses its own `${STACK_DIR}/.redeploy.lock`** (non-blocking `flock`, disjoint from `.backup.lock`) and only promotes the built candidate to `azerothcore-admin:local` — the tag the installed systemd unit and future `docker compose` recreation actually use — after the candidate's health check and full verifier both succeed. Don't add a step that promotes earlier or skips the lock.
+
 **Backups are daily-cron, manual, and pre-restore only.** Stop/Restart/Apply take no backup. Manual archives use label `manual`; in-app Restore first takes a `prerestore` archive; nightly cron runs `daily` mode. Pruning is 7 days, owned by `backup.sh` daily mode (deletes old archives of every label plus old legacy artifacts). A missing DB is never a successful backup: if at least one dump succeeds, write a `-partial-` archive, exit 1, and skip pruning; if every DB is unavailable, write no archive and exit 1.
 
 **Restore validates before it becomes destructive.** Both restore paths preflight every selected SQL dump (present, non-empty, completed) before stopping the server or dropping a database. For in-app restore, an import failure after the `prerestore` safety archive leaves the server stopped and reports that archive; do not auto-restore or restart into an uncertain state.
+
+**`_await_thread_completion` (`app/main.py`) is the shield-and-wait pattern for any cancellable mutation on a worker thread** — `asyncio.shield`s the `to_thread` task, and on caller cancellation still awaits the underlying thread before re-raising, so cleanup/lock-release can't run while the thread is still mutating. Used by both import-restore staging/validation and progression-apply; reuse it for any new cancellable destructive route instead of a bare `asyncio.to_thread`.
+
+**`resolve_backup_archive` (`app/services/backups.py`) is the one non-symlink-following archive-path resolver** — lexical check → `lstat` → reject symlink/non-regular → resolved-parent containment. Listing, download, and `run_restore` all use it (the worker re-checks itself rather than trusting the route). Any new route that turns a client-supplied archive name into a path must go through this, not a fresh `is_file()`/string check.
 
 **`MaintenanceScheduler` is an asyncio background task, not cron.** Started in `lifespan` (`main.py`) on `app.state.maintenance_scheduler`, cancelled on shutdown. Polls every 30 s but fires only when `now.minute == 0` (top of the UTC hour). Same-hour jobs run sequentially so they do not collide with the action runner; externally busy actions are logged as skipped for that hour. `ADMIN_DATA_DIR` (default `/admin-data`, from `azerothcore-admin/data/`) holds `maintenance.json` (config) and `maintenance-log.jsonl` (last 20 runs, trimmed on append); maintenance-log/config write errors are advisory and must not kill the scheduler.
 
@@ -283,3 +300,4 @@ Check `plans/` and `specs/` before non-trivial architectural work — in-flight 
 - Neither uninstaller (`uninstall-azerothcore.sh`, `uninstall-azerothcore-admin.sh`) may use `--remove-orphans` (would remove unrelated containers sharing the Compose project name); the admin's `docker rm -f azerothcore-admin` covers its single service.
 - `verify-azerothcore.sh` / `verify-azerothcore-admin.sh` stay on `set -u` without `-e` so all checks run regardless of individual failures.
 - The admin app must edit nothing under `/opt/stacks/azerothcore/` except `docker-compose.admin.yml` and `backups/*` — the `/ac/` mount is ro to enforce this; add no other rw sub-mount.
+- `scripts/uninstall-azerothcore.sh`'s `STACK_DIR`/`STATE_FILE`/`CONFIG_FILE`/`SYSTEMD_UNIT` are immutable `readonly` constants — no environment-override seam. Every removal (including the stack directory itself) passes through `safe_remove_literal`'s exact-match guard; `sudo` only changes *how* an already-approved literal is removed, never *which* path. Tests isolate by copying the script and rewriting these `readonly` lines (see `test_uninstaller_script.py`/`test_lifecycle_shell_behavior.py`), never by passing env overrides.
