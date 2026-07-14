@@ -1,5 +1,5 @@
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from app.services import actions
 from app.services.actions import ActionResult, run_stop
@@ -67,6 +67,45 @@ def test_stop_skips_when_already_stopped(mock_inspect):
     assert result == ActionResult.OK
 
 
+@patch("app.services.actions.WorldserverConsole")
+@patch("app.services.actions.inspect_worldserver")
+def test_stop_skips_when_container_is_not_running(
+    mock_inspect, mock_console,
+):
+    from app.services.docker_client import ContainerInfo
+
+    for status in ("created", "dead"):
+        mock_inspect.return_value = ContainerInfo(
+            status=status, started_at=None, exit_code=None, image=None,
+        )
+
+        result = run_stop(on_progress=lambda *_: None, grace_seconds=30)
+
+        assert result == ActionResult.OK
+        mock_console.assert_not_called()
+
+
+@patch("app.services.actions.subprocess.run")
+@patch("app.services.actions.WorldserverConsole")
+@patch("app.services.actions.inspect_worldserver")
+def test_stop_skips_docker_stop_when_container_stops_during_attach(
+    mock_inspect, mock_console, mock_run,
+):
+    from app.services.docker_client import ContainerInfo
+
+    states = iter([
+        ContainerInfo(status="running", started_at=None, exit_code=None, image=None),
+        ContainerInfo(status="exited", started_at=None, exit_code=0, image=None),
+    ])
+    mock_inspect.side_effect = lambda: next(states)
+    mock_console.return_value.__enter__.side_effect = RuntimeError("attach lost")
+
+    result = run_stop(on_progress=lambda *_: None, grace_seconds=30)
+
+    assert result == ActionResult.OK
+    mock_run.assert_not_called()
+
+
 @patch("app.services.actions.subprocess.run")
 @patch("app.services.actions._wait_for_world_init")
 @patch("app.services.actions.inspect_worldserver")
@@ -87,6 +126,148 @@ def test_start_runs_compose_up_and_waits_for_world_init(
     result = run_start(on_progress=lambda *_: None)
     assert result == ActionResult.OK
     assert any("compose" in str(c.args) for c in mock_run.call_args_list)
+
+
+@patch("app.services.actions.docker.from_env")
+def test_ac_compose_base_args_translates_host_mount_and_compose_env(
+    mock_docker_from_env, tmp_path,
+):
+    """Compose reads files inside /ac but resolves mounts on the host."""
+    from app.services.actions import _ac_compose_base_args
+
+    ac_stack = tmp_path / "ac"
+    ac_stack.mkdir()
+    (ac_stack / ".env").write_text(
+        "COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.admin.yml\n"
+        "COMPOSE_PROJECT_NAME=custom-azerothcore\n"
+    )
+    mock_docker_from_env.return_value.containers.get.return_value.attrs = {
+        "Mounts": [
+            {"Source": "/var/lib/azerothcore", "Destination": "/ac"},
+        ],
+    }
+
+    command, extra_env = _ac_compose_base_args(ac_stack)
+
+    assert command == [
+        "docker", "compose",
+        "--project-name", "custom-azerothcore",
+        "--project-directory", "/var/lib/azerothcore",
+        "-f", str(ac_stack / "docker-compose.yml"),
+        "-f", str(ac_stack / "docker-compose.override.yml"),
+        "-f", str(ac_stack / "docker-compose.admin.yml"),
+        "--env-file", str(ac_stack / ".env"),
+    ]
+    assert extra_env == {
+        "DOCKER_AC_ENV_FILE": str(ac_stack / "conf/dist/env.ac"),
+    }
+
+
+@patch("app.services.actions.docker.from_env", side_effect=RuntimeError("no daemon"))
+def test_ac_compose_base_args_falls_back_when_inspection_or_env_is_unavailable(
+    _mock_docker_from_env, tmp_path,
+):
+    from app.services.actions import _ac_compose_base_args
+
+    ac_stack = tmp_path / "missing-ac-stack"
+
+    command, extra_env = _ac_compose_base_args(ac_stack)
+
+    assert command == [
+        "docker", "compose",
+        "--project-name", "azerothcore",
+        "--project-directory", "/opt/stacks/azerothcore",
+        "-f", str(ac_stack / "docker-compose.yml"),
+        "--env-file", str(ac_stack / ".env"),
+    ]
+    assert extra_env == {
+        "DOCKER_AC_ENV_FILE": str(ac_stack / "conf/dist/env.ac"),
+    }
+
+
+@patch("app.services.actions.docker.from_env")
+def test_ac_compose_base_args_ignores_malformed_env_lines(
+    mock_docker_from_env, tmp_path,
+):
+    from app.services.actions import _ac_compose_base_args
+
+    ac_stack = tmp_path / "ac"
+    ac_stack.mkdir()
+    (ac_stack / ".env").write_text(
+        "COMPOSE_FILE docker-compose.override.yml\n"
+        "COMPOSE_PROJECT_NAME custom-azerothcore\n"
+        "UNRELATED=value\n"
+    )
+    mock_docker_from_env.return_value.containers.get.return_value.attrs = {"Mounts": []}
+
+    command, _extra_env = _ac_compose_base_args(ac_stack)
+
+    assert command == [
+        "docker", "compose",
+        "--project-name", "azerothcore",
+        "--project-directory", "/opt/stacks/azerothcore",
+        "-f", str(ac_stack / "docker-compose.yml"),
+        "--env-file", str(ac_stack / ".env"),
+    ]
+
+
+@patch("app.services.actions.subprocess.run")
+@patch("app.services.actions._wait_for_world_init", return_value=True)
+@patch("app.services.actions._ac_compose_base_args")
+@patch("app.services.actions.inspect_worldserver")
+def test_start_uses_translated_compose_command_and_absolute_env_override(
+    mock_inspect, mock_compose_args, mock_wait_init, mock_run, monkeypatch,
+):
+    from app.services.actions import run_start
+    from app.services.docker_client import ContainerInfo
+
+    monkeypatch.setenv("AC_STACK_DIR", "/ac")
+    mock_inspect.return_value = ContainerInfo("exited", None, 0, None)
+    mock_compose_args.return_value = (
+        [
+            "docker", "compose", "--project-name", "custom-azerothcore",
+            "--project-directory", "/var/lib/azerothcore",
+            "-f", "/ac/docker-compose.yml", "--env-file", "/ac/.env",
+        ],
+        {"DOCKER_AC_ENV_FILE": "/ac/conf/dist/env.ac"},
+    )
+    mock_run.return_value = MagicMock(returncode=0)
+
+    assert run_start(on_progress=lambda *_: None) == ActionResult.OK
+
+    assert mock_compose_args.call_args.args == (actions.Path("/ac"),)
+    assert mock_run.call_args.args == (
+        [
+            "docker", "compose", "--project-name", "custom-azerothcore",
+            "--project-directory", "/var/lib/azerothcore",
+            "-f", "/ac/docker-compose.yml", "--env-file", "/ac/.env",
+            "up", "-d", "ac-worldserver", "ac-database",
+        ],
+    )
+    assert mock_run.call_args.kwargs["env"]["DOCKER_AC_ENV_FILE"] == "/ac/conf/dist/env.ac"
+    assert mock_run.call_args.kwargs["capture_output"] is True
+    assert mock_run.call_args.kwargs["text"] is True
+    assert mock_run.call_args.kwargs["timeout"] == 300
+    mock_wait_init.assert_called_once_with(timeout=300, on_progress=ANY)
+
+
+@patch("app.services.actions.subprocess.run")
+@patch("app.services.actions._ac_compose_base_args")
+@patch("app.services.actions.inspect_worldserver")
+def test_start_returns_error_when_translated_compose_up_fails(
+    mock_inspect, mock_compose_args, mock_run,
+):
+    from app.services.actions import run_start
+    from app.services.docker_client import ContainerInfo
+
+    mock_inspect.return_value = ContainerInfo("exited", None, 0, None)
+    mock_compose_args.return_value = (["docker", "compose"], {"DOCKER_AC_ENV_FILE": "/ac/env.ac"})
+    mock_run.return_value = MagicMock(returncode=1, stderr="invalid compose file")
+    progress: list[tuple[str, str]] = []
+
+    assert run_start(on_progress=lambda step, message: progress.append((step, message))) == ActionResult.ERROR
+    assert progress == [("compose_up", "docker compose up -d ac-worldserver ac-database"),
+                        ("compose_up", "compose up FAILED: invalid compose file")]
 
 
 def test_wait_for_world_init_matches_real_ac_log_line(tmp_path, monkeypatch):
@@ -184,6 +365,14 @@ def test_run_backup_manual_uses_manual_label(mock_backup):
     result = actions.run_backup_manual(on_progress=lambda *a: None)
     assert result == ActionResult.OK
     assert mock_backup.call_args.args[0] == "manual"
+
+
+@patch("app.services.backup.run_backup")
+def test_run_backup_manual_maps_backup_timeout_to_timeout(mock_backup):
+    mock_backup.return_value = type(
+        "R", (), {"ok": False, "archive": None, "output": "", "timed_out": True}
+    )()
+    assert actions.run_backup_manual(on_progress=lambda *_: None) == ActionResult.TIMEOUT
 
 
 @patch("app.services.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("docker", 300))

@@ -6,11 +6,6 @@ function showBanner(msg) {
   setTimeout(() => b.remove(), 8000);
 }
 
-async function responseDetail(response) {
-  const text = await response.text();
-  try { return JSON.parse(text).detail || text; } catch (_) { return text; }
-}
-
 // Escape user/operator-supplied strings before interpolating into innerHTML
 // or quoted attributes. Keys come from upstream .conf.dist files (trusted);
 // effective values come from admin.yml (operator-set, so technically
@@ -23,9 +18,27 @@ function esc(s) {
 const state = { keys: [], pending: {}, selected: null };
 
 async function load() {
-  const r = await fetch('/api/keys');
-  state.keys = await r.json();
+  const result = await window.requestActionJson('/api/keys');
+  const invalidData = result.ok && !Array.isArray(result.data);
+  if (!result.ok || invalidData) {
+    const message = invalidData
+      ? 'The server returned invalid settings data. Refresh the page and try again.'
+      : result.message;
+    const list = document.getElementById('key-list');
+    if (list) {
+      list.innerHTML = '';
+      const error = document.createElement('p');
+      error.className = 'empty-state banner error';
+      error.setAttribute('role', 'status');
+      error.textContent = `Could not load settings. ${message}`;
+      list.appendChild(error);
+    }
+    if (window.showActionToast) window.showActionToast(`Could not load settings. ${message}`);
+    return false;
+  }
+  state.keys = result.data;
   render();
+  return true;
 }
 
 function hasPending(k) {
@@ -116,25 +129,22 @@ function _render() {
     else if (applied) rowClasses.push('key-row-applied');
     if (state.selected && k.key === state.selected.key) rowClasses.push('selected');
     row.className = rowClasses.join(' ');
-    row.setAttribute('role', 'button');
-    row.tabIndex = 0;
     const value = pending ? state.pending[k.key] : k.effective_value;
     const inputClasses = ['key-input'];
     if (pending) inputClasses.push('key-input-pending');
     else if (applied) inputClasses.push('key-input-applied');
     row.innerHTML = `
-      <span class="key-name">${esc(k.key)}</span>
-      <span class="key-source">${esc(k.source)}</span>
-      <span class="key-flags">${readOnlyBadge}</span>
-      <input class="${inputClasses.join(' ')}" data-key="${esc(k.key)}" value="${esc(value)}"${readOnlyAttrs}>
+      <button type="button" class="key-row-select" aria-controls="key-detail">
+        <span class="key-name">${esc(k.key)}</span>
+        <span class="key-source">${esc(k.source)}</span>
+        <span class="key-flags">${readOnlyBadge}</span>
+      </button>
+      <input class="${inputClasses.join(' ')}" data-key="${esc(k.key)}" aria-label="Value for ${esc(k.key)}" value="${esc(value)}"${readOnlyAttrs}>
     `;
     if (document.getElementById('show-meta') && document.getElementById('show-meta').checked) {
       row.classList.add('show-meta');
     }
-    row.addEventListener('click', () => selectKey(k));
-    row.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); row.click(); }
-    });
+    row.querySelector('.key-row-select').addEventListener('click', () => selectKey(k));
     list.appendChild(row);
   });
   if (filtered.length > 200) {
@@ -165,6 +175,7 @@ function selectKey(k) {
 
   const newRow = document.querySelector(`.key-input[data-key="${k.key}"]`)?.closest('.key-row');
   if (newRow) newRow.classList.add('selected');
+  const detailButton = newRow?.querySelector('.key-row-select');
 
   const detail = document.getElementById('key-detail');
   const readOnlyBadge = k.read_only
@@ -195,7 +206,7 @@ function selectKey(k) {
   `;
 
   if (window.innerWidth <= 768) {
-    mobileDetailTrigger = newRow;
+    mobileDetailTrigger = detailButton;
     detail.setAttribute('role', 'dialog');
     detail.setAttribute('aria-modal', 'true');
     detail.classList.add('mobile-visible');
@@ -257,60 +268,97 @@ document.getElementById('apply-btn').addEventListener('click', async () => {
 document.getElementById('apply-cancel').addEventListener('click',
   () => document.getElementById('apply-dialog').close());
 
+function actionStatusFromDone(data) {
+  const match = /data-status="([^"]+)"/.exec(data);
+  return match?.[1] || 'unknown';
+}
+
 function watchActionUntilDone(id, label) {
   return new Promise((resolve) => {
     const es = new EventSource(`/api/action/stream?id=${encodeURIComponent(id)}`);
-    es.addEventListener('done', (e) => {
+    let settled = false;
+    const finish = (status, message) => {
+      if (settled) return;
+      settled = true;
       es.close();
-      if (/data-status="error"/.test(e.data)) {
-        showBanner(`${label} finished with error — see action log.`);
-        resolve(true);
-      } else {
-        resolve(false);
-      }
+      if (status !== 'ok') showBanner(message);
+      resolve(status !== 'ok');
+    };
+    es.addEventListener('done', (e) => {
+      const status = actionStatusFromDone(e.data);
+      finish(status, `${label} finished with ${status} — see action log.`);
     });
-    es.addEventListener('idle', () => { es.close(); resolve(false); });
+    es.addEventListener('idle', () => {
+      finish('idle', `${label} action was not found. Refresh Settings before trying again.`);
+    });
+    es.addEventListener('error', () => {
+      finish('stream-error', `${label} action stream disconnected. Refresh Settings to check its result.`);
+    });
   });
 }
 
 document.getElementById('apply-confirm').addEventListener('click', async () => {
+  const button = document.getElementById('apply-confirm');
   document.getElementById('apply-dialog').close();
-  const r = await fetch('/api/settings/apply', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pending: state.pending }),
-  });
-  if (!r.ok) {
-    showBanner('Apply failed: ' + await responseDetail(r));
-    return;
-  }
-  const { id } = await r.json();
-  state.pending = {};
-  await load();
-  const hardError = await watchActionUntilDone(id, 'Apply');
-  if (hardError) {
+  button.disabled = true;
+  try {
+    const result = await window.requestActionJson('/api/settings/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pending: state.pending }),
+    });
+    if (!result.ok) {
+      window.showActionFailure('Apply', result);
+      return;
+    }
+    if (!result.data || !result.data.id) {
+      window.showActionFailure('Apply', {
+        message: 'The server accepted no action id. Refresh Settings and try again.',
+      });
+      return;
+    }
+    const { id } = result.data;
+    state.pending = {};
     await load();
-    refreshSelectedKey();
-  } else {
-    window.location.href = '/';
+    const hardError = await watchActionUntilDone(id, 'Apply');
+    if (hardError) {
+      await load();
+      refreshSelectedKey();
+    } else {
+      window.location.href = '/';
+    }
+  } finally {
+    button.disabled = false;
   }
 });
 
 document.getElementById('rollback-btn').addEventListener('click', async () => {
   if (!confirm('Roll back to the most recent admin.yml snapshot and restart?')) return;
-  const r = await fetch('/api/settings/rollback', { method: 'POST' });
-  if (!r.ok) {
-    showBanner('Rollback failed: ' + await responseDetail(r));
-    return;
-  }
-  const { id } = await r.json();
-  await load();
-  const hardError = await watchActionUntilDone(id, 'Rollback');
-  if (hardError) {
+  const button = document.getElementById('rollback-btn');
+  button.disabled = true;
+  try {
+    const result = await window.requestActionJson('/api/settings/rollback', { method: 'POST' });
+    if (!result.ok) {
+      window.showActionFailure('Rollback', result);
+      return;
+    }
+    if (!result.data || !result.data.id) {
+      window.showActionFailure('Rollback', {
+        message: 'The server accepted no action id. Refresh Settings and try again.',
+      });
+      return;
+    }
+    const { id } = result.data;
     await load();
-    refreshSelectedKey();
-  } else {
-    window.location.href = '/';
+    const hardError = await watchActionUntilDone(id, 'Rollback');
+    if (hardError) {
+      await load();
+      refreshSelectedKey();
+    } else {
+      window.location.href = '/';
+    }
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -338,6 +386,7 @@ const sidebarExtra = document.getElementById('sidebar-extra');
 if (mobileFilterToggle && sidebarExtra) {
   mobileFilterToggle.addEventListener('click', () => {
     const isOpen = sidebarExtra.classList.toggle('open');
+    mobileFilterToggle.setAttribute('aria-expanded', String(isOpen));
     mobileFilterToggle.textContent = isOpen ? '⚙ Filters ▲' : '⚙ Filters ▼';
   });
 }

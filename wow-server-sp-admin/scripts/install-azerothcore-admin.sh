@@ -60,12 +60,28 @@ else
         *)
             new_line="COMPOSE_FILE=${existing_value}:${ADMIN_YML_NAME}"
             echo "Appending ${ADMIN_YML_NAME} to existing COMPOSE_FILE in $AC_STACK_DIR/.env."
-            # Escape sed delimiter -- file paths can contain dots and dashes; we use
-            # a fixed-delimiter sed against an exact-match anchor.
+            # Use a same-directory temporary file so the final rename is atomic.
+            # Reapply the original metadata because the replacement inode would
+            # otherwise inherit the permissions and ownership of the temp file.
+            env_file="$AC_STACK_DIR/.env"
+            env_owner="$(stat -c '%u:%g' "$env_file")"
+            env_mode="$(stat -c '%a' "$env_file")"
+            env_tmp="$(sudo mktemp "$AC_STACK_DIR/.env.tmp.XXXXXX")"
+            cleanup_env_tmp() {
+                if [ -n "${env_tmp:-}" ] && [ -e "$env_tmp" ]; then
+                    sudo rm -f -- "$env_tmp" || true
+                fi
+            }
+            trap cleanup_env_tmp EXIT
+
             sudo awk -v old="$existing_line" -v new="$new_line" \
                 '$0 == old { print new; next } { print }' \
-                "$AC_STACK_DIR/.env" | sudo tee "$AC_STACK_DIR/.env.tmp" >/dev/null
-            sudo mv "$AC_STACK_DIR/.env.tmp" "$AC_STACK_DIR/.env"
+                "$env_file" | sudo tee "$env_tmp" >/dev/null
+            sudo chown "$env_owner" "$env_tmp"
+            sudo chmod "$env_mode" "$env_tmp"
+            sudo mv -f -- "$env_tmp" "$env_file"
+            env_tmp=""
+            trap - EXIT
             ;;
     esac
 fi
@@ -92,9 +108,9 @@ YAML
     sudo chmod 644 "$ADMIN_YML_PATH"
 fi
 
-# --- Step 4b: backups dir (rw target for the admin's in-process backup) ---
+# --- Step 4b: backups dir (rw target for explicit and restore-safety backups) ---
 # The host's backup.sh cron normally creates this on first run, but the admin
-# needs to write here on day one (Stop/Restart triggers a backup).
+# needs to write here on day one for Create backup and pre-restore safety archives.
 if [ ! -d "$AC_STACK_DIR/backups" ]; then
     echo "Creating $AC_STACK_DIR/backups/."
     sudo mkdir -p "$AC_STACK_DIR/backups"

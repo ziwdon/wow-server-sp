@@ -1,4 +1,4 @@
-from app.services.compose_admin import AdminCompose
+from app.services.compose_admin import AdminCompose, validate_restored_overlay
 
 
 def test_read_empty_file_returns_empty_env(tmp_path):
@@ -83,3 +83,43 @@ def test_write_preserves_other_services_and_keys(tmp_path):
     assert "MYSQL_X" in out
     assert "x-extras" in out
     assert "memory: 4G" in out
+
+
+def test_validate_restored_overlay_accepts_only_the_managed_environment_shape(tmp_path):
+    path = tmp_path / "admin.yml"
+    path.write_text(
+        "services:\n"
+        "  ac-worldserver:\n"
+        "    environment:\n"
+        "      AC_FOO_ENABLE: '1'\n"
+    )
+
+    assert validate_restored_overlay(path, allowed_env_vars={"AC_FOO_ENABLE"}) is None
+
+
+def test_validate_restored_overlay_rejects_malformed_extra_and_unapproved_content(tmp_path):
+    path = tmp_path / "admin.yml"
+    path.write_text("services: [not-a-mapping\n")
+    assert "malformed" in validate_restored_overlay(path, allowed_env_vars=set())
+
+    path.write_text("services:\n  ac-database:\n    environment: {}\n")
+    assert "extra services" in validate_restored_overlay(path, allowed_env_vars=set())
+
+    path.write_text(
+        "services:\n"
+        "  ac-worldserver:\n"
+        "    environment:\n"
+        "      AC_NOT_APPROVED: '1'\n"
+    )
+    assert "not approved" in validate_restored_overlay(path, allowed_env_vars=set())
+
+    path.write_text(
+        "services:\n"
+        "  ac-worldserver:\n"
+        "    environment:\n"
+        "      AC_AUCTION_HOUSE_BOT_GUIDS: '1'\n"
+    )
+    assert "blocked key" in validate_restored_overlay(
+        path,
+        allowed_env_vars={"AC_AUCTION_HOUSE_BOT_GUIDS"},
+    )

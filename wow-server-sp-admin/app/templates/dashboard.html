@@ -19,22 +19,22 @@
 
   <div class="action-bar">
     <button class="btn btn-green"
-            hx-post="/api/action/start"
-            hx-confirm="Start the server?"
-            hx-swap="none">Start</button>
+            data-action-endpoint="/api/action/start"
+            data-action-label="Start"
+            data-action-confirm="Start the server?">Start</button>
     <button class="btn btn-gold"
-            hx-post="/api/action/restart"
-            hx-confirm="Restart the server? Same shutdown path as Stop, then start."
-            hx-swap="none">Restart</button>
+            data-action-endpoint="/api/action/restart"
+            data-action-label="Restart"
+            data-action-confirm="Restart the server? Same shutdown path as Stop, then start.">Restart</button>
     <button class="btn btn-gold"
-            hx-post="/api/action/stop"
-            hx-confirm="Stop the server? Players get a 30-second warning, then saveall + clean shutdown."
-            hx-swap="none">Stop</button>
+            data-action-endpoint="/api/action/stop"
+            data-action-label="Stop"
+            data-action-confirm="Stop the server? Players get a 30-second warning, then saveall + clean shutdown.">Stop</button>
     <div class="action-divider"></div>
     <button class="btn btn-danger"
-            hx-post="/api/action/force-stop"
-            hx-confirm="FORCE STOP — no notify, no saveall, no backup. Only use if soft stop is hung. Continue?"
-            hx-swap="none">Force Stop</button>
+            data-action-endpoint="/api/action/force-stop"
+            data-action-label="Force Stop"
+            data-action-confirm="FORCE STOP — no notify, no saveall, no backup. Only use if soft stop is hung. Continue?">Force Stop</button>
   </div>
 
   <div class="lower-grid">
@@ -84,12 +84,30 @@ function refreshLogsPreservingTab() {
   htmx.ajax('GET', '/api/logs', {target: '#logs', swap: 'innerHTML'});
 }
 
-// Clear the action log when an action button fires so old history doesn't
-// accumulate across multiple actions.
-document.addEventListener('htmx:afterRequest', function(e) {
-  if (e.detail.elt && e.detail.elt.closest && e.detail.elt.closest('.action-bar')) {
-    document.getElementById('action-log').innerHTML = '';
-  }
+// Keep the prior activity visible when a request is rejected. Once the server
+// accepts a new action id, replace the log with that action's progress.
+document.querySelectorAll('[data-action-endpoint]').forEach(function (button) {
+  button.addEventListener('click', async function () {
+    var confirmMsg = button.dataset.actionConfirm;
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    button.disabled = true;
+    try {
+      var result = await window.requestActionJson(button.dataset.actionEndpoint, { method: 'POST' });
+      if (!result.ok) {
+        window.showActionFailure(button.dataset.actionLabel, result);
+        return;
+      }
+      if (!result.data || !result.data.id) {
+        window.showActionFailure(button.dataset.actionLabel, {
+          message: 'The server accepted no action id. Refresh the page and try again.',
+        });
+        return;
+      }
+      document.getElementById('action-log').innerHTML = '';
+    } finally {
+      button.disabled = false;
+    }
+  });
 });
 
 // On SSE progress events: debounced status-card refresh so the running/exited

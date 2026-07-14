@@ -5,3 +5,9 @@ docs/
 __pycache__/
 *.py[cod]
 node_modules/
+test-results/
+playwright-report/
+
+# Local Codex operational metadata — not server code or shared project docs.
+AGENTS.md
+.codex/

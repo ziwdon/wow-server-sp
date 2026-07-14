@@ -2,8 +2,8 @@
 # Intentionally `set -u` only -- every check runs even after a failure.
 set -u
 
-STACK_DIR=/opt/stacks/azerothcore-admin
-AC_STACK_DIR=/opt/stacks/azerothcore
+STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore-admin}"
+AC_STACK_DIR="${AC_STACK_DIR:-/opt/stacks/azerothcore}"
 PASS=0
 FAIL=0
 
@@ -88,7 +88,30 @@ else
     info "TAILSCALE_IP/ADMIN_PORT not set -- skipping /healthz check"
 fi
 
-# 7. systemd unit, if installed, must be enabled (spec §Verification item 7)
+# 7. Docker-backed readiness. These run in the non-root admin container so a
+# wrong DOCKER_GID or inaccessible socket fails verification without making
+# the cheap /healthz liveness probe trigger a restart loop.
+if timeout 5 docker exec azerothcore-admin docker inspect ac-worldserver >/dev/null 2>&1; then
+    ok "Docker socket usable from admin container"
+else
+    fail "Docker readiness failed: cannot inspect ac-worldserver from admin container"
+fi
+
+# DNS and TCP checks are intentionally separate. A stopped database is a
+# DB_DOWN readiness failure, not an admin liveness failure: the admin remains
+# available to diagnose or start the AC stack.
+if timeout 5 docker exec azerothcore-admin getent hosts ac-database >/dev/null 2>&1; then
+    ok "ac-database DNS resolves from admin container"
+    if timeout 5 docker exec azerothcore-admin python -c 'import socket; s = socket.create_connection(("ac-database", 3306), timeout=2); s.close()' >/dev/null 2>&1; then
+        ok "ac-database accepts TCP connections from admin container"
+    else
+        fail "DB_DOWN: ac-database:3306 is unavailable from admin container (liveness remains OK)"
+    fi
+else
+    fail "DB_DNS_UNAVAILABLE: ac-database does not resolve from admin container"
+fi
+
+# 8. systemd unit, if installed, must be enabled (spec §Verification item 7)
 if [ -f /etc/systemd/system/azerothcore-admin.service ]; then
     if systemctl is-enabled --quiet azerothcore-admin.service 2>/dev/null; then
         ok "azerothcore-admin.service is enabled"
@@ -99,7 +122,7 @@ else
     info "azerothcore-admin.service not installed (skip)"
 fi
 
-# 8. AC stack still functional (delegate)
+# 9. AC stack still functional (delegate)
 if [ -x "$(dirname "$0")/../../scripts/verify-azerothcore.sh" ]; then
     info "delegating to AC verify script (exit code preserved)"
     # shellcheck disable=SC2015

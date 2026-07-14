@@ -17,9 +17,9 @@
 
 set -euo pipefail
 
-STACK_DIR="/opt/stacks/azerothcore"
-STATE_FILE="${HOME}/.azerothcore-install-state"
-CONFIG_FILE="${HOME}/.azerothcore-install-config"
+STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore}"
+STATE_FILE="${STATE_FILE:-${HOME}/.azerothcore-install-state}"
+CONFIG_FILE="${CONFIG_FILE:-${HOME}/.azerothcore-install-config}"
 SYSTEMD_UNIT="/etc/systemd/system/azerothcore.service"
 COMPOSE_PROJECT="azerothcore"
 CRON_BACKUP_PATH="/opt/stacks/azerothcore/backup.sh"
@@ -46,6 +46,38 @@ LOCAL_IMAGE_REPOS=(
 
 YES=false
 DRY_RUN=false
+CLEANUP_FAILED=false
+
+record_cleanup_failure() {
+  CLEANUP_FAILED=true
+  echo "ERROR: $1" >&2
+}
+
+has_recovery_context() {
+  [ -e "$STACK_DIR" ] || [ -e "$STATE_FILE" ] || [ -e "$CONFIG_FILE" ]
+}
+
+preserve_recovery_context_and_exit() {
+  echo "Uninstall incomplete. Recovery context was preserved at $STACK_DIR and $STATE_FILE." >&2
+  echo "Fix Docker availability/resource errors, then re-run ./scripts/uninstall-azerothcore.sh --yes." >&2
+  exit 1
+}
+
+require_docker_daemon_for_recovery_context() {
+  if [ "$DRY_RUN" = true ] || ! has_recovery_context; then
+    return 0
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    record_cleanup_failure "Docker command is unavailable; preserving stack and installer state."
+  elif ! docker info >/dev/null 2>&1; then
+    record_cleanup_failure "Docker daemon is unavailable; preserving stack and installer state. Start or repair Docker, then re-run the uninstaller."
+  fi
+
+  if [ "$CLEANUP_FAILED" = true ]; then
+    preserve_recovery_context_and_exit
+  fi
+}
 
 usage() {
   cat <<USAGE
@@ -169,6 +201,10 @@ if [ "$YES" != true ] && [ "$DRY_RUN" != true ]; then
   fi
 fi
 
+# A recovery context must never be altered until Docker can distinguish an
+# unavailable daemon from an empty project. This also protects the systemd unit.
+require_docker_daemon_for_recovery_context
+
 # Prime sudo only if needed. Do this after confirmation.
 if [ "$DRY_RUN" != true ]; then
   echo ""
@@ -198,10 +234,12 @@ if [ -d "$STACK_DIR" ] && { [ -f "$STACK_DIR/docker-compose.yml" ] || [ -f "$STA
     if [ "$DRY_RUN" = true ]; then
       echo "[dry-run] cd '$STACK_DIR' && docker compose -p ${COMPOSE_PROJECT} down -v"
     else
-      (cd "$STACK_DIR" && docker compose -p "${COMPOSE_PROJECT}" down -v) || true
+      if ! (cd "$STACK_DIR" && docker compose -p "${COMPOSE_PROJECT}" down -v); then
+        record_cleanup_failure "Docker compose down failed; preserving stack and installer state."
+      fi
     fi
   else
-    echo "Docker compose not available; skipping compose down."
+    record_cleanup_failure "Docker compose is unavailable; preserving stack and installer state."
   fi
 else
   echo "No compose file found under $STACK_DIR."
@@ -213,34 +251,46 @@ fi
 #    (which could touch unrelated containers sharing the project name).
 echo ""
 echo "[3/7] Removing leftover containers, networks, and named volumes..."
+if [ "$CLEANUP_FAILED" = true ] && [ "$DRY_RUN" != true ]; then
+  preserve_recovery_context_and_exit
+fi
+
 if command -v docker >/dev/null 2>&1; then
   for c in "${KNOWN_CONTAINERS[@]}"; do
     if docker inspect "$c" >/dev/null 2>&1; then
-      run docker rm -f "$c" || true
+      run docker rm -f "$c" || record_cleanup_failure "Could not remove container $c."
     fi
   done
 
   # Project-labelled networks (covers azerothcore_default and any others).
   while IFS= read -r n; do
     [ -z "$n" ] && continue
-    run docker network rm "$n" >/dev/null || true
+    run docker network rm "$n" >/dev/null || record_cleanup_failure "Could not remove network $n."
   done < <(docker network ls --quiet \
             --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" 2>/dev/null)
   # Also try the hard-coded names in case the label was stripped.
   for n in "${KNOWN_NETWORKS[@]}"; do
     if docker network inspect "$n" >/dev/null 2>&1; then
-      run docker network rm "$n" >/dev/null || true
+      run docker network rm "$n" >/dev/null || record_cleanup_failure "Could not remove network $n."
     fi
   done
 
   # Project-labelled named volumes (host bind mounts are not affected here).
   while IFS= read -r v; do
     [ -z "$v" ] && continue
-    run docker volume rm -f "$v" >/dev/null || true
+    run docker volume rm -f "$v" >/dev/null || record_cleanup_failure "Could not remove volume $v."
   done < <(docker volume ls --quiet \
             --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" 2>/dev/null)
 else
-  echo "Docker command not found; skipping Docker fallback cleanup."
+  if [ "$DRY_RUN" != true ] && has_recovery_context; then
+    record_cleanup_failure "Docker command is unavailable; preserving stack and installer state."
+  else
+    echo "Docker command not found; skipping Docker fallback cleanup."
+  fi
+fi
+
+if [ "$CLEANUP_FAILED" = true ] && [ "$DRY_RUN" != true ]; then
+  preserve_recovery_context_and_exit
 fi
 
 # 4) Remove locally-built AzerothCore images. Honors a custom DOCKER_IMAGE_TAG

@@ -122,6 +122,12 @@ echo "    waiting for 'World Initialized' (up to ${WORLD_INIT_TIMEOUT}s)..."
 deadline=$(( $(date +%s) + WORLD_INIT_TIMEOUT ))
 init_ok=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
+    status="$(docker inspect -f '{{.State.Status}}' "$SERVICE" 2>/dev/null || echo missing)"
+    if [ "$status" != "running" ]; then
+        echo "ERROR: $SERVICE entered state '$status' before initialization completed." >&2
+        docker compose logs --tail 50 "$SERVICE" || true
+        exit 1
+    fi
     if [ -f "$LOG" ] && grep -q "World Initialized" "$LOG" 2>/dev/null; then
         init_ok=1
         break
@@ -131,8 +137,9 @@ done
 if [ "$init_ok" -eq 1 ]; then
     echo "    World Initialized — worldserver is up."
 else
-    echo "    WARNING: did not observe 'World Initialized' within ${WORLD_INIT_TIMEOUT}s." >&2
+    echo "ERROR: did not observe 'World Initialized' within ${WORLD_INIT_TIMEOUT}s." >&2
     echo "      Inspect: docker logs --tail 60 ac-worldserver ; tail logs/Errors.log" >&2
+    exit 1
 fi
 
 # Errors.log: 0 bytes = clean. (graveyard_zone lines are known-benign; see

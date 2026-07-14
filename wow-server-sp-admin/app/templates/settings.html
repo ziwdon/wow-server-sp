@@ -8,7 +8,8 @@
       <input class="search-input" type="text" id="search" aria-label="Search settings" placeholder="Key, value, or comment…">
     </div>
 
-    <button class="mobile-filter-toggle" id="mobile-filter-toggle">⚙ Filters ▼</button>
+    <button class="mobile-filter-toggle" id="mobile-filter-toggle" type="button"
+            aria-expanded="false" aria-controls="sidebar-extra">⚙ Filters ▼</button>
 
     <div class="mobile-collapsible" id="sidebar-extra">
       <div class="sidebar-section">
@@ -52,7 +53,7 @@
       <span>Key</span>
       <span>Value</span>
     </div>
-    <main class="settings-list" id="key-list"><p class="loading">Loading settings…</p></main>
+    <div class="settings-list" id="key-list"><p class="loading">Loading settings…</p></div>
   </div>
 
   <aside class="settings-detail" id="key-detail">

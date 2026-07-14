@@ -7,6 +7,23 @@ from app.services.players import PvpRankRow, RankRow
 from app.services.stats import Bucket, StackedBucket, StackedSegment, StatsSnapshot
 
 
+class _PausedThread:
+    """Thread stand-in that lets tests observe refresh state before it runs."""
+
+    started: list["_PausedThread"] = []
+
+    def __init__(self, *, target, args, daemon):
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+
+    def start(self):
+        self.started.append(self)
+
+    def run(self):
+        self.target(*self.args)
+
+
 def _snap(fetched_at: float) -> StatsSnapshot:
     return StatsSnapshot(
         fetched_at=fetched_at,
@@ -110,6 +127,57 @@ def test_refresh_async_single_flight(tmp_path):
     assert r.status == "idle"
     assert started["n"] == 1
     assert r.get() is not None
+
+
+def test_retry_clears_previous_error_while_refreshing_and_on_success(tmp_path):
+    r = stats_cache.StatsRefresher(cache_path=tmp_path / "s.json")
+    previous = _snap(1.0)
+    refreshed = _snap(2.0)
+    r._store(previous)
+
+    with patch("app.services.stats_cache.collect_stats", side_effect=RuntimeError("first failure")):
+        r._run({})
+    assert r.status == "idle"
+    assert r.error == "first failure"
+    assert r.get() == previous
+
+    _PausedThread.started = []
+    with patch("app.services.stats_cache.threading.Thread", _PausedThread), \
+         patch("app.services.stats_cache.collect_stats", return_value=refreshed):
+        assert r.refresh_async({}) is True
+        assert r.status == "refreshing"
+        assert r.error is None
+        assert r.get() == previous
+        _PausedThread.started.pop().run()
+
+    assert r.status == "idle"
+    assert r.error is None
+    assert r.get() == refreshed
+
+
+def test_retry_clears_previous_error_while_refreshing_then_reports_latest_failure(tmp_path):
+    r = stats_cache.StatsRefresher(cache_path=tmp_path / "s.json")
+    previous = _snap(1.0)
+    r._store(previous)
+
+    with patch("app.services.stats_cache.collect_stats", side_effect=RuntimeError("first failure")):
+        r._run({})
+    assert r.status == "idle"
+    assert r.error == "first failure"
+    assert r.get() == previous
+
+    _PausedThread.started = []
+    with patch("app.services.stats_cache.threading.Thread", _PausedThread), \
+         patch("app.services.stats_cache.collect_stats", side_effect=RuntimeError("latest failure")):
+        assert r.refresh_async({}) is True
+        assert r.status == "refreshing"
+        assert r.error is None
+        assert r.get() == previous
+        _PausedThread.started.pop().run()
+
+    assert r.status == "idle"
+    assert r.error == "latest failure"
+    assert r.get() == previous
 
 
 def test_disk_write_failure_is_non_fatal(tmp_path):

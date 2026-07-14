@@ -1,3 +1,7 @@
+import os
+import time
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -168,3 +172,210 @@ def test_apply_refuses_when_action_in_flight_without_writing(
     assert admin_yml.read_text() == before
     # No background work kicked off.
     assert not mock_runner.start.called
+
+
+@patch("app.main._run_apply_then_verify")
+def test_apply_rejects_malformed_typed_values_before_snapshot_or_write(mock_apply_verify, tmp_path):
+    admin_yml, snapshots = _init_apply_state(tmp_path)
+    before = admin_yml.read_text()
+    client = TestClient(app)
+
+    r = client.post("/api/settings/apply", json={"pending": {"Foo.Enable": "yes"}})
+
+    assert r.status_code == 400
+    assert "Foo.Enable" in r.json()["detail"]
+    assert admin_yml.read_text() == before
+    assert not list(snapshots.iterdir())
+    assert not mock_apply_verify.called
+
+
+class _InlineRunner:
+    """Run a route action synchronously while preserving runner ordering.
+
+    The production runner deliberately hands its action to a background task.
+    This narrow adapter invokes the supplied pre-hook and action inline so
+    endpoint tests can assert real filesystem state without a timing race.
+    """
+
+    def __init__(self):
+        self._current = None
+        self.calls = []
+        self.records = []
+        self.results = []
+
+    def current(self):
+        return self._current
+
+    def start(self, name, func, *, pre=None):
+        self.calls.append(name)
+        if pre is not None:
+            pre()
+        record = SimpleNamespace(id="rollback-action", verify_failed=[])
+        self._current = record
+        self.records.append(record)
+        try:
+            self.results.append(func(lambda *_: None))
+        finally:
+            self._current = None
+        return record
+
+
+def _install_inline_runner(monkeypatch):
+    import app.main as main
+
+    runner = _InlineRunner()
+    monkeypatch.setattr(main, "runner", runner)
+    return runner
+
+
+def _rollback_snapshot(snapshots, admin_yml, suffix, contents, *, mtime):
+    snapshot = snapshots / f"{admin_yml.name}.bak.{suffix}"
+    snapshot.write_text(contents)
+    os.utime(snapshot, (mtime, mtime))
+    return snapshot
+
+
+def test_rollback_returns_404_when_no_snapshot_exists(tmp_path, monkeypatch):
+    _init_apply_state(tmp_path)
+    _install_inline_runner(monkeypatch)
+
+    response = TestClient(app).post("/api/settings/rollback")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "no admin.yml snapshots to roll back to"
+
+
+def test_rollback_restores_latest_snapshot_byte_for_byte_and_keeps_forward_snapshot(
+    tmp_path, monkeypatch,
+):
+    import app.main as main
+    from app.services.actions import ActionResult
+
+    live = (
+        "# current operator-edited compose file\n"
+        "services:\n  ac-worldserver:\n    environment:\n      AC_FOO_ENABLE: '1'\n"
+    )
+    older = "# old snapshot\nservices:\n  ac-worldserver:\n    environment: {}\n"
+    newest = (
+        "# chosen snapshot: comments and whitespace must survive exactly\n"
+        "services:\n  ac-worldserver:\n    environment:\n      AC_FOO_ENABLE: '0'\n\n"
+    )
+    admin_yml, snapshots = _init_apply_state(tmp_path, admin_yml_content=live)
+    old_snapshot = _rollback_snapshot(
+        snapshots, admin_yml, "old", older, mtime=time.time() - 20,
+    )
+    latest_snapshot = _rollback_snapshot(
+        snapshots, admin_yml, "newest", newest, mtime=time.time() - 10,
+    )
+    runner = _install_inline_runner(monkeypatch)
+    monkeypatch.setattr(main, "run_restart", lambda **_kwargs: ActionResult.OK)
+    monkeypatch.setattr(main, "verify_env_vars_bound", lambda *_args, **_kwargs: [])
+
+    response = TestClient(app).post("/api/settings/rollback")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "rollback-action",
+        "status": "running",
+        "restored_from": latest_snapshot.name,
+    }
+    assert admin_yml.read_text() == newest
+    assert runner.calls == ["rollback"]
+    assert runner.results == [ActionResult.OK]
+    forward = set(snapshots.iterdir()) - {old_snapshot, latest_snapshot}
+    assert len(forward) == 1
+    assert forward.pop().read_text() == live
+
+
+def test_rollback_runner_race_returns_409_without_snapshot_or_write(tmp_path, monkeypatch):
+    import app.main as main
+
+    live = "services:\n  ac-worldserver:\n    environment:\n      AC_FOO_ENABLE: '1'\n"
+    restore = "services:\n  ac-worldserver:\n    environment:\n      AC_FOO_ENABLE: '0'\n"
+    admin_yml, snapshots = _init_apply_state(tmp_path, admin_yml_content=live)
+    snapshot = _rollback_snapshot(
+        snapshots, admin_yml, "candidate", restore, mtime=time.time(),
+    )
+
+    class _RaceRunner:
+        def current(self):
+            return None
+
+        def start(self, *_args, **_kwargs):
+            raise RuntimeError("another action already running")
+
+    monkeypatch.setattr(main, "runner", _RaceRunner())
+    response = TestClient(app).post("/api/settings/rollback")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "another action already running"
+    assert admin_yml.read_text() == live
+    assert list(snapshots.iterdir()) == [snapshot]
+
+
+def test_rollback_write_failure_leaves_live_file_and_returns_500(tmp_path, monkeypatch):
+    live = "services:\n  ac-worldserver:\n    environment:\n      AC_FOO_ENABLE: '1'\n"
+    restore = "services:\n  ac-worldserver:\n    environment:\n      AC_FOO_ENABLE: '0'\n"
+    admin_yml, snapshots = _init_apply_state(tmp_path, admin_yml_content=live)
+    snapshot = _rollback_snapshot(
+        snapshots, admin_yml, "candidate", restore, mtime=time.time(),
+    )
+    _install_inline_runner(monkeypatch)
+    original_open = Path.open
+
+    def fail_live_write(path, mode="r", *args, **kwargs):
+        if path == admin_yml and mode == "w":
+            raise OSError("simulated full disk")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_live_write)
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/api/settings/rollback",
+    )
+
+    assert response.status_code == 500
+    assert admin_yml.read_text() == live
+    forward = set(snapshots.iterdir()) - {snapshot}
+    assert len(forward) == 1
+    assert forward.pop().read_text() == live
+
+
+def test_rollback_preserves_restart_timeout_result(tmp_path, monkeypatch):
+    import app.main as main
+    from app.services.actions import ActionResult
+
+    admin_yml, snapshots = _init_apply_state(tmp_path)
+    _rollback_snapshot(
+        snapshots, admin_yml, "candidate", admin_yml.read_text(), mtime=time.time(),
+    )
+    runner = _install_inline_runner(monkeypatch)
+    monkeypatch.setattr(main, "run_restart", lambda **_kwargs: ActionResult.TIMEOUT)
+    verify = MagicMock(return_value=[])
+    monkeypatch.setattr(main, "verify_env_vars_bound", verify)
+
+    response = TestClient(app).post("/api/settings/rollback")
+
+    assert response.status_code == 200
+    assert runner.results == [ActionResult.TIMEOUT]
+    verify.assert_not_called()
+
+
+def test_rollback_records_post_verify_failure(tmp_path, monkeypatch):
+    import app.main as main
+    from app.services.actions import ActionResult, VerifyFailure
+
+    admin_yml, snapshots = _init_apply_state(tmp_path)
+    _rollback_snapshot(
+        snapshots, admin_yml, admin_yml.name, admin_yml.read_text(), mtime=time.time(),
+    )
+    runner = _install_inline_runner(monkeypatch)
+    failure = VerifyFailure("AC_FOO_ENABLE", "Foo.Enable", "silently dropped")
+    monkeypatch.setattr(main, "run_restart", lambda **_kwargs: ActionResult.OK)
+    monkeypatch.setattr(main, "verify_env_vars_bound", lambda *_args, **_kwargs: [failure])
+
+    response = TestClient(app).post("/api/settings/rollback")
+
+    assert response.status_code == 200
+    assert runner.results == [ActionResult.ERROR]
+    assert runner.records[-1].verify_failed == [failure]

@@ -11,6 +11,7 @@
   </section>
 
   {% if error %}<p class="settings-banner error">{{ error }}</p>{% endif %}
+  {% if diagnostic %}<p class="settings-banner error">{{ diagnostic }}</p>{% endif %}
   <form class="maintenance-grid" method="post" action="/api/maintenance">
     <section class="panel maintenance-card">
       <div class="panel-header">

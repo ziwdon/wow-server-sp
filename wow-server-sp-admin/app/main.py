@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import datetime as dt
 import json
 import re
+import uuid
 
 from app.services import backups as backups_svc
 from app.services import db_stats
@@ -28,6 +29,7 @@ from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
 from app.services import progression as progression_svc
 from app.services import wow_reference as wow_ref
+from app.services.config_index import validate_value
 from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
 
@@ -64,6 +66,14 @@ async def lifespan(app: FastAPI):
         removed = _state_mod._state.admin.gc_old_snapshots(keep_days=7)
         if removed:
             log.info("gc'd %d old admin.yml snapshots", removed)
+    try:
+        progression_removed = progression_svc._prune_progression_audit_records(
+            _state_mod._state.snapshots_dir / progression_svc.PROGRESSION_AUDIT_DIRNAME
+        )
+        if progression_removed:
+            log.info("gc'd %d old progression audit records", progression_removed)
+    except Exception:
+        log.warning("could not prune progression audit records at startup", exc_info=True)
     # Load the last stats snapshot from disk so a restart serves it instantly.
     stats_refresher.load_from_disk()
     maintenance_scheduler = maintenance_svc.MaintenanceScheduler(
@@ -150,9 +160,9 @@ async def api_keys() -> list[dict]:
 async def api_status(request: Request) -> HTMLResponse:
     info = await asyncio.to_thread(docker_client.inspect_worldserver)
     return templates.TemplateResponse(
+        request,
         "partials/status.html",
         {
-            "request": request,
             "status": info.status,
             "started_at_human": _format_started_at(info.started_at),
             "exit_code": info.exit_code,
@@ -207,9 +217,9 @@ async def api_stats(request: Request) -> HTMLResponse:
             "memory_limit_mb": _humanize_bytes(raw.memory_limit_bytes),
         }
     return templates.TemplateResponse(
+        request,
         "partials/stats.html",
         {
-            "request": request,
             "stats": stats,
             "uptime": _humanize_uptime(info.started_at),
         },
@@ -259,12 +269,13 @@ async def api_players(request: Request) -> HTMLResponse:
     counts = None
     try:
         creds = db_credentials()
-        counts = db_stats.count_online(**creds)
+        counts = await asyncio.to_thread(db_stats.count_online, **creds)
     except Exception:  # noqa: BLE001 — DB may be down; UI surfaces None
         counts = None
     return templates.TemplateResponse(
+        request,
         "partials/players.html",
-        {"request": request, "counts": counts},
+        {"counts": counts},
     )
 
 
@@ -273,9 +284,9 @@ async def api_logs(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     logs_dir = ac / "logs"
     return templates.TemplateResponse(
+        request,
         "partials/logs.html",
         {
-            "request": request,
             "errors_size": logs_svc.file_size(logs_dir / "Errors.log"),
             "errors_lines": logs_svc.tail_filtered(logs_dir / "Errors.log", n=40),
             "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=40),
@@ -297,9 +308,9 @@ async def api_backups(request: Request) -> HTMLResponse:
             s.last_backup_unix, tz=dt.timezone.utc
         ).strftime("%Y-%m-%d %H:%M UTC")
     return templates.TemplateResponse(
+        request,
         "partials/backups.html",
         {
-            "request": request,
             "last_backup_human": human,
             "last_error": s.last_error,
         },
@@ -322,14 +333,17 @@ def _maintenance_store() -> maintenance_svc.MaintenanceStore:
 @app.get("/maintenance", response_class=HTMLResponse)
 async def maintenance_page(request: Request) -> HTMLResponse:
     store = _maintenance_store()
+    config = store.load_config()
     return templates.TemplateResponse(
         request,
         "maintenance.html",
         {
             "title": "azerothcore-admin · maintenance",
-            "config": store.load_config(),
+            "config": config,
             "log": store.read_log(),
-            "hours": list(range(24)), "error": request.query_params.get("error"),
+            "hours": list(range(24)),
+            "error": request.query_params.get("error"),
+            "diagnostic": store.degradation_diagnostic(),
         },
     )
 
@@ -337,9 +351,11 @@ async def maintenance_page(request: Request) -> HTMLResponse:
 @app.get("/api/maintenance")
 async def api_maintenance() -> dict:
     store = _maintenance_store()
+    config = store.load_config()
     return {
-        "config": asdict(store.load_config()),
+        "config": asdict(config),
         "log": [asdict(entry) for entry in store.read_log()],
+        "diagnostic": store.degradation_diagnostic(),
     }
 
 
@@ -363,7 +379,7 @@ async def post_maintenance(
     )
     try:
         store.save_config(cfg)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         from urllib.parse import quote
         return RedirectResponse(f"/maintenance?error={quote(str(e))}", status_code=303)
     return RedirectResponse("/maintenance", status_code=303)
@@ -387,6 +403,8 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
         "partials/backups_summary.html",
         {
             "total_count": summary.total_count,
+            "healthy_count": summary.healthy_count,
+            "unusable_count": summary.unusable_count,
             "disk_gb": _humanize_gb(summary.disk_used_bytes),
             "last_human": last_human,
         },
@@ -407,11 +425,29 @@ async def api_backups_list(request: Request) -> HTMLResponse:
                     "label": r.label,
                     "created": r.created.strftime("%Y-%m-%d %H:%M UTC"),
                     "size_mb": round(r.size_bytes / (1024 * 1024)),
+                    "health": r.health,
+                    "health_detail": r.health_detail,
+                    "restorable": r.restorable,
                 }
                 for r in rows
             ],
         },
     )
+
+
+@app.get("/api/backups/download/{archive_name}")
+async def download_backup(archive_name: str) -> FileResponse:
+    if (
+        "/" in archive_name
+        or ".." in archive_name
+        or not archive_name.startswith("azerothcore-backup-")
+        or not archive_name.endswith(".tar.gz")
+    ):
+        raise HTTPException(status_code=400, detail="invalid archive name")
+    archive = Path(os.environ.get("AC_STACK_DIR", "/ac")) / "backups" / archive_name
+    if not archive.is_file():
+        raise HTTPException(status_code=404, detail="archive not found")
+    return FileResponse(archive, media_type="application/gzip", filename=archive.name)
 
 
 from sse_starlette.sse import EventSourceResponse
@@ -460,10 +496,10 @@ def _render_done(record: ActionRecord) -> str:
             )
         verify_html = f'<ul class="verify-failed">{"".join(items)}</ul>'
     return (
-        f'<div class="action-done action-{css}" data-status="{_esc(record.status)}">'
+        f'<li class="action-done action-{css}" data-status="{_esc(record.status)}">'
         f"action <b>{_esc(record.name)}</b> finished: <b>{_esc(record.status)}</b>"
         f"{verify_html}"
-        f"</div>"
+        f"</li>"
     )
 
 
@@ -557,7 +593,7 @@ async def post_restore(payload: RestorePayload):
 
 @app.post("/api/action/import-restore")
 async def post_import_restore(file: UploadFile = File(...)):
-    from app.services.actions import read_manifest, run_restore
+    from app.services.actions import validate_canonical_backup, run_restore
 
     if not (file.filename or "").endswith(".tar.gz"):
         raise HTTPException(400, "file must be a .tar.gz archive")
@@ -565,32 +601,45 @@ async def post_import_restore(file: UploadFile = File(...)):
     ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     backups_dir = ac_stack / "backups"
     stamp = int(dt.datetime.now().timestamp())
-    archive_name = f"azerothcore-backup-imported-{stamp}.tar.gz"
+    archive_name = f"azerothcore-backup-imported-{stamp}-{uuid.uuid4().hex}.tar.gz"
     dest = backups_dir / archive_name
+    staged = backups_dir / f".{archive_name}.upload"
 
     if file.size is not None and file.size > _MAX_IMPORT_BYTES:
         raise HTTPException(413, "uploaded archive exceeds the configured size limit")
     try:
         total = 0
         backups_dir.mkdir(parents=True, exist_ok=True)
-        with dest.open("wb") as out:
+        with staged.open("xb") as out:
             while chunk := await file.read(1024 * 1024):
                 total += len(chunk)
                 if total > _MAX_IMPORT_BYTES:
                     out.close()
-                    dest.unlink(missing_ok=True)
+                    staged.unlink(missing_ok=True)
                     raise HTTPException(413, "uploaded archive exceeds the configured size limit")
                 out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
     except OSError as e:
-        dest.unlink(missing_ok=True)
+        staged.unlink(missing_ok=True)
         raise HTTPException(500, f"could not save upload: {e}")
 
-    manifest = await asyncio.to_thread(read_manifest, dest)
-    if manifest is None or manifest.get("format_version") != 1:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(400, "invalid or unsupported archive — missing or incompatible manifest")
+    validation_error = await asyncio.to_thread(validate_canonical_backup, staged)
+    if validation_error is not None:
+        staged.unlink(missing_ok=True)
+        raise HTTPException(400, f"invalid restore archive — {validation_error}")
+    try:
+        os.replace(staged, dest)
+    except OSError as e:
+        staged.unlink(missing_ok=True)
+        raise HTTPException(500, f"could not publish upload: {e}")
 
-    record = _kick("restore", lambda cb: run_restore(archive_name, on_progress=cb))
+    try:
+        record = _kick("restore", lambda cb: run_restore(archive_name, on_progress=cb))
+    except HTTPException as e:
+        if e.status_code == 409:
+            dest.unlink(missing_ok=True)
+        raise
     return {"id": record.id, "status": "running"}
 
 
@@ -713,6 +762,8 @@ async def api_progression_characters(request: Request) -> HTMLResponse:
 @app.post("/api/progression/apply")
 async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
     cfg = progression_svc.config_from_resolved_keys(list_keys_resolved())
+    if not runner.try_acquire_mutation():
+        raise HTTPException(status_code=409, detail="another destructive action is already running")
     try:
         result = await asyncio.to_thread(progression_svc.apply_progression,
             guid=payload.guid,
@@ -723,6 +774,8 @@ async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        runner.release_mutation()
     return {
         "status": result.status,
         "target_state": result.target_state,
@@ -735,9 +788,9 @@ async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
+        request,
         "settings.html",
         {
-            "request": request,
             "title": "azerothcore-admin · settings",
         },
     )
@@ -817,6 +870,14 @@ async def apply_settings(payload: ApplyPayload):
     unknown = [k for k in payload.pending if k not in state.key_index]
     if unknown:
         raise HTTPException(400, f"unknown keys: {unknown}")
+
+    invalid = {
+        key: error
+        for key, value in payload.pending.items()
+        if (error := validate_value(state.key_index[key], value)) is not None
+    }
+    if invalid:
+        raise HTTPException(400, f"invalid setting values: {invalid}")
 
     # 4. Build the new env dict here (cheap, pure) so the runner action
     #    only has to do I/O. Resolve pending edits against the *current*

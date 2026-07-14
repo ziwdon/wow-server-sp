@@ -21,6 +21,9 @@ chmod +x scripts/*.sh
 # Adopt an existing install (verifies state before marking phases complete):
 ./scripts/install-azerothcore.sh --adopt
 
+# Explicitly permit capacity warnings in noninteractive automation:
+./scripts/install-azerothcore.sh --allow-capacity-warnings
+
 # List available phases:
 ./scripts/install-azerothcore.sh --help
 
@@ -111,14 +114,20 @@ Then re-run the installer to continue past this pause.
 ## Configuration Captured at Install Time
 
 The installer asks these questions up front and persists answers:
-- Server XP rate (x1, x2, x3, x5, x10, x15, x20, or custom per-category rates)
-- Playerbot count (default: 250)
+- Server XP rate (x1, x3, x5, or x7)
+- Playerbot count (default: 1500)
 - PvP enabled/disabled
 - Map update threads
 - GM account name and password
 - AH bot account name and password
 - Whether to install systemd auto-start
 - Whether to configure UFW firewall
+
+## Capacity Preflight
+
+Phase `0.0` measures free space on `/opt` and physical RAM. It fails below 25 GiB free on `/opt`, warns from 25 GiB through less than 50 GiB, and has no disk warning at 50 GiB or more. It also warns when the selected InnoDB buffer pool is greater than 50% of physical RAM.
+
+Interactive installs must acknowledge each warning. Noninteractive installs fail for either warning unless `--allow-capacity-warnings` is supplied explicitly. This flag is intentionally limited to capacity warnings; use it only after reviewing the target host's storage and RAM.
 
 ## Adopting an Existing Install
 

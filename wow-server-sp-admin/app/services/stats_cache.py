@@ -73,6 +73,7 @@ class StatsRefresher:
             if self.status == "refreshing":
                 return False
             self.status = "refreshing"
+            self.error = None
 
         thread = threading.Thread(target=self._run, args=(creds,), daemon=True)
         thread.start()

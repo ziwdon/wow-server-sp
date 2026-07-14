@@ -1,7 +1,34 @@
 // Selection state for the backup list + restore POST.
 window.selectedBackup = null;
 
+function clearActionLog() {
+  var log = document.getElementById('action-log');
+  if (log) log.innerHTML = '';
+}
+
+async function requestBackupAction(button, label, url, options) {
+  button.disabled = true;
+  try {
+    var result = await window.requestActionJson(url, options);
+    if (!result.ok) {
+      window.showActionFailure(label, result);
+      return null;
+    }
+    if (!result.data || !result.data.id) {
+      window.showActionFailure(label, {
+        message: 'The server accepted no action id. Refresh the page and try again.',
+      });
+      return null;
+    }
+    clearActionLog();
+    return result.data.id;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function selectBackup(li) {
+  if (li.dataset.restorable !== 'true') return;
   document.querySelectorAll('.backup-row').forEach(function (r) { r.classList.remove('selected'); });
   li.classList.add('selected');
   window.selectedBackup = li.dataset.archive;
@@ -14,13 +41,11 @@ document.addEventListener('DOMContentLoaded', function () {
   var btn = document.getElementById('restore-btn');
   if (!btn) return;
   var confirmMsg = btn.getAttribute('hx-confirm') || 'Restore this backup?';
-  btn.addEventListener('click', function (e) {
+  btn.addEventListener('click', async function (e) {
     e.preventDefault();
     if (!window.selectedBackup) return;
     if (!window.confirm(confirmMsg)) return;
-    var log = document.getElementById('action-log');
-    if (log) log.innerHTML = '';
-    fetch('/api/action/restore', {
+    await requestBackupAction(btn, 'Restore', '/api/action/restore', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ archive: window.selectedBackup }),
@@ -53,31 +78,33 @@ document.addEventListener('DOMContentLoaded', function () {
     fileInput.click();
   });
 
-  fileInput.addEventListener('change', function () {
+  fileInput.addEventListener('change', async function () {
     var file = fileInput.files[0];
     if (!file) return;
     if (!window.confirm(confirmMsg)) return;
-    var log = document.getElementById('action-log');
-    if (log) log.innerHTML = '';
     var formData = new FormData();
     formData.append('file', file);
-    fetch('/api/action/import-restore', { method: 'POST', body: formData })
-      .then(function (r) {
-        if (!r.ok) {
-          r.json().then(function (d) {
-            alert('Import failed: ' + (d.detail || 'unknown error'));
-          });
-        }
-      });
+    await requestBackupAction(importBtn, 'Import and restore', '/api/action/import-restore', {
+      method: 'POST', body: formData,
+    });
   });
 });
 
-// Clear the action log when Create backup fires; refresh the list when an action finishes.
-document.addEventListener('htmx:afterRequest', function (e) {
-  if (e.detail.elt && e.detail.elt.closest && e.detail.elt.closest('.action-bar')) {
-    var log = document.getElementById('action-log');
-    if (log) log.innerHTML = '';
-  }
+// A backup action follows the same acceptance rule as restore/import: don't
+// discard the active history until the server returns its new action id.
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('[data-action-endpoint]').forEach(function (button) {
+    button.addEventListener('click', async function () {
+      var confirmMsg = button.dataset.actionConfirm;
+      if (confirmMsg && !window.confirm(confirmMsg)) return;
+      await requestBackupAction(
+        button,
+        button.dataset.actionLabel,
+        button.dataset.actionEndpoint,
+        { method: 'POST' },
+      );
+    });
+  });
 });
 document.addEventListener('htmx:sseMessage', function (e) {
   if (e.detail && e.detail.type === 'done') {
