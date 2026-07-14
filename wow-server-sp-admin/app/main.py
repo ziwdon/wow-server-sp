@@ -392,7 +392,12 @@ def _humanize_gb(num_bytes: int) -> str:
 @app.get("/api/backups/summary", response_class=HTMLResponse)
 async def api_backups_summary(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    summary = backups_svc.backups_summary(backups_dir=ac / "backups")
+    error = None
+    try:
+        summary = backups_svc.backups_summary(backups_dir=ac / "backups")
+    except backups_svc.BackupListingError as exc:
+        error = str(exc)
+        summary = backups_svc.BackupsSummary(None, 0, 0)
     last_human = None
     if summary.last_backup_unix:
         last_human = dt.datetime.fromtimestamp(
@@ -403,10 +408,9 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
         "partials/backups_summary.html",
         {
             "total_count": summary.total_count,
-            "healthy_count": summary.healthy_count,
-            "unusable_count": summary.unusable_count,
             "disk_gb": _humanize_gb(summary.disk_used_bytes),
             "last_human": last_human,
+            "error": error,
         },
     )
 
@@ -414,7 +418,12 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
 @app.get("/api/backups/list", response_class=HTMLResponse)
 async def api_backups_list(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    rows = backups_svc.list_backups(backups_dir=ac / "backups")
+    error = None
+    try:
+        rows = backups_svc.list_backups(backups_dir=ac / "backups")
+    except backups_svc.BackupListingError as exc:
+        error = str(exc)
+        rows = []
     return templates.TemplateResponse(
         request,
         "partials/backups_list.html",
@@ -425,12 +434,10 @@ async def api_backups_list(request: Request) -> HTMLResponse:
                     "label": r.label,
                     "created": r.created.strftime("%Y-%m-%d %H:%M UTC"),
                     "size_mb": round(r.size_bytes / (1024 * 1024)),
-                    "health": r.health,
-                    "health_detail": r.health_detail,
-                    "restorable": r.restorable,
                 }
                 for r in rows
             ],
+            "error": error,
         },
     )
 

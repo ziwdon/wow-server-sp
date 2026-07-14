@@ -28,7 +28,6 @@ async function requestBackupAction(button, label, url, options) {
 }
 
 function selectBackup(li) {
-  if (li.dataset.restorable !== 'true') return;
   document.querySelectorAll('.backup-row').forEach(function (r) { r.classList.remove('selected'); });
   li.classList.add('selected');
   window.selectedBackup = li.dataset.archive;

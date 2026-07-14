@@ -173,6 +173,22 @@ def test_validate_canonical_backup_accepts_canonical_v2_archive(tmp_path):
     assert actions.validate_canonical_backup(archive) is None
 
 
+def test_validate_canonical_backup_never_extracts_archive(tmp_path, monkeypatch):
+    archive = _make_v2_archive(tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz")
+    monkeypatch.setattr(
+        tarfile.TarFile,
+        "extract",
+        lambda *_a, **_k: pytest.fail("archive member extracted"),
+    )
+    monkeypatch.setattr(
+        tarfile.TarFile,
+        "extractall",
+        lambda *_a, **_k: pytest.fail("archive extracted"),
+    )
+
+    assert actions.validate_canonical_backup(archive) is None
+
+
 @patch("app.services.actions.run_stop")
 @pytest.mark.parametrize(
     "format_values",

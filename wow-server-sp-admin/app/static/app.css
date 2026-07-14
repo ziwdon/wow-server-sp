@@ -730,20 +730,15 @@ pre.logview {
 }
 .backup-row:hover { background: var(--row-hover, rgba(255,255,255,0.04)); }
 .backup-row.selected { background: var(--row-selected, rgba(212,175,55,0.18)); }
-.backup-row[aria-disabled="true"] { cursor: not-allowed; opacity: 0.8; }
-.backup-row[aria-disabled="true"]:hover { background: transparent; }
 .backup-time { flex: 1; font-variant-numeric: tabular-nums; }
 .backup-size { color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.backup-health-detail { color: var(--red); font-size: 0.8rem; }
 .backup-download { color: var(--gold-bright); font-size: 0.85rem; }
 .backup-badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 4px; }
 .badge-daily { background: #2d4a63; }
 .badge-manual { background: #3a5a3a; }
 .badge-prerestore { background: #63482d; }
 .badge-preclear { background: #6a2d2d; }
-.badge-health-complete { background: #3a5a3a; }
-.badge-health-partial { background: #63482d; }
-.badge-health-corrupt { background: #6a2d2d; }
+.badge-available { background: #3a5a3a; }
 .backups-disclaimer {
   font-size: 0.8rem; color: var(--text-muted);
   padding: 0.75rem; border-top: 1px solid var(--border, #2a2a2a);

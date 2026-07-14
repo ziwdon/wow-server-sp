@@ -1,60 +1,20 @@
 import os
 import time
-import io
-import json
 import tarfile
 from pathlib import Path
 
-from app.services.backups import backup_status, backups_summary, list_backups
+import pytest
+
+from app.services.backups import (
+    BackupListingError,
+    backup_status,
+    backups_summary,
+    list_backups,
+)
 
 
 def _touch(p, size=10):
     p.write_bytes(b"x" * size)
-
-
-def _write_archive(path, *, skipped=(), valid=True, manifest=None):
-    """Create a small canonical v1 archive, optionally marked partial."""
-    with tarfile.open(path, "w:gz") as tf:
-        if manifest is None:
-            manifest = json.dumps({
-                "format_version": 1,
-                "databases": ["acore_auth", "acore_characters", "acore_world", "acore_playerbots"],
-                "skipped_databases": list(skipped),
-            }).encode()
-        info = tarfile.TarInfo("manifest.json")
-        info.size = len(manifest)
-        tf.addfile(info, io.BytesIO(manifest))
-        if valid:
-            for db in ("acore_auth", "acore_characters", "acore_world", "acore_playerbots"):
-                dump = b"-- Dump completed on 2026-07-11  3:00:01\n"
-                sql = tarfile.TarInfo(f"sql/{db}.sql")
-                sql.size = len(dump)
-                tf.addfile(sql, io.BytesIO(dump))
-
-
-def _write_v2_archive(path, *, sections, manifest=None):
-    dump = b"".join(
-        (
-            f"-- Current Database: `{database}`\n"
-            f"CREATE DATABASE `{database}`;\n"
-            f"USE `{database}`;\n"
-        ).encode()
-        for database in sections
-    ) + b"-- Dump completed on 2026-07-11 3:00:01\n"
-    with tarfile.open(path, "w:gz") as tf:
-        if manifest is None:
-            manifest = json.dumps({
-                "format_version": 2,
-                "databases": ["acore_auth", "acore_characters", "acore_world", "acore_playerbots"],
-                "skipped_databases": [],
-                "dump_layout": "single-multi-database",
-            }).encode()
-        info = tarfile.TarInfo("manifest.json")
-        info.size = len(manifest)
-        tf.addfile(info, io.BytesIO(manifest))
-        info = tarfile.TarInfo("sql/azerothcore.sql")
-        info.size = len(dump)
-        tf.addfile(info, io.BytesIO(dump))
 
 
 def test_returns_none_when_no_backups(tmp_path):
@@ -151,99 +111,42 @@ def test_backups_summary(tmp_path):
     assert s.last_backup_unix is not None
 
 
-def test_list_backups_exposes_complete_partial_and_corrupt_health(tmp_path):
-    b = tmp_path / "backups"
-    b.mkdir()
-    _write_archive(b / "azerothcore-backup-manual-complete.tar.gz")
-    _write_archive(
-        b / "azerothcore-backup-manual-partial.tar.gz",
-        skipped=("acore_world",),
+def test_list_and_summary_never_open_or_validate_archives(tmp_path, monkeypatch):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    archive = backups / "azerothcore-backup-manual-corrupt.tar.gz"
+    archive.write_bytes(b"not a gzip archive")
+    monkeypatch.setattr(tarfile, "open", lambda *_a, **_k: pytest.fail("archive opened"))
+    monkeypatch.setattr(
+        "app.services.actions.validate_canonical_backup",
+        lambda *_a, **_k: pytest.fail("archive validated"),
     )
-    (b / "azerothcore-backup-manual-corrupt.tar.gz").write_bytes(b"not a gzip archive")
+    real_exists = Path.exists
 
-    rows = {row.filename: row for row in list_backups(backups_dir=b)}
+    def fail_listing_exists(path):
+        if path == backups:
+            pytest.fail("directory existence probed")
+        return real_exists(path)
 
-    assert rows["azerothcore-backup-manual-complete.tar.gz"].health == "complete"
-    assert rows["azerothcore-backup-manual-complete.tar.gz"].restorable is True
-    assert rows["azerothcore-backup-manual-partial.tar.gz"].health == "partial"
-    assert rows["azerothcore-backup-manual-partial.tar.gz"].restorable is False
-    assert "acore_world" in rows["azerothcore-backup-manual-partial.tar.gz"].health_detail
-    assert rows["azerothcore-backup-manual-corrupt.tar.gz"].health == "corrupt"
-    assert rows["azerothcore-backup-manual-corrupt.tar.gz"].restorable is False
+    monkeypatch.setattr(Path, "exists", fail_listing_exists)
 
+    [row] = list_backups(backups_dir=backups)
+    summary = backups_summary(backups_dir=backups)
 
-def test_list_backups_marks_noncanonical_v2_streams_unrestorable(tmp_path):
-    b = tmp_path / "backups"
-    b.mkdir()
-    expected = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
-    for suffix, sections in (
-        ("missing", expected[:-1]),
-        ("extra", (*expected, "unexpected_schema")),
-        ("reordered", (expected[1], expected[0], *expected[2:])),
-    ):
-        _write_v2_archive(
-            b / f"azerothcore-backup-manual-{suffix}.tar.gz",
-            sections=sections,
-        )
-
-    rows = list_backups(backups_dir=b)
-
-    assert len(rows) == 3
-    assert all(row.health == "corrupt" and not row.restorable for row in rows)
-    assert all("database sections" in row.health_detail for row in rows)
+    assert row.filename == archive.name
+    assert row.size_bytes == len(b"not a gzip archive")
+    assert summary.total_count == 1
 
 
-def test_list_backups_marks_duplicate_manifest_keys_unrestorable(tmp_path):
-    b = tmp_path / "backups"
-    b.mkdir()
-    _write_v2_archive(
-        b / "azerothcore-backup-manual-duplicate.tar.gz",
-        sections=("acore_auth", "acore_characters", "acore_world", "acore_playerbots"),
-        manifest=(
-            b'{"format_version":99,"format_version":2,'
-            b'"databases":["acore_auth","acore_characters","acore_world","acore_playerbots"],'
-            b'"skipped_databases":[],"dump_layout":"single-multi-database"}'
-        ),
+def test_list_backups_wraps_directory_enumeration_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("permission denied: /secret/path")),
     )
 
-    [row] = list_backups(backups_dir=b)
-
-    assert row.health == "corrupt"
-    assert row.restorable is False
-    assert row.health_detail == "archive manifest is malformed"
-
-
-def test_list_backups_marks_duplicate_skipped_databases_corrupt_not_partial(tmp_path):
-    b = tmp_path / "backups"
-    b.mkdir()
-    _write_archive(
-        b / "azerothcore-backup-manual-duplicate-skipped.tar.gz",
-        manifest=(
-            b'{"format_version":1,'
-            b'"databases":["acore_auth","acore_characters","acore_world","acore_playerbots"],'
-            b'"skipped_databases":[],"skipped_databases":["acore_world"]}'
-        ),
-    )
-
-    [row] = list_backups(backups_dir=b)
-
-    assert row.health == "corrupt"
-    assert row.restorable is False
-    assert row.health_detail == "archive manifest is malformed"
-
-
-def test_summary_excludes_partial_and_corrupt_archives_from_healthy_count(tmp_path):
-    b = tmp_path / "backups"
-    b.mkdir()
-    _write_archive(b / "azerothcore-backup-manual-complete.tar.gz")
-    _write_archive(b / "azerothcore-backup-manual-partial.tar.gz", skipped=("acore_world",))
-    (b / "azerothcore-backup-manual-corrupt.tar.gz").write_bytes(b"not a gzip archive")
-
-    summary = backups_summary(backups_dir=b)
-
-    assert summary.total_count == 3
-    assert summary.healthy_count == 1
-    assert summary.unusable_count == 2
+    with pytest.raises(BackupListingError, match=r"^Could not read backup metadata\.$"):
+        list_backups(backups_dir=tmp_path)
 
 
 def test_list_backups_empty_dir(tmp_path):
