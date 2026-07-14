@@ -56,6 +56,76 @@ test('HTMX polling swaps every server status in the status matrix', async ({ pag
   }
 });
 
+test('incident links activate and focus App Events and refresh preserves the tab', async ({ page }) => {
+  await page.goto('/?source=stats&app_event=EVT-BROWSER#logs');
+
+  const logs = page.locator('#logs');
+  const appEventsTab = logs.getByRole('tab', { name: 'App Events' });
+  const incident = logs.locator('[data-incident-id="EVT-BROWSER"]');
+  await expect(appEventsTab).toHaveClass(/active/);
+  await expect(appEventsTab).toHaveAttribute('aria-selected', 'true');
+  await expect(incident).toBeVisible();
+  await expect(incident).toBeFocused();
+  await expect(page).toHaveURL(/\?source=stats#logs$/);
+
+  await logs.getByRole('button', { name: 'Refresh' }).click();
+  await expect(appEventsTab).toHaveClass(/active/);
+  await expect(logs.locator('#app-events-log')).toBeVisible();
+});
+
+test('refresh keeps a user-selected log tab after a successful incident deep-link', async ({ page }) => {
+  await page.goto('/?app_event=EVT-BROWSER#logs');
+
+  const logs = page.locator('#logs');
+  await expect(logs.locator('[data-incident-id="EVT-BROWSER"]')).toBeFocused();
+  const playerbotsTab = logs.getByRole('tab', { name: 'Playerbots.log' });
+  await playerbotsTab.click();
+  await logs.getByRole('button', { name: 'Refresh' }).click();
+
+  await expect(playerbotsTab).toHaveClass(/active/);
+  await expect(playerbotsTab).toHaveAttribute('aria-selected', 'true');
+  await expect(logs.locator('#playerbots-log')).toBeVisible();
+  await expect(logs.locator('#app-events-log')).toBeHidden();
+});
+
+test('Logs tabs use scoped roving focus and arrow, Home, and End navigation', async ({ page }) => {
+  await page.goto('/#logs');
+
+  const logs = page.locator('#logs');
+  const tabs = logs.getByRole('tab');
+  const serverTab = logs.getByRole('tab', { name: 'Server.log' });
+  const playerbotsTab = logs.getByRole('tab', { name: 'Playerbots.log' });
+  const appEventsTab = logs.getByRole('tab', { name: 'App Events' });
+  await expect(tabs).toHaveCount(4);
+  await expect(serverTab).toHaveAttribute('tabindex', '0');
+  await expect(playerbotsTab).toHaveAttribute('tabindex', '-1');
+
+  await serverTab.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(playerbotsTab).toBeFocused();
+  await expect(playerbotsTab).toHaveAttribute('aria-selected', 'true');
+  await expect(serverTab).toHaveAttribute('tabindex', '-1');
+  await expect(playerbotsTab).toHaveAttribute('tabindex', '0');
+
+  await page.keyboard.press('End');
+  await expect(appEventsTab).toBeFocused();
+  await expect(appEventsTab).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Home');
+  await expect(serverTab).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(appEventsTab).toBeFocused();
+});
+
+test('App Events severity filters hide warnings and retain errors', async ({ page }) => {
+  await page.goto('/#logs');
+  await page.getByRole('tab', { name: 'App Events' }).click();
+  await page.getByRole('button', { name: 'Errors', exact: true }).click();
+
+  await expect(page.locator('[data-event-severity="warning"]')).toBeHidden();
+  await expect(page.locator('[data-event-severity="error"]')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Errors', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
 for (const action of ['apply', 'rollback']) {
   test(`${action} waits for real SSE progress before a successful redirect`, async ({ page }) => {
     await page.goto('/settings');

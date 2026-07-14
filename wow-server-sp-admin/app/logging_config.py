@@ -15,7 +15,15 @@ class JSONFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
-        for key in ("action_id", "step", "target", "duration_ms", "outcome"):
+        for key in (
+            "action_id",
+            "step",
+            "target",
+            "duration_ms",
+            "outcome",
+            "incident_id",
+            "component",
+        ):
             if key in record.__dict__:
                 payload[key] = record.__dict__[key]
         return json.dumps(payload)

@@ -14,7 +14,7 @@ class OnlineCounts:
 
 
 QUERY = """
-SELECT
+SELECT /*+ MAX_EXECUTION_TIME(2000) */
     COUNT(DISTINCT CASE WHEN a.username NOT LIKE 'RNDBOT%%' AND c.latency > 0 THEN a.id ELSE NULL END) AS real_players,
     SUM(CASE WHEN a.username LIKE 'RNDBOT%%' THEN 1 ELSE 0 END) AS bots
 FROM acore_characters.characters c
@@ -30,7 +30,6 @@ def count_online(*, host: str, port: int, user: str, password: str) -> OnlineCou
         user=user,
         password=password,
         connection_timeout=2,
-        read_timeout=2,
         autocommit=True,
     )
     try:

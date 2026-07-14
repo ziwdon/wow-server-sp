@@ -76,7 +76,30 @@ const server = createServer(async (request, response) => {
       status = candidate;
       return json(response, { status });
     }
-    if (['/api/stats', '/api/players', '/api/backups', '/api/logs'].includes(pathname)) {
+    if (pathname === '/api/logs') {
+      return send(response, 200, `
+        <div class="panel-header"><span class="panel-title">Logs</span><button class="btn btn-sm" onclick="refreshLogsPreservingTab()">Refresh</button></div>
+        <div class="log-tabs" role="tablist" aria-label="Log sources">
+          <button id="server-log-tab" class="log-tab active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="server-log" onclick="switchLog(this, 'server-log')">Server.log</button>
+          <button id="playerbots-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="playerbots-log" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
+          <button id="errors-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="errors-log" onclick="switchLog(this, 'errors-log')">Errors.log</button>
+          <button id="app-events-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="app-events-log" onclick="switchLog(this, 'app-events-log')">App Events</button>
+        </div>
+        <div class="log-errors-bar clean">No runtime errors</div>
+        <pre id="server-log" class="logview" role="tabpanel" aria-labelledby="server-log-tab">fixture server log</pre>
+        <pre id="playerbots-log" class="logview" role="tabpanel" aria-labelledby="playerbots-log-tab" style="display:none">fixture playerbots log</pre>
+        <pre id="errors-log" class="logview" role="tabpanel" aria-labelledby="errors-log-tab" style="display:none">fixture errors log</pre>
+        <div id="app-events-log" class="logview app-events-log" role="tabpanel" aria-labelledby="app-events-log-tab" style="display:none">
+          <div class="app-event-filters" aria-label="Filter app events">
+            <button class="app-event-filter active" aria-pressed="true" onclick="filterAppEvents(this, 'all')">All</button>
+            <button class="app-event-filter" aria-pressed="false" onclick="filterAppEvents(this, 'warning')">Warnings</button>
+            <button class="app-event-filter" aria-pressed="false" onclick="filterAppEvents(this, 'error')">Errors</button>
+          </div>
+          <article class="app-event-row" tabindex="-1" data-incident-id="EVT-WARNING" data-event-severity="warning">Fixture warning</article>
+          <article class="app-event-row" tabindex="-1" data-incident-id="EVT-BROWSER" data-event-severity="error">Fixture error</article>
+        </div>`);
+    }
+    if (['/api/stats', '/api/players', '/api/backups'].includes(pathname)) {
       return send(response, 200, '<div class="stat-card"><div class="stat-label">Fixture data</div></div>');
     }
     if (['/api/settings/apply', '/api/settings/rollback'].includes(pathname) && request.method === 'POST') {

@@ -58,27 +58,31 @@ def test_backups_summary_endpoint(client):
     r = client.get("/api/backups/summary")
     assert r.status_code == 200
     assert "Last Backup" in r.text
-    assert "Usable Backups" in r.text
+    assert "Available Backups" in r.text
     assert "Disk Used" in r.text
 
 
-def test_backups_list_renders_rows_and_disclaimer(client, tmp_path):
+def test_backups_endpoints_list_matching_non_tar_as_available(client, tmp_path):
     archive = tmp_path / "backups" / "azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"
-    _write_archive(archive)
+    archive.write_bytes(b"not a gzip archive")
     # The list now shows the archive's real write time (mtime), not the filename
     # stamp. Pin a known mtime so the rendered time is deterministic.
     when = dt.datetime(2026, 5, 29, 14, 3, 10, tzinfo=dt.timezone.utc).timestamp()
     os.utime(archive, (when, when))
 
-    r = client.get("/api/backups/list")
+    summary = client.get("/api/backups/summary")
+    listing = client.get("/api/backups/list")
 
-    assert r.status_code == 200
-    assert 'class="backup-row backup-complete"' in r.text
-    assert 'data-archive="azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"' in r.text
-    assert "2026-05-29 14:03 UTC" in r.text
-    assert "Manual" in r.text
-    assert "Backups are automatically deleted after 7 days" in r.text
-    assert "configuration secrets" in r.text
+    assert summary.status_code == 200
+    assert listing.status_code == 200
+    assert "Available" in summary.text
+    assert "Available" in listing.text
+    assert 'class="backup-row backup-available"' in listing.text
+    assert 'data-archive="azerothcore-backup-manual-2026-05-29T14-03-10.tar.gz"' in listing.text
+    assert "2026-05-29 14:03 UTC" in listing.text
+    assert "Manual" in listing.text
+    assert "Backups are automatically deleted after 7 days" in listing.text
+    assert "configuration secrets" in listing.text
 
 
 def _write_archive(path, *, skipped=()):
@@ -98,7 +102,7 @@ def _write_archive(path, *, skipped=()):
             tf.addfile(sql, io.BytesIO(dump))
 
 
-def test_backups_list_disables_unsafe_restore_but_keeps_downloads(client, tmp_path):
+def test_backups_list_makes_every_matching_archive_selectable(client, tmp_path):
     backups = tmp_path / "backups"
     _write_archive(backups / "azerothcore-backup-manual-complete.tar.gz")
     _write_archive(backups / "azerothcore-backup-manual-partial.tar.gz", skipped=("acore_world",))
@@ -106,15 +110,37 @@ def test_backups_list_disables_unsafe_restore_but_keeps_downloads(client, tmp_pa
 
     response = client.get("/api/backups/list")
 
-    assert 'data-restorable="true"' in response.text
-    assert 'data-restorable="false"' in response.text
-    assert "Partial" in response.text
-    assert "Corrupt" in response.text
-    assert "not restorable" in response.text
+    assert response.text.count('class="backup-row backup-available"') == 3
+    assert response.text.count('role="button"') == 3
+    assert "data-restorable" not in response.text
+    assert response.text.count("Available") == 3
     assert response.text.count("/api/backups/download/") == 3
     download = client.get("/api/backups/download/azerothcore-backup-manual-partial.tar.gz")
     assert download.status_code == 200
     assert download.content
+
+
+def test_backups_metadata_errors_are_safe_in_both_fragments(client, tmp_path):
+    archive = tmp_path / "backups" / "azerothcore-backup-manual-secret.tar.gz"
+    archive.symlink_to(tmp_path / "secret" / "missing.tar.gz")
+
+    for endpoint in ("/api/backups/summary", "/api/backups/list"):
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        assert "Could not read backup metadata." in response.text
+        assert "/secret/path" not in response.text
+
+
+def test_backups_enumeration_errors_are_safe_in_both_fragments(client, tmp_path):
+    backups = tmp_path / "backups"
+    backups.rmdir()
+    backups.write_text("not a directory")
+
+    for endpoint in ("/api/backups/summary", "/api/backups/list"):
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        assert "Could not read backup metadata." in response.text
+        assert "/secret/path" not in response.text
 
 
 def test_restore_rejects_bad_filename(client):

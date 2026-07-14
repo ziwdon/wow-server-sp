@@ -2,10 +2,11 @@
   <span class="panel-title">Logs</span>
   <button class="btn btn-sm" onclick="refreshLogsPreservingTab()">Refresh</button>
 </div>
-<div class="log-tabs">
-  <button class="log-tab active" onclick="switchLog(this, 'server-log')">Server.log</button>
-  <button class="log-tab" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
-  <button class="log-tab{% if errors_size > 0 %} log-tab-dirty{% endif %}" onclick="switchLog(this, 'errors-log')">Errors.log</button>
+<div class="log-tabs" role="tablist" aria-label="Log sources">
+  <button id="server-log-tab" class="log-tab active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="server-log" onclick="switchLog(this, 'server-log')">Server.log</button>
+  <button id="playerbots-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="playerbots-log" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
+  <button id="errors-log-tab" class="log-tab{% if errors_size > 0 %} log-tab-dirty{% endif %}" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="errors-log" onclick="switchLog(this, 'errors-log')">Errors.log</button>
+  <button id="app-events-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="app-events-log" onclick="switchLog(this, 'app-events-log')">App Events</button>
 </div>
 <div class="log-errors-bar {% if errors_size == 0 %}clean{% else %}dirty{% endif %}">
   <span class="errors-dot"></span>
@@ -15,6 +16,35 @@
   ✘ Runtime errors detected — see Errors.log tab
   {% endif %}
 </div>
-<pre id="server-log" class="logview">{{ server_lines|join('\n') }}</pre>
-<pre id="playerbots-log" class="logview" style="display:none">{{ pb_lines|join('\n') }}</pre>
-<pre id="errors-log" class="logview" style="display:none">{{ errors_lines|join('\n') }}</pre>
+<pre id="server-log" class="logview" role="tabpanel" aria-labelledby="server-log-tab">{{ server_lines|join('\n') }}</pre>
+<pre id="playerbots-log" class="logview" role="tabpanel" aria-labelledby="playerbots-log-tab" style="display:none">{{ pb_lines|join('\n') }}</pre>
+<pre id="errors-log" class="logview" role="tabpanel" aria-labelledby="errors-log-tab" style="display:none">{{ errors_lines|join('\n') }}</pre>
+<div id="app-events-log" class="logview app-events-log" role="tabpanel" aria-labelledby="app-events-log-tab" style="display:none">
+  <div class="app-events-toolbar">
+    <span>Recent sanitized events since the last app restart</span>
+    <div class="app-event-filters" role="group" aria-label="Filter app events by severity">
+      <button class="app-event-filter active" type="button" aria-pressed="true" onclick="filterAppEvents(this, 'all')">All</button>
+      <button class="app-event-filter" type="button" aria-pressed="false" onclick="filterAppEvents(this, 'warning')">Warnings</button>
+      <button class="app-event-filter" type="button" aria-pressed="false" onclick="filterAppEvents(this, 'error')">Errors</button>
+    </div>
+  </div>
+  <div class="app-event-list">
+    {% for event in app_events %}
+    <article class="app-event-row app-event-{{ event.severity }}" tabindex="-1" data-incident-id="{{ event.incident_id }}" data-event-severity="{{ event.severity }}">
+      <div class="app-event-heading">
+        <span class="app-event-severity">{{ event.severity }}</span>
+        <span class="app-event-component">{{ event.component }}</span>
+        <code>{{ event.incident_id }}</code>
+        <span>{{ event.occurrences }} occurrence{% if event.occurrences != 1 %}s{% endif %}</span>
+      </div>
+      <p>{{ event.summary }}</p>
+      <div class="app-event-times">
+        <span>First seen {{ event.first_seen }}</span>
+        <span>Last seen {{ event.last_seen }}</span>
+      </div>
+    </article>
+    {% else %}
+    <p class="empty-state">No recent app events.</p>
+    {% endfor %}
+  </div>
+</div>

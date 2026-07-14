@@ -1,11 +1,8 @@
-import json
-import io
 import os
 import shlex
 import shutil
 import stat
 import subprocess
-import tarfile
 from pathlib import Path
 
 import pytest
@@ -13,7 +10,6 @@ import pytest
 
 SCRIPTS_DIR = Path("/src") if Path("/src/verify-azerothcore.sh").is_file() else Path(__file__).resolve().parents[1]
 VERIFY_SH = SCRIPTS_DIR / "verify-azerothcore.sh"
-DBS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
 
 
 def _executable(path: Path, body: str) -> None:
@@ -94,49 +90,6 @@ def _assert_complete_summary(result: subprocess.CompletedProcess[str]) -> None:
     assert reported == counted
 
 
-def _complete_archive(path: Path, *, skipped=(), footer=True) -> Path:
-    stage = path.parent / "archive-stage"
-    (stage / "sql").mkdir(parents=True)
-    for db in DBS:
-        body = "-- SQL dump\n"
-        if footer:
-            body += "-- Dump completed on 2026-07-12 00:00:00\n"
-        (stage / "sql" / f"{db}.sql").write_text(body)
-    (stage / "manifest.json").write_text(json.dumps({
-        "format_version": 1, "databases": list(DBS), "skipped_databases": list(skipped),
-    }))
-    with tarfile.open(path, "w:gz") as tf:
-        tf.add(stage / "manifest.json", arcname="manifest.json")
-        tf.add(stage / "sql", arcname="sql")
-    return path
-
-
-def _complete_v2_archive(path: Path, *, sections=DBS, manifest=None, dump_prefix="") -> Path:
-    dump = dump_prefix + "".join(
-        f"-- Current Database: `{database}`\n"
-        f"CREATE DATABASE `{database}`;\n"
-        f"USE `{database}`;\n"
-        for database in sections
-    ) + "-- Dump completed on 2026-07-12 00:00:00\n"
-    if manifest is None:
-        manifest = json.dumps({
-            "format_version": 2,
-            "databases": list(DBS),
-            "skipped_databases": [],
-            "dump_layout": "single-multi-database",
-        })
-    manifest = manifest.encode() if isinstance(manifest, str) else manifest
-    with tarfile.open(path, "w:gz") as tf:
-        info = tarfile.TarInfo("manifest.json")
-        info.size = len(manifest)
-        tf.addfile(info, io.BytesIO(manifest))
-        sql = dump.encode()
-        info = tarfile.TarInfo("sql/azerothcore.sql")
-        info.size = len(sql)
-        tf.addfile(info, io.BytesIO(sql))
-    return path
-
-
 def test_missing_required_env_key_reports_failure_and_summary(tmp_path):
     stack = _stack(tmp_path)
     stack.joinpath(".env").write_text("DOCKER_DB_ROOT_PASSWORD=test\n")
@@ -185,153 +138,33 @@ def test_running_worldserver_without_current_boot_readiness_fails(tmp_path):
     _assert_complete_summary(result)
 
 
-def test_backup_requires_fresh_complete_readable_v1_archive(tmp_path):
-    stack = _stack(tmp_path)
-    backup = _complete_archive(stack / "backups" / "azerothcore-backup-manual-2026-07-12T00-00-00.tar.gz")
-    result = _run(stack, _stubs(tmp_path))
+@pytest.mark.parametrize("backup_setup", ["missing_dir", "empty", "corrupt"])
+def test_general_verification_does_not_read_or_require_backup_archives(tmp_path, backup_setup):
+    control_stack = _stack(tmp_path / "control")
+    control = _run(control_stack, _stubs(tmp_path / "control"))
 
-    assert "fresh complete canonical archive" in result.stdout
-    _assert_complete_summary(result)
+    stack = _stack(tmp_path / "case")
+    if backup_setup == "missing_dir":
+        shutil.rmtree(stack / "backups")
+    elif backup_setup == "corrupt":
+        (stack / "backups" / "azerothcore-backup-daily-corrupt.tar.gz").write_bytes(b"not gzip")
 
-    # A valid but stale archive and corrupt/partial alternatives cannot provide
-    # recovery evidence.
-    old = 1
-    os.utime(backup, (old, old))
-    (stack / "backups" / "azerothcore-backup-daily-partial-2026-07-12.tar.gz").write_bytes(b"not a tar")
-    stale = _run(stack, _stubs(tmp_path))
-    assert stale.returncode == 1
-    assert "no fresh complete canonical archive" in stale.stdout
-    _assert_complete_summary(stale)
-
-
-def test_backup_accepts_fresh_canonical_v2_archive(tmp_path):
-    stack = _stack(tmp_path)
-    _complete_v2_archive(
-        stack / "backups" / "azerothcore-backup-manual-2026-07-12T00-00-00.tar.gz",
-    )
-
-    result = _run(stack, _stubs(tmp_path))
-
-    assert "1 fresh complete canonical archive" in result.stdout
-    _assert_complete_summary(result)
-
-
-def test_backup_verification_uses_one_fresh_archive_without_tar_or_stale_scan(tmp_path):
-    stack = _stack(tmp_path)
-    fresh = _complete_archive(
-        stack / "backups" / "azerothcore-backup-daily-2026-07-12T00-00-00.tar.gz",
-    )
-    shutil.rmtree(stack / "backups" / "archive-stage")
-    stale = _complete_archive(
-        stack / "backups" / "azerothcore-backup-daily-2026-07-01T00-00-00.tar.gz",
-    )
-    os.utime(stale, (1, 1))
-    bind = _stubs(tmp_path)
+    bind = _stubs(tmp_path / "case")
     python_log = tmp_path / "python.log"
-    tar_log = tmp_path / "tar.log"
     real_python = shutil.which("python3")
-    real_tar = shutil.which("tar")
-    assert real_python and real_tar
+    assert real_python
     (bind / "python3").unlink()
-    (bind / "tar").unlink()
     _executable(
         bind / "python3",
         f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VERIFY_PYTHON_LOG\"\nexec {real_python} \"$@\"\n",
     )
-    _executable(
-        bind / "tar",
-        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VERIFY_TAR_LOG\"\nexec {real_tar} \"$@\"\n",
-    )
 
-    result = _run(
-        stack,
-        bind,
-        VERIFY_PYTHON_LOG=str(python_log),
-        VERIFY_TAR_LOG=str(tar_log),
-    )
+    result = _run(stack, bind, VERIFY_PYTHON_LOG=str(python_log))
 
-    assert "Backups directory has 1 fresh complete canonical archive" in result.stdout
-    assert str(fresh) in python_log.read_text()
-    assert str(stale) not in python_log.read_text()
-    assert not tar_log.exists() or not tar_log.read_text()
-    _assert_complete_summary(result)
-
-
-def test_partial_or_arbitrary_backup_does_not_count(tmp_path):
-    stack = _stack(tmp_path)
-    _complete_archive(
-        stack / "backups" / "azerothcore-backup-daily-partial-2026-07-12.tar.gz",
-        skipped=("acore_world",),
-    )
-    (stack / "backups" / "notes.txt").write_text("not a backup")
-    result = _run(stack, _stubs(tmp_path))
-
-    assert result.returncode == 1
-    assert "no fresh complete canonical archive" in result.stdout
-    _assert_complete_summary(result)
-
-
-def test_v2_backups_with_noncanonical_stream_sections_do_not_count(tmp_path):
-    for sections in (
-        DBS[:-1],
-        (*DBS, "unexpected_schema"),
-        (DBS[1], DBS[0], *DBS[2:]),
-    ):
-        stack = _stack(tmp_path / "-".join(sections))
-        _complete_v2_archive(
-            stack / "backups" / "azerothcore-backup-manual-2026-07-12T00-00-00.tar.gz",
-            sections=sections,
-        )
-
-        result = _run(stack, _stubs(stack.parent))
-
-        assert result.returncode == 1
-        assert "no fresh complete canonical archive" in result.stdout, result.stdout
-        _assert_complete_summary(result)
-
-
-@pytest.mark.parametrize(
-    "format_values",
-    [(2, 99), (99, 2)],
-    ids=["canonical-then-conflicting", "conflicting-then-canonical"],
-)
-def test_v2_backup_with_conflicting_manifest_keys_does_not_count(tmp_path, format_values):
-    stack = _stack(tmp_path)
-    _complete_v2_archive(
-        stack / "backups" / "azerothcore-backup-manual-2026-07-12T00-00-00.tar.gz",
-        manifest=(
-            f'{{"format_version":{format_values[0]},"format_version":{format_values[1]},'
-            '"databases":["acore_auth","acore_characters","acore_world","acore_playerbots"],'
-            '"skipped_databases":[],"dump_layout":"single-multi-database"}'
-        ),
-    )
-
-    result = _run(stack, _stubs(tmp_path))
-
-    assert "no fresh complete canonical archive" in result.stdout
-    _assert_complete_summary(result)
-
-
-@pytest.mark.parametrize(
-    "malformed_marker",
-    [
-        "-- Current Database: acore_auth\n",
-        "-- Current Database: `acore_auth` trailing\n",
-    ],
-    ids=["missing-backticks", "trailing-content"],
-)
-def test_v2_backup_with_malformed_marker_prefixed_record_does_not_count(
-    tmp_path, malformed_marker,
-):
-    stack = _stack(tmp_path)
-    _complete_v2_archive(
-        stack / "backups" / "azerothcore-backup-manual-2026-07-12T00-00-00.tar.gz",
-        dump_prefix=malformed_marker,
-    )
-
-    result = _run(stack, _stubs(tmp_path))
-
-    assert "no fresh complete canonical archive" in result.stdout
+    assert result.returncode == control.returncode
+    assert result.stdout.count("[FAIL]") == control.stdout.count("[FAIL]")
+    assert "fresh complete canonical archive" not in result.stdout
+    assert not python_log.exists() or str(stack / "backups") not in python_log.read_text()
     _assert_complete_summary(result)
 
 

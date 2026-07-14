@@ -22,6 +22,7 @@ import re
 import uuid
 
 from app.services import backups as backups_svc
+from app.services import app_events
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
@@ -267,15 +268,26 @@ async def api_stats_refresh() -> dict:
 @app.get("/api/players", response_class=HTMLResponse)
 async def api_players(request: Request) -> HTMLResponse:
     counts = None
+    context = {"counts": counts}
     try:
         creds = db_credentials()
         counts = await asyncio.to_thread(db_stats.count_online, **creds)
-    except Exception:  # noqa: BLE001 — DB may be down; UI surfaces None
-        counts = None
+        context["counts"] = counts
+    except Exception as exc:  # noqa: BLE001 — DB may be down; UI surfaces an incident
+        try:
+            event = app_events.record_exception(
+                log,
+                "database_stats",
+                "Database statistics could not be loaded.",
+                exc,
+            )
+            context["incident_id"] = event.incident_id
+        except Exception:  # noqa: BLE001 — event recording and logging are best-effort
+            pass
     return templates.TemplateResponse(
         request,
         "partials/players.html",
-        {"counts": counts},
+        context,
     )
 
 
@@ -283,6 +295,22 @@ async def api_players(request: Request) -> HTMLResponse:
 async def api_logs(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     logs_dir = ac / "logs"
+    recent_events = [
+        {
+            "incident_id": event.incident_id,
+            "first_seen": event.first_seen.astimezone(dt.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            ),
+            "last_seen": event.last_seen.astimezone(dt.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            ),
+            "severity": event.severity,
+            "component": event.component,
+            "summary": event.summary,
+            "occurrences": event.occurrences,
+        }
+        for event in app_events.events.snapshot()
+    ]
     return templates.TemplateResponse(
         request,
         "partials/logs.html",
@@ -291,6 +319,7 @@ async def api_logs(request: Request) -> HTMLResponse:
             "errors_lines": logs_svc.tail_filtered(logs_dir / "Errors.log", n=40),
             "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=40),
             "pb_lines": logs_svc.tail_filtered(logs_dir / "Playerbots.log", n=40),
+            "app_events": recent_events,
         },
     )
 
@@ -392,7 +421,12 @@ def _humanize_gb(num_bytes: int) -> str:
 @app.get("/api/backups/summary", response_class=HTMLResponse)
 async def api_backups_summary(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    summary = backups_svc.backups_summary(backups_dir=ac / "backups")
+    error = None
+    try:
+        summary = backups_svc.backups_summary(backups_dir=ac / "backups")
+    except backups_svc.BackupListingError as exc:
+        error = str(exc)
+        summary = backups_svc.BackupsSummary(None, 0, 0)
     last_human = None
     if summary.last_backup_unix:
         last_human = dt.datetime.fromtimestamp(
@@ -403,10 +437,9 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
         "partials/backups_summary.html",
         {
             "total_count": summary.total_count,
-            "healthy_count": summary.healthy_count,
-            "unusable_count": summary.unusable_count,
             "disk_gb": _humanize_gb(summary.disk_used_bytes),
             "last_human": last_human,
+            "error": error,
         },
     )
 
@@ -414,7 +447,12 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
 @app.get("/api/backups/list", response_class=HTMLResponse)
 async def api_backups_list(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    rows = backups_svc.list_backups(backups_dir=ac / "backups")
+    error = None
+    try:
+        rows = backups_svc.list_backups(backups_dir=ac / "backups")
+    except backups_svc.BackupListingError as exc:
+        error = str(exc)
+        rows = []
     return templates.TemplateResponse(
         request,
         "partials/backups_list.html",
@@ -425,12 +463,10 @@ async def api_backups_list(request: Request) -> HTMLResponse:
                     "label": r.label,
                     "created": r.created.strftime("%Y-%m-%d %H:%M UTC"),
                     "size_mb": round(r.size_bytes / (1024 * 1024)),
-                    "health": r.health,
-                    "health_detail": r.health_detail,
-                    "restorable": r.restorable,
                 }
                 for r in rows
             ],
+            "error": error,
         },
     )
 
