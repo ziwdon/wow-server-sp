@@ -22,33 +22,44 @@ def _isolated_script(tmp_path: Path, *, stack: Path, state: Path, config: Path, 
     }
     source = (SCRIPTS / "uninstall-azerothcore.sh").read_text()
     for pattern, replacement in replacements.items():
-        source, count = re.subn(pattern, replacement, source, count=1, flags=re.MULTILINE)
-        assert count == 1, pattern
+        # Count the true number of matches first: re.subn(..., count=1) caps its
+        # own return value at 1, so it can never prove "not more than one" on
+        # its own -- a second matching line would silently survive unrewritten.
+        total_matches = len(re.findall(pattern, source, flags=re.MULTILINE))
+        assert total_matches == 1, pattern
+        source = re.sub(pattern, replacement, source, count=1, flags=re.MULTILINE)
     script = tmp_path / "uninstall-azerothcore.sh"
     script.write_text(source)
     return script
 
 
-def _dangerous_stubs(tmp_path: Path, *, fail_systemctl: bool = False) -> Path:
+def _dangerous_stubs(tmp_path: Path, *, fail_systemctl: bool = False, fail_compose: bool = True) -> Path:
     bind = tmp_path / "bin"
     bind.mkdir()
-    _exe(bind / "docker", """#!/bin/sh
+    compose_exit = 42 if fail_compose else 0
+    _exe(bind / "docker", f"""#!/bin/sh
 echo "$@" >> "$TEST_ROOT/docker.calls"
 [ "$1" = info ] && exit 0
 if [ "$1" = compose ] && [ "$2" = version ]; then exit 0; fi
-if [ "$1" = compose ]; then exit 42; fi
+if [ "$1" = compose ]; then exit {compose_exit}; fi
 exit 0
 """)
     _exe(bind / "systemctl", f"#!/bin/sh\necho \"$@\" >> \"$TEST_ROOT/systemctl.calls\"\nexit {42 if fail_systemctl else 0}\n")
+    # /tmp/ac-build.log is a fixed, hardcoded literal in safe_remove_literal's
+    # own case statement (not one of the env-controlled paths this task closes
+    # off) -- the script always attempts to remove it on a full run. It sits
+    # outside $TEST_ROOT by construction, so it is allow-listed here too,
+    # alongside the $TEST_ROOT/* containment check that guards everything else.
     _exe(bind / "rm", """#!/bin/sh
 echo "$@" >> "$TEST_ROOT/rm.calls"
 for arg in "$@"; do
-  case "$arg" in -*) continue ;; "$TEST_ROOT"/*) ;; *) echo "unsafe rm: $arg" >&2; exit 97 ;; esac
+  case "$arg" in -*) continue ;; "$TEST_ROOT"/*) ;; /tmp/ac-build.log) ;; *) echo "unsafe rm: $arg" >&2; exit 97 ;; esac
 done
 exec /bin/rm "$@"
 """)
     _exe(bind / "crontab", "#!/bin/sh\necho \"$@\" >> \"$TEST_ROOT/crontab.calls\"\nexit 1\n")
     _exe(bind / "sudo", """#!/bin/sh
+echo "$@" >> "$TEST_ROOT/sudo.calls"
 [ "$1" = -v ] && exit 0
 case "$1" in systemctl|rm) exec "$@" ;; *) exit 98 ;; esac
 """)
@@ -125,6 +136,56 @@ def test_uninstall_aborts_before_docker_when_systemd_disable_fails(tmp_path):
     assert "info" in docker_calls
     assert "compose" not in docker_calls
     assert " rm " not in docker_calls
+
+
+def test_uninstall_removes_stack_via_guarded_sudo_removal_on_full_success(tmp_path):
+    stack = tmp_path / "stack"
+    stack.mkdir()
+    (stack / "docker-compose.yml").write_text("services: {}\n")
+    (stack / "marker.txt").write_text("stack contents\n")
+    state = tmp_path / "state"
+    state.write_text("phase=4\n")
+    config = tmp_path / "config"
+    config.write_text("secret\n")
+    unit = tmp_path / "azerothcore.service"
+    unit.write_text("[Unit]\n")
+    if os.geteuid() == 0:
+        # The sudo stub never actually escalates privilege (it just execs the
+        # same-uid rm stub), and _run_isolated drops the child to uid 65534
+        # when the test runner itself is root. For a genuine full-success run
+        # that really deletes these paths, that unprivileged uid needs real
+        # write access -- matching this file's prior root-mode chmod pattern.
+        stack.chmod(0o777)
+        for f in stack.iterdir():
+            f.chmod(0o666)
+    bind = _dangerous_stubs(tmp_path, fail_compose=False)
+    script = _isolated_script(
+        tmp_path, stack=stack, state=state, config=config, unit=unit,
+    )
+
+    result = _run_isolated(script, bind, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+    # The guarded, sudo-threaded stack removal (safe_remove_literal "$STACK_DIR"
+    # sudo) actually ran and actually removed the isolated stack directory --
+    # not just a mock assertion, since the rm stub would exit 97 on any path
+    # outside $TEST_ROOT and fail the run above.
+    assert not stack.exists()
+    assert not state.exists()
+    assert not config.exists()
+    assert not unit.exists()
+
+    sudo_calls = (tmp_path / "sudo.calls").read_text()
+    assert f"rm -rf -- {stack}" in sudo_calls
+    assert f"rm -f {unit}" in sudo_calls
+
+    # The unprivileged removals (state/config) must NOT have gone through sudo.
+    assert f"rm -rf -- {state}" not in sudo_calls
+    assert f"rm -rf -- {config}" not in sudo_calls
+    rm_calls = (tmp_path / "rm.calls").read_text()
+    assert f"-rf -- {state}" in rm_calls
+    assert f"-rf -- {config}" in rm_calls
 
 
 def test_no_stack_dir_env_override_seam():
