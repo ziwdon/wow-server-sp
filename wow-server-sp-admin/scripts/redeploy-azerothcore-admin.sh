@@ -10,12 +10,18 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore-admin}"
 VERIFY_SCRIPT="${VERIFY_SCRIPT:-${SCRIPT_DIR}/verify-azerothcore-admin.sh}"
-CANDIDATE_IMAGE="azerothcore-admin:redeploy-$(date -u +%Y%m%dT%H%M%SZ)"
+CANDIDATE_IMAGE=""
 STAGE_DIR=""
 PREVIOUS_COMPOSE=""
 
 cleanup() {
-    [ -n "$STAGE_DIR" ] && rm -rf "$STAGE_DIR"
+    # An if-statement (not "[ ... ] && rm ...") is required here: the EXIT
+    # trap's own exit status can clobber an explicit `exit N` set earlier in
+    # the script, and "[ -n "" ] && ..." leaves a false (1) status when
+    # STAGE_DIR is still empty (e.g. an early exit before staging begins).
+    if [ -n "$STAGE_DIR" ]; then
+        rm -rf "$STAGE_DIR"
+    fi
 }
 trap cleanup EXIT
 trap 'echo "Redeploy failed at line $LINENO." >&2' ERR
@@ -31,6 +37,16 @@ for f in docker-compose.yml .env build; do
         exit 1
     fi
 done
+
+# Serialize redeploys: a second concurrent invocation must not collide on the
+# candidate image tag or interleave with an in-progress rollback.
+exec 9>"${STACK_DIR}/.redeploy.lock"
+if ! flock -n 9; then
+    echo "ERROR: another admin redeploy is already running." >&2
+    exit 75
+fi
+
+CANDIDATE_IMAGE="azerothcore-admin:redeploy-$(date -u +%Y%m%dT%H%M%SZ)"
 
 wait_for_healthy() {
     local timeout=60 elapsed=0 health
@@ -134,6 +150,14 @@ if ! "$VERIFY_SCRIPT"; then
     rollback || true
     exit 1
 fi
+
+echo "==> Promoting verified candidate to azerothcore-admin:local..."
+if ! docker image tag "$CANDIDATE_IMAGE" azerothcore-admin:local; then
+    rollback || true
+    exit 1
+fi
+docker image rm "$CANDIDATE_IMAGE" >/dev/null 2>&1 || \
+    echo "WARNING: could not remove temporary candidate tag $CANDIDATE_IMAGE" >&2
 
 echo ""
 TAILSCALE_IP=""

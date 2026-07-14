@@ -8,6 +8,7 @@ fixtures never point at /opt, /etc, the host Docker daemon, or a live crontab.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -68,7 +69,13 @@ def _root_redeploy_fixture(tmp_path: Path, *, initialized: bool = False) -> tupl
         "      : > \"$REDEPLOY_SERVER_LOG\"\n"
         "      printf '%b' \"${REDEPLOY_NEW_BOOT_LOG:-}\" > \"$REDEPLOY_SERVER_LOG\"\n"
         "    fi ;;\n"
-        "  'inspect -f') echo running ;;\n"
+        "  'inspect -f')\n"
+        "    case \"$3\" in\n"
+        "      *StartedAt*) echo 2026-07-14T12:00:00Z ;;\n"
+        "      *) echo running ;;\n"
+        "    esac ;;\n"
+        "  'logs --since')\n"
+        "    if [ -n \"${REDEPLOY_SERVER_LOG:-}\" ] && [ -f \"$REDEPLOY_SERVER_LOG\" ]; then cat \"$REDEPLOY_SERVER_LOG\"; fi ;;\n"
         "esac\n",
     )
     _executable(bindir / "sleep", "#!/bin/sh\nexit 0\n")
@@ -219,20 +226,21 @@ def _root_uninstall_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Pat
     )
     source = UNINSTALL.read_text()
     assert root_guard in source
+    # STACK_DIR/STATE_FILE/CONFIG_FILE/SYSTEMD_UNIT are immutable `readonly`
+    # production constants (no environment override seam -- see F03/Task 3),
+    # so hermetic isolation rewrites their declaration lines directly, the
+    # same technique test_uninstaller_script.py's _isolated_script uses.
+    # safe_remove_literal's case statement matches these variables, not
+    # hardcoded literals, so it needs no separate rewrite.
+    for var, value in (("STACK_DIR", stack), ("STATE_FILE", state), ("CONFIG_FILE", config)):
+        pattern = re.compile(rf'^readonly {var}=.*$', re.MULTILINE)
+        assert pattern.search(source), var
+        source = pattern.sub(f"readonly {var}={shlex.quote(str(value))}", source, count=1)
     systemd_assignment = 'SYSTEMD_UNIT="/etc/systemd/system/azerothcore.service"'
     assert systemd_assignment in source
     source = source.replace(
         systemd_assignment,
         f"SYSTEMD_UNIT={shlex.quote(str(tmp_path / 'azerothcore.service'))}",
-        1,
-    )
-    original_safe_paths = (
-        '    /opt/stacks/azerothcore|"${HOME}/.azerothcore-install-state"|"${HOME}/.azerothcore-install-config"|/tmp/ac-build.log)\n'
-    )
-    assert original_safe_paths in source
-    source = source.replace(
-        original_safe_paths,
-        f"    {shlex.quote(str(stack))}|{shlex.quote(str(state))}|{shlex.quote(str(config))}|/tmp/ac-build.log)\n",
         1,
     )
     temp_root = tmp_path / "installer-tmp"; temp_root.mkdir()
@@ -245,7 +253,7 @@ def _root_uninstall_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Pat
         ("/tmp/ac-build.log", str(temp_root / "ac-build.log")),
     ):
         source = source.replace(original, replacement)
-    cleanup_step = "# 7) Remove known temporary files created by installer validation/build logging,\n"
+    cleanup_step = "# 8) Remove known temporary files created by installer validation/build logging,\n"
     assert cleanup_step in source
     source = source.replace(cleanup_step, "exit 0 # fixture never touches host temporary cleanup globs\n", 1)
     script = tmp_path / "uninstall.sh"; _executable(script, source.replace(root_guard, "", 1))
@@ -254,7 +262,10 @@ def _root_uninstall_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Pat
         "#!/bin/sh\n"
         "[ -z \"${SUDO_CALL_LOG:-}\" ] || printf '%s\\n' \"$*\" >> \"$SUDO_CALL_LOG\"\n"
         "[ \"${1:-}\" = -v ] && exit 0\n"
-        "if [ \"${1:-}\" = rm ] && [ \"${2:-}\" = -rf ] && [ \"${3:-}\" = \"${SAFE_STACK:-}\" ]; then\n"
+        # safe_remove_literal calls `sudo rm -rf -- \"$path\"` (with a `--`
+        # separator, shifting the path to $4); accept that form as well as a
+        # bare `rm -rf $path` for robustness against either call shape.
+        "if [ \"${1:-}\" = rm ] && [ \"${2:-}\" = -rf ] && { [ \"${3:-}\" = \"${SAFE_STACK:-}\" ] || { [ \"${3:-}\" = -- ] && [ \"${4:-}\" = \"${SAFE_STACK:-}\" ]; }; }; then\n"
         "  exec /bin/rm -rf -- \"$SAFE_STACK\"\n"
         "fi\n"
         "echo \"fixture sudo refused unsafe command: $*\" >&2\nexit 99\n",

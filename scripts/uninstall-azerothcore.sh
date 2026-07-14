@@ -17,10 +17,10 @@
 
 set -euo pipefail
 
-STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore}"
-STATE_FILE="${STATE_FILE:-${HOME}/.azerothcore-install-state}"
-CONFIG_FILE="${CONFIG_FILE:-${HOME}/.azerothcore-install-config}"
-SYSTEMD_UNIT="/etc/systemd/system/azerothcore.service"
+readonly STACK_DIR="/opt/stacks/azerothcore"
+readonly STATE_FILE="${HOME}/.azerothcore-install-state"
+readonly CONFIG_FILE="${HOME}/.azerothcore-install-config"
+readonly SYSTEMD_UNIT="/etc/systemd/system/azerothcore.service"
 COMPOSE_PROJECT="azerothcore"
 CRON_BACKUP_PATH="/opt/stacks/azerothcore/backup.sh"
 KNOWN_CONTAINERS=(
@@ -59,6 +59,7 @@ has_recovery_context() {
 
 preserve_recovery_context_and_exit() {
   echo "Uninstall incomplete. Recovery context was preserved at $STACK_DIR and $STATE_FILE." >&2
+  echo "The systemd unit file was preserved; re-enable it after Docker recovery if service management is needed." >&2
   echo "Fix Docker availability/resource errors, then re-run ./scripts/uninstall-azerothcore.sh --yes." >&2
   exit 1
 }
@@ -131,15 +132,16 @@ run_bash() {
 
 safe_remove_literal() {
   local path="$1"
+  local use_sudo="${2:-no}"
   case "$path" in
-    /opt/stacks/azerothcore|"${HOME}/.azerothcore-install-state"|"${HOME}/.azerothcore-install-config"|/tmp/ac-build.log)
-      run rm -rf -- "$path"
-      ;;
-    *)
-      echo "Refusing to remove unexpected path: $path" >&2
-      exit 1
-      ;;
+    "$STACK_DIR"|"$STATE_FILE"|"$CONFIG_FILE"|/tmp/ac-build.log) ;;
+    *) echo "Refusing to remove unexpected path: $path" >&2; exit 1 ;;
   esac
+  if [ "$use_sudo" = sudo ]; then
+    run sudo rm -rf -- "$path"
+  else
+    run rm -rf -- "$path"
+  fi
 }
 
 safe_remove_glob() {
@@ -212,23 +214,26 @@ if [ "$DRY_RUN" != true ]; then
   sudo -v
 fi
 
-# 1) Stop/disable/remove optional systemd unit first, so it cannot restart the stack.
+# 1) Stop/disable optional systemd unit first, so it cannot restart the stack
+#    mid-teardown. The unit FILE itself is intentionally left in place until
+#    Docker/Compose cleanup below has succeeded, so a failed teardown can
+#    still be retried via systemctl without losing the recovery context.
 echo ""
-echo "[1/7] Removing optional systemd unit if present..."
+echo "[1/8] Stopping/disabling optional systemd unit if present..."
 if [ -f "$SYSTEMD_UNIT" ]; then
-  run sudo systemctl disable --now azerothcore.service || true
-  run sudo rm -f "$SYSTEMD_UNIT"
-  run sudo systemctl daemon-reload
-  run sudo systemctl reset-failed azerothcore.service || true
+  if ! run sudo systemctl disable --now azerothcore.service; then
+    record_cleanup_failure "Could not stop/disable the azerothcore.service systemd unit; preserving stack and installer state."
+    preserve_recovery_context_and_exit
+  fi
 else
   echo "No azerothcore.service unit found."
 fi
 
 # 2) Bring down compose stack when possible, including named volumes.
 #    Use -v to drop project-scoped named volumes; bind mounts under STACK_DIR
-#    are untouched by -v and are removed with the stack directory in step 6.
+#    are untouched by -v and are removed with the stack directory in step 7.
 echo ""
-echo "[2/7] Bringing down Docker compose stack if possible..."
+echo "[2/8] Bringing down Docker compose stack if possible..."
 if [ -d "$STACK_DIR" ] && { [ -f "$STACK_DIR/docker-compose.yml" ] || [ -f "$STACK_DIR/compose.yml" ]; }; then
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     if [ "$DRY_RUN" = true ]; then
@@ -250,7 +255,7 @@ fi
 #    isn't in our hard-coded KNOWN_NETWORKS list, without using --remove-orphans
 #    (which could touch unrelated containers sharing the project name).
 echo ""
-echo "[3/7] Removing leftover containers, networks, and named volumes..."
+echo "[3/8] Removing leftover containers, networks, and named volumes..."
 if [ "$CLEANUP_FAILED" = true ] && [ "$DRY_RUN" != true ]; then
   preserve_recovery_context_and_exit
 fi
@@ -293,11 +298,23 @@ if [ "$CLEANUP_FAILED" = true ] && [ "$DRY_RUN" != true ]; then
   preserve_recovery_context_and_exit
 fi
 
-# 4) Remove locally-built AzerothCore images. Honors a custom DOCKER_IMAGE_TAG
+# 4) Compose/fallback Docker cleanup has now succeeded (or was skipped in
+#    dry-run), so it is safe to remove the systemd unit file itself.
+echo ""
+echo "[4/8] Removing systemd unit file now that Docker cleanup has succeeded..."
+if [ -f "$SYSTEMD_UNIT" ]; then
+  run sudo rm -f "$SYSTEMD_UNIT"
+  run sudo systemctl daemon-reload
+  run sudo systemctl reset-failed azerothcore.service || true
+else
+  echo "No azerothcore.service unit file to remove."
+fi
+
+# 5) Remove locally-built AzerothCore images. Honors a custom DOCKER_IMAGE_TAG
 #    from the stack's .env when present; otherwise falls back to the install
 #    script's default tag (playerbot-local).
 echo ""
-echo "[4/7] Removing locally-built AzerothCore Docker images..."
+echo "[5/8] Removing locally-built AzerothCore Docker images..."
 if command -v docker >/dev/null 2>&1; then
   IMAGE_TAG="playerbot-local"
   if [ -r "${STACK_DIR}/.env" ]; then
@@ -317,9 +334,9 @@ else
   echo "Docker command not found; skipping image cleanup."
 fi
 
-# 5) Remove backup cron lines for current user.
+# 6) Remove backup cron lines for current user.
 echo ""
-echo "[5/7] Removing matching backup cron entries from current user's crontab..."
+echo "[6/8] Removing matching backup cron entries from current user's crontab..."
 if crontab -l >/tmp/azerothcore-cron-before.$$ 2>/dev/null; then
   if grep -Fq "$CRON_BACKUP_PATH" /tmp/azerothcore-cron-before.$$; then
     grep -Fv "$CRON_BACKUP_PATH" /tmp/azerothcore-cron-before.$$ > /tmp/azerothcore-cron-after.$$ || true
@@ -342,22 +359,21 @@ else
   echo "No crontab found for current user."
 fi
 
-# 6) Remove stack directory and installer state files.
+# 7) Remove stack directory and installer state files.
 echo ""
-echo "[6/7] Removing stack directory and installer state files..."
-if [ -d "$STACK_DIR" ]; then
-  run sudo rm -rf "$STACK_DIR"
-else
+echo "[7/8] Removing stack directory and installer state files..."
+if [ ! -d "$STACK_DIR" ]; then
   echo "Stack directory already absent: $STACK_DIR"
 fi
+safe_remove_literal "$STACK_DIR" sudo
 safe_remove_literal "$STATE_FILE"
 safe_remove_literal "$CONFIG_FILE"
 
-# 7) Remove known temporary files created by installer validation/build logging,
+# 8) Remove known temporary files created by installer validation/build logging,
 #    plus any stale temp clone left behind by an interrupted Phase 1.
 #    The clone dir sits under /opt/stacks/ and is owned by root, so use sudo.
 echo ""
-echo "[7/7] Removing known temporary installer files..."
+echo "[8/8] Removing known temporary installer files..."
 safe_remove_glob "/tmp/azerothcore-install-*.log"
 safe_remove_glob "/tmp/ac-compose-effective.*.yml"
 safe_remove_glob "/tmp/ac-xp-rate-overrides.*"

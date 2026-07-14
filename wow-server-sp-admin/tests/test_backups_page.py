@@ -151,3 +151,15 @@ def test_restore_rejects_bad_filename(client):
 def test_restore_rejects_missing_archive_field(client):
     r = client.post("/api/action/restore", json={})
     assert r.status_code == 422
+
+
+def test_backup_download_rejects_symlink_outside_backup_directory(client, tmp_path):
+    outside = tmp_path / "outside.tar.gz"
+    outside.write_bytes(b"database-secret")
+    link = tmp_path / "backups" / "azerothcore-backup-manual-link.tar.gz"
+    link.symlink_to(outside)
+
+    response = client.get(f"/api/backups/download/{link.name}")
+
+    assert response.status_code == 404
+    assert b"database-secret" not in response.content

@@ -37,18 +37,33 @@ if [ "$1" = compose ]; then
     exit 0
 fi
 if [ "$1" = inspect ]; then
+    case "$*" in
+        *StartedAt*)
+            echo "2026-07-14T12:00:00Z"
+            exit 0
+            ;;
+    esac
     if [ "${REDEPLOY_TEST_STATUS:-running}" = crash ]; then
         if [ -f "$REDEPLOY_TEST_STATE" ]; then echo exited; else : > "$REDEPLOY_TEST_STATE"; echo running; fi
     else
         echo "${REDEPLOY_TEST_STATUS:-running}"
     fi
+    exit 0
+fi
+if [ "$1" = logs ]; then
+    if [ "${REDEPLOY_TEST_CURRENT_LOG_READY:-0}" = "1" ]; then
+        echo "WORLD: World Initialized"
+    fi
+    exit 0
 fi
 """)
     _executable(bind / "sleep", "#!/bin/sh\nexit 0\n")
     return bind
 
 
-def _run(stack: Path, bind: Path, *, status="running") -> subprocess.CompletedProcess[str]:
+def _run(
+    stack: Path, bind: Path, *, status="running", current_log_ready=False
+) -> subprocess.CompletedProcess[str]:
     if os.geteuid() == 0:
         for p in stack.parents:
             if p == Path("/") or p == Path("/tmp"):
@@ -72,6 +87,7 @@ def _run(stack: Path, bind: Path, *, status="running") -> subprocess.CompletedPr
             "WORLD_INIT_TIMEOUT": "1",
             "REDEPLOY_TEST_STATUS": status,
             "REDEPLOY_TEST_STATE": str(bind / "inspect-state"),
+            "REDEPLOY_TEST_CURRENT_LOG_READY": "1" if current_log_ready else "0",
         },
         capture_output=True,
         text=True,
@@ -79,11 +95,23 @@ def _run(stack: Path, bind: Path, *, status="running") -> subprocess.CompletedPr
     )
 
 
-def test_redeploy_succeeds_only_after_current_boot_initialization(tmp_path):
-    result = _run(_stack(tmp_path, initialized=True), _stubs(tmp_path))
+def test_redeploy_rejects_stale_host_log_without_current_container_marker(tmp_path):
+    result = _run(
+        _stack(tmp_path, initialized=True),
+        _stubs(tmp_path),
+        current_log_ready=False,
+    )
+    assert result.returncode == 1
+    assert "did not observe 'World Initialized'" in result.stderr
 
+
+def test_redeploy_accepts_current_container_initialization_marker(tmp_path):
+    result = _run(
+        _stack(tmp_path, initialized=True),
+        _stubs(tmp_path),
+        current_log_ready=True,
+    )
     assert result.returncode == 0, result.stderr
-    assert "World Initialized — worldserver is up." in result.stdout
 
 
 def test_redeploy_fails_when_running_worldserver_never_initializes(tmp_path):

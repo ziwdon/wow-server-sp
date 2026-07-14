@@ -8,7 +8,7 @@ import time
 import app.main as main
 from app.main import _format_started_at, _render_done, _render_progress
 from app.services.runner import ActionRecord
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app
 from app.services.app_events import AppEvent
@@ -82,6 +82,23 @@ def test_api_backups_timestamp_includes_utc():
         resp = client.get("/api/backups")
     assert resp.status_code == 200
     assert "UTC" in resp.text
+
+
+def test_api_backups_offloads_status_collection(tmp_path, monkeypatch):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    import app.main as main
+    with patch.object(
+        main.asyncio,
+        "to_thread",
+        new=AsyncMock(return_value=BackupStatus(None, None)),
+    ) as offload:
+        response = TestClient(main.app).get("/api/backups")
+    assert response.status_code == 200
+    offload.assert_awaited_once_with(
+        main.backups_svc.backup_status,
+        backups_dir=tmp_path / "backups",
+        log_path=tmp_path / "logs" / "backup.log",
+    )
 
 
 def test_api_logs_requests_forty_lines():
@@ -323,6 +340,52 @@ def test_api_progression_apply_rejects_while_an_action_is_running():
     assert resp.status_code == 409
     acquire.assert_called_once_with()
     apply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_progression_cancellation_holds_reservation_until_worker_finishes(monkeypatch):
+    import app.main as main
+    from app.services.progression import ApplyProgressionResult, ProgressionConfig
+    from app.services.runner import ActionRunner
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    runner = ActionRunner()
+    monkeypatch.setattr(main, "runner", runner)
+
+    def blocking_apply(**_kwargs):
+        worker_started.set()
+        release_worker.wait()
+        return ApplyProgressionResult("applied", 8, 8)
+
+    with patch.object(
+        main.progression_svc, "config_from_resolved_keys", return_value=ProgressionConfig(),
+    ), patch.object(main, "list_keys_resolved", return_value=[]), patch.object(
+        main, "db_credentials", return_value={
+            "host": "h", "port": 3306, "user": "u", "password": "p",
+        },
+    ), patch.object(main.progression_svc, "apply_progression", side_effect=blocking_apply):
+        request_task = asyncio.create_task(main.api_progression_apply(
+            main.ProgressionApplyPayload(guid=101, target_expansion="tbc")
+        ))
+        assert await asyncio.to_thread(worker_started.wait, 1)
+        cancelled = False
+        try:
+            request_task.cancel()
+            await asyncio.sleep(0)
+            acquired_early = runner.try_acquire_mutation()
+            if acquired_early:
+                runner.release_mutation()
+            assert acquired_early is False
+        finally:
+            release_worker.set()
+            try:
+                await request_task
+            except asyncio.CancelledError:
+                cancelled = True
+
+    assert cancelled is True
+    assert runner.try_acquire_mutation() is True
+    runner.release_mutation()
 
 
 def test_api_stats_refresh_returns_immediately():

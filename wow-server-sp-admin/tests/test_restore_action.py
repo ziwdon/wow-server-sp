@@ -1,3 +1,4 @@
+import fcntl
 import io
 import json
 import os
@@ -10,6 +11,18 @@ import pytest
 
 from app.services import actions
 from app.services.actions import ActionResult, KNOWN_DBS, SQL_FOOTER_TAIL_BYTES
+from app.services.compose_admin import validate_restored_overlay
+from app.services.config_index import KeyEntry
+
+INT_ENTRY = KeyEntry(
+    key="AiPlayerbot.MinRandomBots",
+    default="1000",
+    inferred_type="int",
+    comment="",
+    source_file="playerbots.conf.dist",
+    line_number=1,
+    env_var="AC_AI_PLAYERBOT_MIN_RANDOM_BOTS",
+)
 
 
 def _make_archive(
@@ -128,6 +141,113 @@ def _v2_dump_for_sections(sections: tuple[str, ...]) -> bytes:
     return body + b"-- Dump completed on 2026-07-11  3:00:01\n"
 
 
+@pytest.mark.parametrize("format_version", [True, 1.0])
+def test_validate_canonical_backup_rejects_non_integer_format_version(
+    tmp_path, format_version,
+):
+    manifest = json.dumps({
+        "format_version": format_version,
+        "databases": list(KNOWN_DBS),
+        "skipped_databases": [],
+    }).encode()
+    archive = _make_v2_archive(
+        tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", manifest=manifest,
+    )
+    assert "unsupported manifest format" in actions.validate_canonical_backup(archive)
+
+
+@pytest.mark.parametrize("databases", [True, 1, "acore_auth", {"acore_auth": 1}])
+def test_validate_canonical_backup_rejects_non_list_inventory(tmp_path, databases):
+    manifest = json.dumps({
+        "format_version": 2,
+        "databases": databases,
+        "skipped_databases": [],
+        "dump_layout": "single-multi-database",
+    }).encode()
+    archive = _make_v2_archive(
+        tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", manifest=manifest,
+    )
+    assert "canonical databases" in actions.validate_canonical_backup(archive)
+
+
+def test_validate_canonical_backup_rejects_oversized_manifest_before_read(tmp_path):
+    payload = b" " * (1024 ** 2 + 1)
+    archive = _make_v2_archive(
+        tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", manifest=payload,
+    )
+    assert "manifest" in actions.validate_canonical_backup(archive)
+    assert "size limit" in actions.validate_canonical_backup(archive)
+
+
+def test_validate_canonical_backup_rejects_oversized_admin_overlay(tmp_path):
+    archive = _make_v2_archive(
+        tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz",
+    )
+    _append_member(
+        archive,
+        "config/oversized-marker",
+        b"x",
+    )
+    # Rebuild with one unique oversized canonical overlay, not a duplicate member.
+    replacement = archive.with_name("replacement.tar.gz")
+    with tarfile.open(archive, "r:gz") as source, tarfile.open(replacement, "w:gz") as target:
+        for member in source:
+            if member.name == "config/docker-compose.admin.yml":
+                continue
+            target.addfile(member, source.extractfile(member) if member.isfile() else None)
+        payload = b"services: {}\n#" + b"x" * (1024 ** 2)
+        member = tarfile.TarInfo("config/docker-compose.admin.yml")
+        member.size = len(payload)
+        target.addfile(member, io.BytesIO(payload))
+    os.replace(replacement, archive)
+    assert "admin overlay" in actions.validate_canonical_backup(archive)
+    assert "size limit" in actions.validate_canonical_backup(archive)
+
+
+def test_restored_overlay_rejects_invalid_typed_and_empty_values(tmp_path):
+    path = tmp_path / "admin.yml"
+    entries = {INT_ENTRY.env_var: INT_ENTRY}
+    for value in ("not-an-int", ""):
+        path.write_text(
+            "services:\n  ac-worldserver:\n    environment:\n"
+            f"      {INT_ENTRY.env_var}: '{value}'\n"
+        )
+        assert "invalid value" in validate_restored_overlay(path, entries_by_env=entries)
+
+
+@patch("app.services.actions.run_stop")
+def test_run_restore_rejects_invalid_typed_overlay_before_stop(
+    mock_stop, tmp_path, monkeypatch,
+):
+    from app.services.compose_admin import validate_restored_overlay
+    from app.services.config_index import KeyEntry
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    entry = KeyEntry(
+        key="AiPlayerbot.MinRandomBots",
+        default="1000",
+        inferred_type="int",
+        comment="",
+        source_file="playerbots.conf.dist",
+        line_number=1,
+        env_var="AC_AI_PLAYERBOT_MIN_RANDOM_BOTS",
+    )
+    archive = _make_archive(
+        tmp_path / "backups",
+        "azerothcore-backup-manual-x.tar.gz",
+        admin_yml_text=(
+            "services:\n  ac-worldserver:\n    environment:\n"
+            "      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: not-an-int\n"
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.actions._validate_restored_admin_yml",
+        lambda path: validate_restored_overlay(path, entries_by_env={entry.env_var: entry}),
+    )
+    result = actions.run_restore(archive.name, on_progress=lambda *_: None)
+    assert result == ActionResult.ERROR
+    mock_stop.assert_not_called()
+
+
 def _make_archive_with_overlay_directory(backups: Path, name: str) -> Path:
     """Build an otherwise canonical v1 archive whose overlay path is a directory."""
     backups.mkdir(parents=True, exist_ok=True)
@@ -158,6 +278,25 @@ def test_run_restore_rejects_path_traversal(tmp_path, monkeypatch):
     monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
     r = actions.run_restore("../../etc/passwd", on_progress=lambda *a: None)
     assert r == ActionResult.ERROR
+
+
+@patch("app.services.actions.run_stop")
+def test_run_restore_rejects_backup_symlink_before_archive_open(
+    mock_stop, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    outside = tmp_path / "outside.tar.gz"
+    outside.write_bytes(b"not an archive")
+    link = backups / "azerothcore-backup-manual-link.tar.gz"
+    link.symlink_to(outside)
+
+    with patch("app.services.actions.tarfile.open", side_effect=AssertionError("archive opened")):
+        result = actions.run_restore(link.name, on_progress=lambda *_: None)
+
+    assert result == ActionResult.ERROR
+    mock_stop.assert_not_called()
 
 
 def test_run_restore_rejects_unknown_db_in_manifest(tmp_path, monkeypatch):
@@ -488,6 +627,40 @@ def test_run_restore_aborts_if_safety_backup_fails(
     r = actions.run_restore("azerothcore-backup-manual-x.tar.gz", on_progress=lambda *a: None)
     assert r == ActionResult.ERROR
     mock_start.assert_called_once()  # server brought back up after abort
+
+
+@patch("app.services.actions.run_start", return_value=ActionResult.OK)
+@patch("app.services.actions.run_stop", return_value=ActionResult.OK)
+@patch("app.services.backup.run_backup")
+@patch("app.services.actions.subprocess.run")
+def test_in_app_restore_refuses_backup_lock_before_database_mutation(
+    mock_run, mock_backup, mock_stop, mock_start, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    archive = _make_v2_archive(
+        tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz",
+    )
+    mock_backup.return_value = type(
+        "Result", (), {"ok": True, "archive": "safety.tar.gz", "output": ""}
+    )()
+    mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    progress = []
+    lock_path = archive.parent / ".backup.lock"
+    lock_path.touch()
+
+    with lock_path.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = actions.run_restore(
+            archive.name,
+            on_progress=lambda step, message: progress.append((step, message)),
+        )
+
+    assert result == ActionResult.ERROR
+    mock_stop.assert_called_once()
+    mock_backup.assert_called_once()
+    mock_run.assert_not_called()
+    mock_start.assert_called_once()
+    assert any("backup or restore is already running" in message for _, message in progress)
 
 
 @patch("app.services.actions.run_stop", return_value=ActionResult.OK)

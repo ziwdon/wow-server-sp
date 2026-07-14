@@ -7,6 +7,7 @@ HTTP route can stream updates via SSE.
 from __future__ import annotations
 
 import enum
+import fcntl
 import json
 import logging
 import os
@@ -17,12 +18,14 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import docker
 import docker.errors
 
+from app.services.backups import resolve_backup_archive
 from app.services.console import WorldserverConsole
 from app.services.docker_client import WORLDSERVER, inspect_worldserver
 from app.services.env_var import config_key_to_ac_env_var
@@ -36,7 +39,10 @@ V2_SECTION_LINE_MAX_BYTES = 4096
 MAX_EXPANDED_ARCHIVE_BYTES = 16 * 1024 ** 3
 MAX_ARCHIVE_MEMBER_COUNT = 10_000
 MAX_EXPANDED_MEMBER_BYTES = 8 * 1024 ** 3
+MAX_MANIFEST_BYTES = 1024 ** 2
+MAX_ADMIN_OVERLAY_BYTES = 1024 ** 2
 ADMIN_OVERLAY_ARCHIVE_MEMBER = "config/docker-compose.admin.yml"
+MANIFEST_ARCHIVE_MEMBER = "manifest.json"
 V2_CREATE_DATABASE_RE = re.compile(
     r"^\s*CREATE\s+DATABASE\b(?:(?!;).)*?`(?P<database>[^`]+)`(?:(?!;).)*?;",
     re.IGNORECASE | re.MULTILINE | re.DOTALL,
@@ -57,11 +63,39 @@ class ActionTimeout(RuntimeError):
     """A bounded external command exceeded its deadline."""
 
 
+class RestoreBusy(RuntimeError):
+    """The backup/restore mutation lock is already held by another run."""
+
+
 class ActionResult(str, enum.Enum):
     OK = "ok"
     TIMEOUT = "timeout"
     ALREADY = "already"
     ERROR = "error"
+
+
+@contextmanager
+def _backup_mutation_lock(backups_dir: Path):
+    """Serialize DB-mutating work against `scripts/backup.sh`'s own flock.
+
+    Both backup.sh and restore-azerothcore.sh take a non-blocking exclusive
+    flock on `${backups_dir}/.backup.lock` before touching the databases.
+    In-app restore must hold the SAME lock while it mutates, but only around
+    the mutation itself: create_backup() (the pre-restore safety backup)
+    shells out to the same backup.sh script, which acquires this lock
+    itself. Acquiring it any earlier here would make that safety backup's
+    own flock attempt fail against ourselves.
+    """
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    with (backups_dir / ".backup.lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RestoreBusy("backup or restore is already running") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _wait_for_status(target: str, timeout: int, on_progress: ProgressCb) -> bool:
@@ -109,14 +143,34 @@ def _load_strict_json(payload):
     return json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
 
 
+def _load_manifest_member(archive: tarfile.TarFile) -> dict:
+    """Read and parse manifest.json with its size bounded before any read.
+
+    The size check runs against member metadata (``TarInfo.size``) first, so
+    an oversized manifest is rejected without ever allocating a buffer for
+    it. ``read(MAX_MANIFEST_BYTES + 1)`` is a second, defense-in-depth bound
+    in case the header lied about size.
+    """
+    member = archive.getmember(MANIFEST_ARCHIVE_MEMBER)
+    if not member.isfile() or member.size > MAX_MANIFEST_BYTES:
+        raise ValueError("archive manifest exceeds its size limit")
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise ValueError("archive manifest cannot be read")
+    payload = stream.read(MAX_MANIFEST_BYTES + 1)
+    if len(payload) > MAX_MANIFEST_BYTES:
+        raise ValueError("archive manifest exceeds its size limit")
+    manifest = _load_strict_json(payload)
+    if not isinstance(manifest, dict):
+        raise ValueError("archive manifest must be an object")
+    return manifest
+
+
 def read_manifest(archive: Path) -> dict | None:
     """Extract and parse manifest.json from a backup archive; None on failure."""
     try:
         with tarfile.open(archive, "r:gz") as tf:
-            member = tf.extractfile("manifest.json")
-            if member is None:
-                return None
-            return _load_strict_json(member.read())
+            return _load_manifest_member(tf)
     except (tarfile.TarError, KeyError, OSError, UnicodeDecodeError, ValueError) as e:
         log.error("could not read manifest from %s: %s", archive, e)
         return None
@@ -183,23 +237,33 @@ def _validate_v2_sql_stream_inventory(sql_file) -> str | None:
 
 
 def _validate_archive_members(archive: tarfile.TarFile) -> str | None:
-    """Apply extraction limits and reject member types outside the format."""
+    """Apply extraction limits and reject member types outside the format.
+
+    manifest.json and the admin overlay get their own tight, type-specific
+    caps (checked from member metadata, before any read) instead of the
+    generic multi-GiB member cap -- both are read into memory whole
+    elsewhere, so their limit must be small enough to bound that allocation.
+    """
     total_size = 0
     # Iterate lazily so a member-heavy archive is rejected at the limit rather
     # than first materializing every header through getmembers().
     for member_count, member in enumerate(archive, start=1):
         if member_count > MAX_ARCHIVE_MEMBER_COUNT:
             return "archive has too many members"
-        if (
-            member.name.rstrip("/") == ADMIN_OVERLAY_ARCHIVE_MEMBER
-            and not member.isfile()
-        ):
+        normalized = member.name.rstrip("/")
+        if normalized == ADMIN_OVERLAY_ARCHIVE_MEMBER and not member.isfile():
             return "archive admin overlay is not a regular file"
         if member.isdir():
             continue
         if not member.isfile():
             return f"archive contains unsupported member type: {member.name}"
-        if member.size > MAX_EXPANDED_MEMBER_BYTES:
+        if normalized == MANIFEST_ARCHIVE_MEMBER:
+            if member.size > MAX_MANIFEST_BYTES:
+                return "archive manifest exceeds its size limit"
+        elif normalized == ADMIN_OVERLAY_ARCHIVE_MEMBER:
+            if member.size > MAX_ADMIN_OVERLAY_BYTES:
+                return "archive admin overlay exceeds its size limit"
+        elif member.size > MAX_EXPANDED_MEMBER_BYTES:
             return f"archive member exceeds the expanded-size limit: {member.name}"
         total_size += member.size
         if total_size > MAX_EXPANDED_ARCHIVE_BYTES:
@@ -214,21 +278,35 @@ def validate_canonical_backup(archive: Path) -> str | None:
             member_error = _validate_archive_members(tf)
             if member_error is not None:
                 return member_error
-            manifest_file = tf.extractfile("manifest.json")
-            if manifest_file is None:
-                return "archive is missing manifest.json"
             try:
-                manifest = _load_strict_json(manifest_file.read())
-            except (UnicodeDecodeError, ValueError):
+                manifest = _load_manifest_member(tf)
+            except KeyError:
+                return "archive is missing manifest.json"
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 return "archive manifest is malformed"
-            if not isinstance(manifest, dict) or manifest.get("format_version") not in (1, 2):
+            except ValueError as e:
+                # `_load_manifest_member`'s own bounded-read/shape errors carry
+                # a stable, specific message; anything else that reaches JSON
+                # decoding (e.g. duplicate-key rejection) is generic malformed
+                # input and should not leak parser internals to the caller.
+                message = str(e)
+                if message in {
+                    "archive manifest exceeds its size limit",
+                    "archive manifest cannot be read",
+                    "archive manifest must be an object",
+                }:
+                    return message
+                return "archive manifest is malformed"
+            format_version = manifest.get("format_version")
+            if type(format_version) is not int or format_version not in (1, 2):
                 return "archive has an unsupported manifest format"
-            if tuple(manifest.get("databases", ())) != KNOWN_DBS:
+            databases = manifest.get("databases")
+            if not isinstance(databases, list) or databases != list(KNOWN_DBS):
                 return "archive must contain exactly the four canonical databases"
             if manifest.get("skipped_databases") != []:
                 return "partial archives are not restorable"
 
-            if manifest["format_version"] == 2:
+            if format_version == 2:
                 if manifest.get("dump_layout") != "single-multi-database":
                     return "archive has an unsupported v2 dump layout"
                 try:
@@ -265,19 +343,19 @@ def validate_canonical_backup(archive: Path) -> str | None:
 
 
 def _validate_restored_admin_yml(admin_yml: Path) -> str | None:
-    """Validate archive overlay keys against the initialized admin key index."""
+    """Validate archive overlay keys+values against the admin key index."""
     from app.services.compose_admin import validate_restored_overlay
     from app.state import get_state
 
     try:
-        allowed_env_vars = {
-            entry.env_var for entry in get_state().key_index.values()
+        entries_by_env = {
+            entry.env_var: entry for entry in get_state().key_index.values()
         }
     except RuntimeError:
         # Direct action tests do not initialize the web-app singleton. An empty
         # overlay remains safe, while any setting must fail closed.
-        allowed_env_vars = set()
-    return validate_restored_overlay(admin_yml, allowed_env_vars=allowed_env_vars)
+        entries_by_env = {}
+    return validate_restored_overlay(admin_yml, entries_by_env=entries_by_env)
 
 
 def _import_db(db: str, sql_path: Path, password: str, on_progress: ProgressCb) -> bool:
@@ -527,18 +605,13 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
     ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     backups_dir = ac_stack / "backups"
 
-    # 1. Validate the filename (no traversal) + existence.
-    if (
-        "/" in archive_name
-        or ".." in archive_name
-        or not archive_name.startswith("azerothcore-backup-")
-        or not archive_name.endswith(".tar.gz")
-    ):
-        on_progress("validate", "invalid archive name")
-        return ActionResult.ERROR
-    archive = backups_dir / archive_name
-    if not archive.is_file():
-        on_progress("validate", "archive not found")
+    # 1. Resolve the archive name to a real on-disk path WITHOUT following a
+    # symlink, and confirm it lives inside backups_dir. This re-checks from
+    # scratch (rather than trusting any earlier route-level check) because
+    # this function can be reached independently of the HTTP route.
+    archive = resolve_backup_archive(backups_dir=backups_dir, archive_name=archive_name)
+    if archive is None:
+        on_progress("validate", "invalid or missing archive")
         return ActionResult.ERROR
 
     # 2. Validate the complete canonical archive before stopping worldserver.
@@ -546,8 +619,13 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
     if validation_error is not None:
         on_progress("validate", validation_error)
         return ActionResult.ERROR
+    # validate_canonical_backup already proved this manifest is well-formed
+    # and within bounds; re-read it through the same bounded loader rather
+    # than an unbounded extractfile().read() (this call site is easy to miss
+    # when auditing manifest reads -- it does not go through
+    # validate_canonical_backup's return path).
     with tarfile.open(archive, "r:gz") as tf:
-        manifest = _load_strict_json(tf.extractfile("manifest.json").read())
+        manifest = _load_manifest_member(tf)
     v2 = manifest["format_version"] == 2
     selected = list(KNOWN_DBS)
     on_progress("validate", f"will restore: {selected} ({'v2 consistent snapshot' if v2 else 'v1'})")
@@ -586,22 +664,41 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
             _restart_after_restore_failure(on_progress)
             return ActionResult.ERROR
         password = str(db_credentials()["password"])
-        if v2:
-            imported = _import_multi_database(stage / "sql" / "azerothcore.sql", password, on_progress)
-            if not imported:
-                on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
-                return ActionResult.ERROR
-        else:
-            for db in selected:
-                sql_path = stage / "sql" / f"{db}.sql"
-                if not _import_db(db, sql_path, password, on_progress):
+        # From here on we are mutating the databases: hold the same lock
+        # backup.sh/restore-azerothcore.sh take, so a concurrent host cron
+        # backup can't race the in-app restore. Acquired only now -- AFTER
+        # the safety backup above has already completed -- because that
+        # safety backup shells out to the same backup.sh, which takes this
+        # exact lock itself; grabbing it any earlier would make the safety
+        # backup fail against ourselves.
+        with _backup_mutation_lock(backups_dir):
+            if v2:
+                imported = _import_multi_database(stage / "sql" / "azerothcore.sql", password, on_progress)
+                if not imported:
                     on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
                     return ActionResult.ERROR
+            else:
+                for db in selected:
+                    sql_path = stage / "sql" / f"{db}.sql"
+                    if not _import_db(db, sql_path, password, on_progress):
+                        on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
+                        return ActionResult.ERROR
 
-        # 6. Restore admin.yml if present (the one config the admin may write).
-        if admin_yml.is_file():
-            on_progress("restore", "restoring docker-compose.admin.yml")
-            _restore_admin_yml(admin_yml, ac_stack)
+            # 6. Restore admin.yml if present (the one config the admin may write).
+            if admin_yml.is_file():
+                on_progress("restore", "restoring docker-compose.admin.yml")
+                _restore_admin_yml(admin_yml, ac_stack)
+
+            # 7. Start (still under the lock: the running worldserver is
+            # itself part of the mutation window until it's back up).
+            start = run_start(on_progress=on_progress)
+    except RestoreBusy:
+        on_progress(
+            "restore",
+            "backup or restore is already running; aborting and restarting",
+        )
+        _restart_after_restore_failure(on_progress)
+        return ActionResult.ERROR
     except ActionTimeout as e:
         log.warning("restore command timed out: %s", e)
         on_progress("restore", f"{e}; server remains stopped; restore the pre-restore archive to recover")
@@ -617,8 +714,6 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
 
-    # 7. Start.
-    start = run_start(on_progress=on_progress)
     if start not in (ActionResult.OK, ActionResult.ALREADY):
         on_progress(
             "restore",

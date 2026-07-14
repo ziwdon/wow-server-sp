@@ -95,30 +95,104 @@ fi
 # shellcheck disable=SC1091
 source "${STACK_DIR}/.env"
 
+# Host cron backups and this restore share the same lock so a concurrent
+# backup and restore can never race on the same databases.
+mkdir -p "${STACK_DIR}/backups"
+LOCK_FILE="${STACK_DIR}/backups/.backup.lock"
+exec 8>"$LOCK_FILE"
+if ! flock -n 8; then
+    echo "ERROR: backup or restore is already running; retry after it completes." >&2
+    exit 75
+fi
+
 log() {
     echo "[$(date '+%F %T')] $*"
 }
 
-validate_archive_members() {
-    local listing member
-    if ! listing="$(tar -tzf "$ARCHIVE" 2>&1)"; then
-        if printf '%s\n' "$listing" | grep -q "Member name contains '..'"; then
-            echo "ERROR: Unsafe archive member in $ARCHIVE" >&2
-        else
-            echo "ERROR: Could not read archive member list from $ARCHIVE" >&2
-            printf '%s\n' "$listing" >&2
-        fi
+# Bounded, symlink-free extraction: validates every member (count, name
+# safety, type, per-member and total expanded size) before writing anything,
+# then writes regular files/dirs only beneath $2 without following links.
+safe_extract_archive() {
+    local archive="$1" stage="$2"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "ERROR: Restore archive extraction requires python3." >&2
         return 1
     fi
-    while IFS= read -r member; do
-        [ -n "$member" ] || continue
-        case "$member" in
-            /*|..|../*|*/..|*/../*)
-                echo "ERROR: Unsafe archive member: $member" >&2
-                return 1
-                ;;
-        esac
-    done <<< "$listing"
+    if ! python3 - "$archive" "$stage" <<'PY'
+import os
+import sys
+import tarfile
+from pathlib import Path, PurePosixPath
+
+MAX_MEMBERS = 10_000
+MAX_MEMBER = 8 * 1024 ** 3
+MAX_TOTAL = 16 * 1024 ** 3
+MAX_MANIFEST = 1024 ** 2
+MAX_OVERLAY = 1024 ** 2
+SPECIAL_LIMITS = {
+    "manifest.json": MAX_MANIFEST,
+    "config/docker-compose.admin.yml": MAX_OVERLAY,
+}
+
+
+def fail(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+archive_path = Path(sys.argv[1])
+stage = Path(sys.argv[2]).resolve()
+seen: set[str] = set()
+total = 0
+
+with tarfile.open(archive_path, "r:gz") as archive:
+    members = []
+    for count, member in enumerate(archive, start=1):
+        if count > MAX_MEMBERS:
+            fail("archive has too many members")
+        raw = member.name.rstrip("/")
+        path = PurePosixPath(raw)
+        if not raw or path.is_absolute() or ".." in path.parts or path.as_posix() != raw:
+            fail(f"unsafe archive member: {member.name}")
+        if raw in seen:
+            fail(f"duplicate archive member: {raw}")
+        seen.add(raw)
+        if not (member.isdir() or member.isfile()):
+            fail(f"unsupported archive member type: {raw}")
+        if member.isfile():
+            limit = SPECIAL_LIMITS.get(raw, MAX_MEMBER)
+            if member.size > limit:
+                fail(f"archive member exceeds expanded-size limit: {raw}")
+            total += member.size
+            if total > MAX_TOTAL:
+                fail("archive exceeds total expanded-size limit")
+        members.append((member, path))
+
+    for member, relative in members:
+        target = stage.joinpath(*relative.parts)
+        if target.parent != stage and stage not in target.parents:
+            fail(f"unsafe archive member: {member.name}")
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            fail(f"unreadable archive member: {member.name}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(target, flags, member.mode & 0o777 or 0o600), "wb") as output:
+            remaining = member.size
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    fail(f"truncated archive member: {member.name}")
+                output.write(chunk)
+                remaining -= len(chunk)
+PY
+    then
+        return 1
+    fi
 }
 
 if [ -z "${DOCKER_DB_ROOT_PASSWORD:-}" ]; then
@@ -129,8 +203,7 @@ fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 
-validate_archive_members
-tar -xzf "$ARCHIVE" -C "$STAGE"
+safe_extract_archive "$ARCHIVE" "$STAGE"
 
 if [ ! -f "${STAGE}/manifest.json" ]; then
     echo "ERROR: Archive is missing manifest.json" >&2
@@ -407,7 +480,10 @@ stop_worldserver_for_restore
 
 custom_cnf_backup=""
 if [ -f "${STACK_DIR}/configs/mysql/custom.cnf" ]; then
-    custom_cnf_backup="$(mktemp)"
+    # Stage-relative, not a second mktemp: cleaned up by the STAGE EXIT trap,
+    # and the untrusted archive (already extracted into STAGE) cannot
+    # overwrite this filename since it's written after extraction completes.
+    custom_cnf_backup="${STAGE}/.fresh-custom.cnf"
     if ! cp -a "${STACK_DIR}/configs/mysql/custom.cnf" "$custom_cnf_backup"; then
         echo "ERROR: Could not copy restored configuration files. The server remains stopped; re-run restore with a known-good archive." >&2
         exit 1

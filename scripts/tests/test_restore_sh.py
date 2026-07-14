@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import stat
@@ -83,6 +84,20 @@ def _make_traversal_archive(tmp_path: Path) -> Path:
         import io
         tf.addfile(info, io.BytesIO(payload))
     return archive
+
+
+def _make_link_archive(tmp_path: Path) -> Path:
+    archive = _make_archive(tmp_path)
+    rewritten = tmp_path / "azerothcore-backup-manual-link.tar.gz"
+    with tarfile.open(archive, "r:gz") as source, tarfile.open(rewritten, "w:gz") as target:
+        for member in source.getmembers():
+            extracted = source.extractfile(member) if member.isfile() else None
+            target.addfile(member, extracted)
+        link = tarfile.TarInfo("config/unsafe-link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../../../outside"
+        target.addfile(link)
+    return rewritten
 
 
 def _stack(tmp_path: Path) -> Path:
@@ -536,7 +551,7 @@ def test_dr_restore_rejects_archive_path_traversal_before_extract(tmp_path):
     r = _run(stack, archive, bind, logf)
 
     assert r.returncode == 1
-    assert "Unsafe archive member" in r.stderr
+    assert "unsafe archive member" in r.stderr
     assert not (tmp_path / "outside.txt").exists()
     assert not logf.exists()
 
@@ -722,3 +737,59 @@ def test_dr_restore_refuses_root_before_help():
         assert "Usage:" not in r.stdout
     else:
         assert r.returncode == 0, r.stderr
+
+
+def test_dr_restore_rejects_links_before_docker_or_mutation(tmp_path):
+    stack = _stack(tmp_path)
+    archive = _make_link_archive(tmp_path)
+    bind = tmp_path / "bin"
+    bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+
+    result = _run(stack, archive, bind, logf)
+
+    assert result.returncode == 1
+    assert "unsupported archive member type" in result.stderr
+    assert not logf.exists()
+
+
+def test_dr_restore_cleans_every_tmpdir_artifact_after_success(tmp_path, monkeypatch):
+    stack = _stack(tmp_path)
+    archive = _make_archive(tmp_path)
+    bind = tmp_path / "bin"
+    bind.mkdir()
+    logf = tmp_path / "docker.log"
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    state = tmp_path / "worldserver-state"
+    state.write_text("running\n")
+    _stateful_docker_stub(bind)
+    monkeypatch.setenv("DOCKER_STATE_FILE", str(state))
+
+    result = _run(stack, archive, bind, logf, {"TMPDIR": str(tmpdir)})
+
+    assert result.returncode == 0, result.stderr
+    assert list(tmpdir.iterdir()) == []
+
+
+def test_dr_restore_refuses_backup_lock_contention_before_mutation(tmp_path):
+    stack = _stack(tmp_path)
+    archive = _make_archive(tmp_path)
+    backups = stack / "backups"
+    backups.mkdir()
+    lock_path = backups / ".backup.lock"
+    lock_path.touch()
+    bind = tmp_path / "bin"
+    bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+
+    with lock_path.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = _run(stack, archive, bind, logf)
+
+    assert result.returncode == 75
+    assert "backup or restore is already running" in result.stderr
+    assert not logf.exists()
+    assert "from: fresh" in (stack / "docker-compose.override.yml").read_text()

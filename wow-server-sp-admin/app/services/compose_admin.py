@@ -20,11 +20,12 @@ write tears, the most recent snapshot is the recovery target.
 from __future__ import annotations
 
 import time
-from collections.abc import Collection
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
 
+from app.services.config_index import KeyEntry, validate_value
 from app.services.config_policy import BLOCKED_KEYS
 from app.services.env_var import config_key_to_ac_env_var
 
@@ -32,17 +33,27 @@ SERVICE = "ac-worldserver"
 _EXPECTED_TOP_LEVEL_KEYS = frozenset({"services"})
 _EXPECTED_SERVICE_KEYS = frozenset({"environment"})
 _BLOCKED_ENV_VARS = frozenset(config_key_to_ac_env_var(key) for key in BLOCKED_KEYS)
+MAX_ADMIN_OVERLAY_BYTES = 1024 ** 2
 
 
-def validate_restored_overlay(path: Path, *, allowed_env_vars: Collection[str]) -> str | None:
+def validate_restored_overlay(
+    path: Path,
+    *,
+    entries_by_env: Mapping[str, KeyEntry],
+) -> str | None:
     """Return an error unless a restored overlay matches the admin-only contract.
 
     The overlay is an untrusted archive member during restore.  It may only
     describe the worldserver environment that the settings UI itself can
     produce; accepting other Compose constructs would let an archive change
-    container topology or override unrelated runtime settings.
+    container topology or override unrelated runtime settings. Each value is
+    additionally validated against the same typed contract the Settings UI
+    enforces (`config_index.validate_value`), so a restored overlay cannot
+    set a value Settings itself would reject.
     """
     try:
+        if path.stat().st_size > MAX_ADMIN_OVERLAY_BYTES:
+            return "restored admin overlay exceeds its size limit"
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return "restored admin overlay is malformed"
@@ -63,14 +74,25 @@ def validate_restored_overlay(path: Path, *, allowed_env_vars: Collection[str]) 
     if not isinstance(env, dict):
         return "restored admin overlay environment must be a mapping"
 
-    allowed = set(allowed_env_vars)
     for key, value in env.items():
         if not isinstance(key, str) or not isinstance(value, str):
             return "restored admin overlay environment entries must be strings"
         if key in _BLOCKED_ENV_VARS:
             return f"restored admin overlay contains blocked key: {key}"
-        if key not in allowed:
+        entry = entries_by_env.get(key)
+        if entry is None:
             return f"restored admin overlay key is not approved: {key}"
+        if value == "":
+            # Settings represents "no override" by deleting the key, never by
+            # an empty value -- an empty override could not have come from
+            # the UI and must not be treated as a type-validation pass
+            # (`validate_value` itself returns None for "").
+            return (
+                f"restored admin overlay has invalid value for {key}: "
+                "empty overrides must be omitted"
+            )
+        if error := validate_value(entry, value):
+            return f"restored admin overlay has invalid value for {key}: {error}"
     return None
 
 

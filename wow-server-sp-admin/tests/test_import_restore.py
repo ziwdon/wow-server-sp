@@ -5,6 +5,7 @@ import tarfile
 import threading
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from app.services.actions import ActionResult
 from app.services.runner import ActionRunner
@@ -238,3 +239,77 @@ def test_import_restore_handles_write_error(tmp_path, monkeypatch):
             "/api/action/import-restore", files={"file": ("backup.tar.gz", b"x")}
         )
     assert r.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_await_thread_completion_waits_for_worker_after_cancellation():
+    import app.main as main
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def worker():
+        started.set()
+        release.wait()
+        finished.set()
+
+    request = asyncio.create_task(main._await_thread_completion(worker))
+    assert await asyncio.to_thread(started.wait, 1)
+    cancelled = False
+    try:
+        request.cancel()
+        await asyncio.sleep(0)
+        assert not request.done()
+        assert not finished.is_set()
+    finally:
+        release.set()
+        try:
+            await request
+        except asyncio.CancelledError:
+            cancelled = True
+    assert cancelled is True
+    assert finished.is_set()
+
+
+def test_import_restore_cleans_hidden_upload_when_validator_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    import app.main as main
+    with patch("app.services.actions.validate_canonical_backup", side_effect=RuntimeError("validator crash")):
+        response = TestClient(main.app, raise_server_exceptions=False).post(
+            "/api/action/import-restore",
+            files={"file": ("backup.tar.gz", _archive_bytes(), "application/gzip")},
+        )
+    assert response.status_code == 500
+    assert not list((tmp_path / "backups").glob(".*.upload"))
+
+
+@pytest.mark.asyncio
+async def test_import_copy_does_not_block_health_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    import app.main as main
+    from fastapi import HTTPException, UploadFile
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_copy(_source, _staged, _limit):
+        started.set()
+        release.wait()
+        return 1
+
+    upload = UploadFile(
+        file=io.BytesIO(_archive_bytes()),
+        filename="backup.tar.gz",
+        size=len(_archive_bytes()),
+    )
+    with patch.object(main, "_copy_upload_to_staging", side_effect=slow_copy), patch(
+        "app.services.actions.validate_canonical_backup", return_value="test rejection",
+    ):
+        request = asyncio.create_task(main.post_import_restore(upload))
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            assert await asyncio.wait_for(main.healthz(), timeout=0.1) == {"status": "ok"}
+        finally:
+            release.set()
+        with pytest.raises(HTTPException) as exc_info:
+            await request
+        assert "invalid restore archive" in str(exc_info.value.detail)

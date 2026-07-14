@@ -11,6 +11,14 @@ BACKUP_SH = SCRIPTS_DIR / "backup.sh"
 DBS = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
 
 
+def _v2_dump() -> str:
+    sections = "\n".join(
+        f"-- Current Database: `{db}`\nCREATE DATABASE `{db}`;\nUSE `{db}`;"
+        for db in DBS
+    )
+    return f"-- MySQL dump 10.13\n{sections}\n-- Dump completed on 2026-07-14 12:00:00\n"
+
+
 def _make_stub(path: Path, body: str) -> None:
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -53,7 +61,12 @@ def _stubs(tmp_path: Path) -> Path:
         '        while [ ! -f "${BACKUP_RELEASE:?}" ]; do sleep 0.02; done\n'
         '      fi\n'
         '      [ "${FAIL_MYSQLDUMP:-}" = 1 ] && { echo "-- partial dump --"; exit 42; }\n'
-        '      echo "-- dump --"; exit 0\n'
+        '      if [ "${MALFORMED_SUCCESS:-0}" = 1 ]; then\n'
+        '        printf '"'"'%s\\n'"'"' '"'"'-- exit-zero malformed dump --'"'"'\n'
+        '      else\n'
+        '        printf '"'"'%s'"'"' "$CANONICAL_DUMP"\n'
+        '      fi\n'
+        '      exit 0\n'
         '    fi\n'
         '    # `mysql -e "USE db"` existence probe — succeed for all four.\n'
         '    [ -n "${FAIL_DB_NAME:-}" ] && printf "%s " "$@" | grep -q "USE ${FAIL_DB_NAME}" && exit 42\n'
@@ -69,6 +82,7 @@ def _stubs(tmp_path: Path) -> Path:
 def _run(stack: Path, bind: Path, *args: str, extra_env=None) -> subprocess.CompletedProcess:
     env = {
         **os.environ, "PATH": f"{bind}:{os.environ['PATH']}", "STACK_DIR": str(stack),
+        "CANONICAL_DUMP": _v2_dump(),
         **(extra_env or {}),
     }
     return subprocess.run(
@@ -379,7 +393,7 @@ def test_concurrent_backup_returns_busy_without_publishing_partial_archive(tmp_p
     }
     first = subprocess.Popen(
         ["bash", str(BACKUP_SH), "--label", "manual"],
-        env={**os.environ, "PATH": f"{bind}:{os.environ['PATH']}", "STACK_DIR": str(stack), **env},
+        env={**os.environ, "PATH": f"{bind}:{os.environ['PATH']}", "STACK_DIR": str(stack), "CANONICAL_DUMP": _v2_dump(), **env},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -397,3 +411,26 @@ def test_concurrent_backup_returns_busy_without_publishing_partial_archive(tmp_p
         release.touch()
         stdout, stderr = first.communicate(timeout=10)
     assert first.returncode == 0, stderr or stdout
+
+
+def test_exit_zero_malformed_dump_is_not_published_or_reported_complete(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    backups = stack / "backups"
+    backups.mkdir()
+    old = _old_archive(backups)
+
+    result = _run(
+        stack,
+        bind,
+        "--label",
+        "manual",
+        extra_env={"MALFORMED_SUCCESS": "1", "CANONICAL_DUMP": _v2_dump()},
+    )
+
+    assert result.returncode == 1
+    assert "SQL stream failed canonical validation" in result.stderr
+    assert "Backup complete." not in result.stdout
+    assert old.read_bytes() == b"recoverable-old-archive"
+    assert not list(backups.glob("azerothcore-backup-manual-*.tar.gz"))
+    assert not list(backups.glob(".*.tmp.*"))
