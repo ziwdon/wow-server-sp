@@ -752,16 +752,24 @@ fi
 BACKUPS_DIR="${STACK_DIR}/backups"
 
 is_complete_canonical_backup() {
-    local archive="$1" format db sql_tail
+    local archive="$1"
 
-    tar -tzf "$archive" >/dev/null 2>&1 || return 1
     command -v python3 >/dev/null 2>&1 || return 1
-    if ! format="$(python3 - "$archive" <<'PY'
+    python3 - "$archive" <<'PY'
 import json
+import re
 import sys
 import tarfile
 
-DATABASES = ["acore_auth", "acore_characters", "acore_world", "acore_playerbots"]
+DATABASES = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+V1_DUMPS = {f"sql/{database}.sql" for database in DATABASES}
+V2_DUMP = "sql/azerothcore.sql"
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_LINE_BYTES = 4096
+
+
+def fail():
+    raise SystemExit(1)
 
 
 def reject_duplicate_object_keys(pairs):
@@ -773,82 +781,90 @@ def reject_duplicate_object_keys(pairs):
     return result
 
 
+def completed_dump(tail):
+    return re.search(br"^-- Dump completed on .+$", tail, re.MULTILINE) is not None
+
+
+def read_tail(stream):
+    tail = bytearray()
+    while chunk := stream.read(65536):
+        tail.extend(chunk)
+        if len(tail) > 8192:
+            del tail[:-8192]
+    return bytes(tail)
+
+
+def validate_v2_stream(stream):
+    expected_index = 0
+    at_line_start = True
+    tail = bytearray()
+    while line := stream.readline(MAX_LINE_BYTES + 1):
+        tail.extend(line)
+        if len(tail) > 8192:
+            del tail[:-8192]
+        line_ended = line.endswith(b"\n")
+        if at_line_start and line.startswith(b"-- Current Database:"):
+            if len(line) > MAX_LINE_BYTES or not line_ended:
+                fail()
+            line = line.rstrip(b"\r\n")
+            if not (
+                line.startswith(b"-- Current Database: `")
+                and line.endswith(b"`")
+                and line.count(b"`") == 2
+            ):
+                fail()
+            section = line.split(b"`", 2)[1].decode("utf-8")
+            if expected_index >= len(DATABASES) or section != DATABASES[expected_index]:
+                fail()
+            expected_index += 1
+        at_line_start = line_ended
+    return expected_index == len(DATABASES) and completed_dump(bytes(tail))
+
+
 try:
-    with tarfile.open(sys.argv[1], "r:gz") as backup:
-        manifest_file = backup.extractfile("manifest.json")
-        if manifest_file is None:
-            raise ValueError("missing manifest")
-        manifest = json.load(manifest_file, object_pairs_hook=reject_duplicate_object_keys)
+    manifest = None
+    v1_tails = {}
+    v2_valid = None
+    with tarfile.open(sys.argv[1], "r|gz") as backup:
+        for member in backup:
+            if not member.isfile():
+                continue
+            stream = backup.extractfile(member)
+            if stream is None:
+                fail()
+            if member.name == "manifest.json":
+                if manifest is not None or member.size > MAX_MANIFEST_BYTES:
+                    fail()
+                manifest = json.load(stream, object_pairs_hook=reject_duplicate_object_keys)
+            elif member.name in V1_DUMPS:
+                if member.name in v1_tails:
+                    fail()
+                v1_tails[member.name] = read_tail(stream)
+            elif member.name == V2_DUMP:
+                if v2_valid is not None:
+                    fail()
+                v2_valid = validate_v2_stream(stream)
 except (OSError, tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-    raise SystemExit(1)
+    fail()
 
 if not isinstance(manifest, dict):
-    raise SystemExit(1)
+    fail()
 format_version = manifest.get("format_version")
 if isinstance(format_version, bool) or not isinstance(format_version, int):
-    raise SystemExit(1)
+    fail()
 if format_version not in (1, 2):
-    raise SystemExit(1)
-if manifest.get("databases") != DATABASES or manifest.get("skipped_databases") != []:
-    raise SystemExit(1)
+    fail()
+if manifest.get("databases") != list(DATABASES) or manifest.get("skipped_databases") != []:
+    fail()
 if format_version == 2 and manifest.get("dump_layout") != "single-multi-database":
-    raise SystemExit(1)
-print(format_version)
+    fail()
+if format_version == 1:
+    if set(v1_tails) != V1_DUMPS or not all(completed_dump(tail) for tail in v1_tails.values()):
+        fail()
+else:
+    if v2_valid is not True:
+        fail()
 PY
-    )"; then
-        return 1
-    fi
-
-    if [ "$format" = 2 ]; then
-        tar -tzf "$archive" 2>/dev/null | grep -qx 'sql/azerothcore.sql' || return 1
-        sql_tail="$(tar -xOzf "$archive" sql/azerothcore.sql 2>/dev/null | tail -c 8192)" || return 1
-        printf '%s\n' "$sql_tail" | grep -Eq -- '-- Dump completed on .+$' || return 1
-        python3 - "$archive" <<'PY'
-import sys
-import tarfile
-
-DATABASES = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
-PREFIX = b"-- Current Database:"
-MARKER = b"-- Current Database: `"
-MAX_LINE_BYTES = 4096
-
-try:
-    with tarfile.open(sys.argv[1], "r:gz") as backup:
-        stream = backup.extractfile("sql/azerothcore.sql")
-        if stream is None:
-            raise ValueError("missing SQL stream")
-        expected_index = 0
-        at_line_start = True
-        while line := stream.readline(MAX_LINE_BYTES + 1):
-            line_ended = line.endswith(b"\n")
-            if at_line_start and line.startswith(PREFIX):
-                if len(line) > MAX_LINE_BYTES or not line.endswith(b"\n"):
-                    raise ValueError("oversized database section header")
-                line = line.rstrip(b"\r\n")
-                if not (
-                    line.startswith(MARKER)
-                    and line.endswith(b"`")
-                    and line.count(b"`") == 2
-                ):
-                    raise ValueError("malformed database section header")
-                section = line.split(b"`", 2)[1].decode("utf-8")
-                if expected_index >= len(DATABASES) or section != DATABASES[expected_index]:
-                    raise ValueError("noncanonical database section inventory")
-                expected_index += 1
-            at_line_start = line_ended
-except (OSError, tarfile.TarError, UnicodeDecodeError, ValueError):
-    raise SystemExit(1)
-
-raise SystemExit(0 if expected_index == len(DATABASES) else 1)
-PY
-        return
-    fi
-
-    for db in acore_auth acore_characters acore_world acore_playerbots; do
-        tar -tzf "$archive" 2>/dev/null | grep -qx "sql/${db}.sql" || return 1
-        sql_tail="$(tar -xOzf "$archive" "sql/${db}.sql" 2>/dev/null | tail -c 8192)" || return 1
-        printf '%s\n' "$sql_tail" | grep -Eq -- '-- Dump completed on .+$' || return 1
-    done
 }
 
 if [ ! -d "$BACKUPS_DIR" ]; then
@@ -858,23 +874,18 @@ elif [ -z "$(ls -A "$BACKUPS_DIR" 2>/dev/null)" ]; then
 elif [ ! -x "$BACKUP_SCRIPT" ]; then
     info "Cannot check backup freshness: backup.sh missing/not executable (see Check 15)"
 else
-    complete_count=0
     fresh_complete_count=0
     while IFS= read -r -d '' archive; do
         if is_complete_canonical_backup "$archive"; then
-            complete_count=$((complete_count + 1))
-            if [ -n "$(find "$archive" -mmin -1500 -print -quit 2>/dev/null)" ]; then
-                fresh_complete_count=$((fresh_complete_count + 1))
-            fi
+            fresh_complete_count=1
+            break
         fi
-    done < <(find "$BACKUPS_DIR" -maxdepth 1 -type f -name 'azerothcore-backup-*.tar.gz' -print0 2>/dev/null)
+    done < <(find "$BACKUPS_DIR" -maxdepth 1 -type f -name 'azerothcore-backup-*.tar.gz' -mmin -1500 -print0 2>/dev/null)
 
     if [ "$fresh_complete_count" -gt 0 ]; then
         ok "Backups directory has $fresh_complete_count fresh complete canonical archive(s) (last 25 hours)"
-    elif [ "$complete_count" -gt 0 ]; then
-        fail "Backups directory has complete canonical archive(s), but none from the last 25 hours"
     else
-        fail "Backups directory has no complete readable canonical archive (partial, corrupt, or arbitrary files do not count)"
+        fail "Backups directory has no fresh complete canonical archive (last 25 hours)"
     fi
 fi
 

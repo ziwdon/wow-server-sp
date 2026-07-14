@@ -72,7 +72,7 @@ esac
     return bind
 
 
-def _run(stack: Path, bind: Path) -> subprocess.CompletedProcess[str]:
+def _run(stack: Path, bind: Path, **extra_env: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["/bin/bash", str(VERIFY_SH)],
         env={
@@ -80,6 +80,7 @@ def _run(stack: Path, bind: Path) -> subprocess.CompletedProcess[str]:
             "STACK_DIR": str(stack),
             "PATH": str(bind),
             "VERIFY_CALL_LOG": str(bind.parent / "calls.log"),
+            **extra_env,
         },
         capture_output=True,
         text=True,
@@ -199,7 +200,7 @@ def test_backup_requires_fresh_complete_readable_v1_archive(tmp_path):
     (stack / "backups" / "azerothcore-backup-daily-partial-2026-07-12.tar.gz").write_bytes(b"not a tar")
     stale = _run(stack, _stubs(tmp_path))
     assert stale.returncode == 1
-    assert "none from the last 25 hours" in stale.stdout
+    assert "no fresh complete canonical archive" in stale.stdout
     _assert_complete_summary(stale)
 
 
@@ -215,6 +216,47 @@ def test_backup_accepts_fresh_canonical_v2_archive(tmp_path):
     _assert_complete_summary(result)
 
 
+def test_backup_verification_uses_one_fresh_archive_without_tar_or_stale_scan(tmp_path):
+    stack = _stack(tmp_path)
+    fresh = _complete_archive(
+        stack / "backups" / "azerothcore-backup-daily-2026-07-12T00-00-00.tar.gz",
+    )
+    shutil.rmtree(stack / "backups" / "archive-stage")
+    stale = _complete_archive(
+        stack / "backups" / "azerothcore-backup-daily-2026-07-01T00-00-00.tar.gz",
+    )
+    os.utime(stale, (1, 1))
+    bind = _stubs(tmp_path)
+    python_log = tmp_path / "python.log"
+    tar_log = tmp_path / "tar.log"
+    real_python = shutil.which("python3")
+    real_tar = shutil.which("tar")
+    assert real_python and real_tar
+    (bind / "python3").unlink()
+    (bind / "tar").unlink()
+    _executable(
+        bind / "python3",
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VERIFY_PYTHON_LOG\"\nexec {real_python} \"$@\"\n",
+    )
+    _executable(
+        bind / "tar",
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$VERIFY_TAR_LOG\"\nexec {real_tar} \"$@\"\n",
+    )
+
+    result = _run(
+        stack,
+        bind,
+        VERIFY_PYTHON_LOG=str(python_log),
+        VERIFY_TAR_LOG=str(tar_log),
+    )
+
+    assert "Backups directory has 1 fresh complete canonical archive" in result.stdout
+    assert str(fresh) in python_log.read_text()
+    assert str(stale) not in python_log.read_text()
+    assert not tar_log.exists() or not tar_log.read_text()
+    _assert_complete_summary(result)
+
+
 def test_partial_or_arbitrary_backup_does_not_count(tmp_path):
     stack = _stack(tmp_path)
     _complete_archive(
@@ -225,7 +267,7 @@ def test_partial_or_arbitrary_backup_does_not_count(tmp_path):
     result = _run(stack, _stubs(tmp_path))
 
     assert result.returncode == 1
-    assert "no complete readable canonical archive" in result.stdout
+    assert "no fresh complete canonical archive" in result.stdout
     _assert_complete_summary(result)
 
 
@@ -244,7 +286,7 @@ def test_v2_backups_with_noncanonical_stream_sections_do_not_count(tmp_path):
         result = _run(stack, _stubs(stack.parent))
 
         assert result.returncode == 1
-        assert "no complete readable canonical archive" in result.stdout, result.stdout
+        assert "no fresh complete canonical archive" in result.stdout, result.stdout
         _assert_complete_summary(result)
 
 
@@ -266,7 +308,7 @@ def test_v2_backup_with_conflicting_manifest_keys_does_not_count(tmp_path, forma
 
     result = _run(stack, _stubs(tmp_path))
 
-    assert "no complete readable canonical archive" in result.stdout
+    assert "no fresh complete canonical archive" in result.stdout
     _assert_complete_summary(result)
 
 
@@ -289,7 +331,7 @@ def test_v2_backup_with_malformed_marker_prefixed_record_does_not_count(
 
     result = _run(stack, _stubs(tmp_path))
 
-    assert "no complete readable canonical archive" in result.stdout
+    assert "no fresh complete canonical archive" in result.stdout
     _assert_complete_summary(result)
 
 
