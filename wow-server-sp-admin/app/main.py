@@ -629,6 +629,46 @@ async def post_restore(payload: RestorePayload):
     return {"id": record.id, "status": "running"}
 
 
+async def _await_thread_completion(func, /, *args):
+    """Run `func(*args)` on a worker thread, shielding it from caller cancellation.
+
+    Awaiting via `asyncio.shield` means cancelling the *caller* (e.g. a client
+    disconnect mid-request) does not cancel the underlying thread task. On
+    `CancelledError` we still await the underlying task so the thread is
+    guaranteed to finish (and any cleanup it depends on, e.g. a `finally`
+    that removes staged files, is safe to run) before we re-raise — the
+    caller cannot regain control while the thread is still touching the
+    filesystem.
+    """
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        finally:
+            raise
+
+
+def _copy_upload_to_staging(source, staged: Path, max_bytes: int) -> int:
+    """Stream `source` (a sync file-like object) into `staged`, fsync'd.
+
+    Runs on a worker thread via `_await_thread_completion` — must be
+    thread-safe and must not touch the event loop.
+    """
+    total = 0
+    source.seek(0)
+    with staged.open("xb") as output:
+        while chunk := source.read(1024 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                raise OverflowError("uploaded archive exceeds the configured size limit")
+            output.write(chunk)
+        output.flush()
+        os.fsync(output.fileno())
+    return total
+
+
 @app.post("/api/action/import-restore")
 async def post_import_restore(file: UploadFile = File(...)):
     from app.services.actions import validate_canonical_backup, run_restore
@@ -645,40 +685,34 @@ async def post_import_restore(file: UploadFile = File(...)):
 
     if file.size is not None and file.size > _MAX_IMPORT_BYTES:
         raise HTTPException(413, "uploaded archive exceeds the configured size limit")
-    try:
-        total = 0
-        backups_dir.mkdir(parents=True, exist_ok=True)
-        with staged.open("xb") as out:
-            while chunk := await file.read(1024 * 1024):
-                total += len(chunk)
-                if total > _MAX_IMPORT_BYTES:
-                    out.close()
-                    staged.unlink(missing_ok=True)
-                    raise HTTPException(413, "uploaded archive exceeds the configured size limit")
-                out.write(chunk)
-            out.flush()
-            os.fsync(out.fileno())
-    except OSError as e:
-        staged.unlink(missing_ok=True)
-        raise HTTPException(500, f"could not save upload: {e}")
 
-    validation_error = await asyncio.to_thread(validate_canonical_backup, staged)
-    if validation_error is not None:
-        staged.unlink(missing_ok=True)
-        raise HTTPException(400, f"invalid restore archive — {validation_error}")
+    backups_dir.mkdir(parents=True, exist_ok=True)
     try:
-        os.replace(staged, dest)
-    except OSError as e:
-        staged.unlink(missing_ok=True)
-        raise HTTPException(500, f"could not publish upload: {e}")
+        try:
+            await _await_thread_completion(_copy_upload_to_staging, file.file, staged, _MAX_IMPORT_BYTES)
+        except OverflowError:
+            raise HTTPException(413, "uploaded archive exceeds the configured size limit")
+        except OSError as e:
+            raise HTTPException(500, f"could not save upload: {e}")
 
-    try:
-        record = _kick("restore", lambda cb: run_restore(archive_name, on_progress=cb))
-    except HTTPException as e:
-        if e.status_code == 409:
-            dest.unlink(missing_ok=True)
-        raise
-    return {"id": record.id, "status": "running"}
+        validation_error = await _await_thread_completion(validate_canonical_backup, staged)
+        if validation_error is not None:
+            raise HTTPException(400, f"invalid restore archive — {validation_error}")
+
+        try:
+            os.replace(staged, dest)
+        except OSError as e:
+            raise HTTPException(500, f"could not publish upload: {e}")
+
+        try:
+            record = _kick("restore", lambda cb: run_restore(archive_name, on_progress=cb))
+        except HTTPException as e:
+            if e.status_code == 409:
+                dest.unlink(missing_ok=True)
+            raise
+        return {"id": record.id, "status": "running"}
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 @app.get("/api/action/stream")
