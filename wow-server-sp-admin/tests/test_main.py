@@ -325,6 +325,52 @@ def test_api_progression_apply_rejects_while_an_action_is_running():
     apply.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_progression_cancellation_holds_reservation_until_worker_finishes(monkeypatch):
+    import app.main as main
+    from app.services.progression import ApplyProgressionResult, ProgressionConfig
+    from app.services.runner import ActionRunner
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    runner = ActionRunner()
+    monkeypatch.setattr(main, "runner", runner)
+
+    def blocking_apply(**_kwargs):
+        worker_started.set()
+        release_worker.wait()
+        return ApplyProgressionResult("applied", 8, 8)
+
+    with patch.object(
+        main.progression_svc, "config_from_resolved_keys", return_value=ProgressionConfig(),
+    ), patch.object(main, "list_keys_resolved", return_value=[]), patch.object(
+        main, "db_credentials", return_value={
+            "host": "h", "port": 3306, "user": "u", "password": "p",
+        },
+    ), patch.object(main.progression_svc, "apply_progression", side_effect=blocking_apply):
+        request_task = asyncio.create_task(main.api_progression_apply(
+            main.ProgressionApplyPayload(guid=101, target_expansion="tbc")
+        ))
+        assert await asyncio.to_thread(worker_started.wait, 1)
+        cancelled = False
+        try:
+            request_task.cancel()
+            await asyncio.sleep(0)
+            acquired_early = runner.try_acquire_mutation()
+            if acquired_early:
+                runner.release_mutation()
+            assert acquired_early is False
+        finally:
+            release_worker.set()
+            try:
+                await request_task
+            except asyncio.CancelledError:
+                cancelled = True
+
+    assert cancelled is True
+    assert runner.try_acquire_mutation() is True
+    runner.release_mutation()
+
+
 def test_api_stats_refresh_returns_immediately():
     with patch("app.main.stats_refresher.refresh_async", return_value=True) as mock_ref, \
          patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}):

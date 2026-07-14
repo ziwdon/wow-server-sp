@@ -837,13 +837,13 @@ async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
     if not runner.try_acquire_mutation():
         raise HTTPException(status_code=409, detail="another destructive action is already running")
     try:
-        result = await asyncio.to_thread(progression_svc.apply_progression,
+        result = await _await_thread_completion(lambda: progression_svc.apply_progression(
             guid=payload.guid,
             target_expansion=payload.target_expansion,
             config=cfg,
             snapshots_dir=_SNAPSHOTS,
             **db_credentials(),
-        )
+        ))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
