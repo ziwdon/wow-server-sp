@@ -89,6 +89,10 @@ rsync -a --delete \
     --exclude='app/static/htmx-sse.js' \
     "$REPO_DIR/" "$STAGE_DIR/build/"
 
+# The repository intentionally has no dist/ directory. rsync --delete removes
+# the pre-created candidate directory, so recreate it before staging configs.
+mkdir -p "$STAGE_DIR/build/dist"
+
 for vendor in htmx.min.js htmx-sse.js; do
     vendor_path="$STAGE_DIR/build/app/static/$vendor"
     vendor_size="$(wc -c < "$vendor_path" 2>/dev/null || echo 0)"

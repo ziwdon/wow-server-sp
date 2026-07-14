@@ -46,7 +46,27 @@ if [ "$1" = inspect ]; then
     fi
 fi
 """)
-    _executable(bind / "rsync", "#!/bin/sh\n[ \"${ADMIN_REDEPLOY_CASE:-healthy}\" = rsync-fail ] && exit 42\nexit 0\n")
+    _executable(bind / "rsync", """#!/bin/bash
+if [ "${ADMIN_REDEPLOY_CASE:-healthy}" = rsync-fail ]; then
+    exit 42
+fi
+if [ "${ADMIN_REDEPLOY_CASE:-healthy}" = rsync-delete-dist ]; then
+    destination=""
+    for arg in "$@"; do
+        destination="$arg"
+    done
+    case "$destination" in
+        "$STACK_DIR"/.redeploy.*/build/)
+            /bin/rm -rf -- "${destination}/dist"
+            ;;
+        *)
+            echo "refusing to remove unexpected rsync destination: $destination" >&2
+            exit 99
+            ;;
+    esac
+fi
+exit 0
+""")
     _executable(bind / "sudo", "#!/bin/sh\nexec \"$@\"\n")
     _executable(bind / "sleep", "#!/bin/sh\nexit 0\n")
     return bind
@@ -116,3 +136,12 @@ def test_healthy_candidate_replaces_app_after_build(tmp_path):
     assert calls.count(" up") == 1, f"calls={calls!r}\nstdout={result.stdout}\nstderr={result.stderr}"
     assert " down" not in calls
     assert "ADMIN_IMAGE" in stack.joinpath("docker-compose.yml").read_text()
+
+
+def test_candidate_staging_recreates_dist_after_rsync_delete(tmp_path):
+    stack = _stack(tmp_path)
+    result, calls = _run(stack, _stubs(tmp_path), "rsync-delete-dist")
+
+    assert result.returncode == 0, result.stderr
+    assert calls.count(" up") == 1, f"calls={calls!r}\nstdout={result.stdout}\nstderr={result.stderr}"
+    assert " down" not in calls
