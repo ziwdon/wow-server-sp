@@ -3,10 +3,10 @@
   <button class="btn btn-sm" onclick="refreshLogsPreservingTab()">Refresh</button>
 </div>
 <div class="log-tabs" role="tablist" aria-label="Log sources">
-  <button id="server-log-tab" class="log-tab active" type="button" role="tab" aria-selected="true" aria-controls="server-log" onclick="switchLog(this, 'server-log')">Server.log</button>
-  <button id="playerbots-log-tab" class="log-tab" type="button" role="tab" aria-selected="false" aria-controls="playerbots-log" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
-  <button id="errors-log-tab" class="log-tab{% if errors_size > 0 %} log-tab-dirty{% endif %}" type="button" role="tab" aria-selected="false" aria-controls="errors-log" onclick="switchLog(this, 'errors-log')">Errors.log</button>
-  <button id="app-events-log-tab" class="log-tab" type="button" role="tab" aria-selected="false" aria-controls="app-events-log" onclick="switchLog(this, 'app-events-log')">App Events</button>
+  <button id="server-log-tab" class="log-tab active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="server-log" onclick="switchLog(this, 'server-log')">Server.log</button>
+  <button id="playerbots-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="playerbots-log" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
+  <button id="errors-log-tab" class="log-tab{% if errors_size > 0 %} log-tab-dirty{% endif %}" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="errors-log" onclick="switchLog(this, 'errors-log')">Errors.log</button>
+  <button id="app-events-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="app-events-log" onclick="switchLog(this, 'app-events-log')">App Events</button>
 </div>
 <div class="log-errors-bar {% if errors_size == 0 %}clean{% else %}dirty{% endif %}">
   <span class="errors-dot"></span>

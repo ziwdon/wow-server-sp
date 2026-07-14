@@ -274,13 +274,16 @@ async def api_players(request: Request) -> HTMLResponse:
         counts = await asyncio.to_thread(db_stats.count_online, **creds)
         context["counts"] = counts
     except Exception as exc:  # noqa: BLE001 — DB may be down; UI surfaces an incident
-        event = app_events.record_exception(
-            log,
-            "database_stats",
-            "Database statistics could not be loaded.",
-            exc,
-        )
-        context["incident_id"] = event.incident_id
+        try:
+            event = app_events.record_exception(
+                log,
+                "database_stats",
+                "Database statistics could not be loaded.",
+                exc,
+            )
+            context["incident_id"] = event.incident_id
+        except Exception:  # noqa: BLE001 — event recording and logging are best-effort
+            pass
     return templates.TemplateResponse(
         request,
         "partials/players.html",

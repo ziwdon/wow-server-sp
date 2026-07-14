@@ -58,40 +58,50 @@
 </div>
 <script>
 function switchLog(btn, targetId) {
-  document.querySelectorAll('.log-tab').forEach(function(t) {
+  var logs = btn.closest('#logs');
+  if (!logs) return;
+  logs.querySelectorAll('.log-tab').forEach(function(t) {
+    var selected = t === btn;
     t.classList.remove('active');
-    t.setAttribute('aria-selected', 'false');
+    t.setAttribute('aria-selected', selected ? 'true' : 'false');
+    t.setAttribute('tabindex', selected ? '0' : '-1');
   });
-  document.querySelectorAll('.logview').forEach(function(p) { p.style.display = 'none'; });
+  logs.querySelectorAll('.logview').forEach(function(p) { p.style.display = 'none'; });
   btn.classList.add('active');
-  btn.setAttribute('aria-selected', 'true');
-  var el = document.getElementById(targetId);
+  var el = logs.querySelector('#' + targetId);
   if (el) el.style.display = '';
 }
 
 function filterAppEvents(button, severity) {
-  document.querySelectorAll('.app-event-filter').forEach(function(filter) {
+  var logs = button.closest('#logs');
+  if (!logs) return;
+  logs.querySelectorAll('.app-event-filter').forEach(function(filter) {
     var selected = filter === button;
     filter.classList.toggle('active', selected);
     filter.setAttribute('aria-pressed', selected ? 'true' : 'false');
   });
-  document.querySelectorAll('.app-event-row').forEach(function(row) {
+  logs.querySelectorAll('.app-event-row').forEach(function(row) {
     row.hidden = severity !== 'all' && row.dataset.eventSeverity !== severity;
   });
 }
 
 function activateRequestedAppEvent() {
-  var incidentId = new URLSearchParams(window.location.search).get('app_event');
+  var url = new URL(window.location.href);
+  var incidentId = url.searchParams.get('app_event');
   if (!incidentId || !/^EVT-[A-Z0-9-]{1,64}$/.test(incidentId)) return;
-  var match = Array.from(document.querySelectorAll('.app-event-row')).find(function(row) {
+  var logs = document.getElementById('logs');
+  if (!logs) return;
+  var match = Array.from(logs.querySelectorAll('.app-event-row')).find(function(row) {
     return row.dataset.incidentId === incidentId;
   });
   if (!match) return;
-  var tab = document.querySelector(".log-tab[aria-controls='app-events-log']");
+  var tab = logs.querySelector(".log-tab[aria-controls='app-events-log']");
   if (!tab) return;
   switchLog(tab, 'app-events-log');
   match.focus({ preventScroll: true });
   match.scrollIntoView({ block: 'nearest' });
+  url.searchParams.delete('app_event');
+  window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
 }
 
 // Refresh logs while keeping whichever tab is currently active.
@@ -99,14 +109,14 @@ function activateRequestedAppEvent() {
 // request, so switchLog always runs on the fully-settled new DOM regardless
 // of whether htmx.ajax() returns a Promise.
 function refreshLogsPreservingTab() {
-  var active = document.querySelector('.log-tab.active');
+  var logsEl = document.getElementById('logs');
+  var active = logsEl.querySelector('.log-tab.active');
   var m = active && active.getAttribute('onclick').match(/switchLog\(this,\s*'([^']+)'\)/);
   var tabId = m ? m[1] : 'server-log';
 
-  var logsEl = document.getElementById('logs');
   logsEl.addEventListener('htmx:afterSettle', function handler() {
     logsEl.removeEventListener('htmx:afterSettle', handler);
-    var btn = document.querySelector(".log-tab[onclick*=\"'" + tabId + "'\"]");
+    var btn = logsEl.querySelector(".log-tab[onclick*=\"'" + tabId + "'\"]");
     if (btn) switchLog(btn, tabId);
     activateRequestedAppEvent();
   }, { once: true });
@@ -114,8 +124,26 @@ function refreshLogsPreservingTab() {
   htmx.ajax('GET', '/api/logs', {target: '#logs', swap: 'innerHTML'});
 }
 
-document.getElementById('logs').addEventListener('htmx:afterSettle', function() {
+var logsRoot = document.getElementById('logs');
+logsRoot.addEventListener('htmx:afterSettle', function() {
   activateRequestedAppEvent();
+}, { once: true });
+
+logsRoot.addEventListener('keydown', function(event) {
+  var current = event.target.closest('.log-tab');
+  if (!current || !logsRoot.contains(current)) return;
+  var tabs = Array.from(logsRoot.querySelectorAll('.log-tabs [role="tab"]'));
+  var index = tabs.indexOf(current);
+  var nextIndex;
+  if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+  else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  var next = tabs[nextIndex];
+  switchLog(next, next.getAttribute('aria-controls'));
+  next.focus();
 });
 
 // Keep the prior activity visible when a request is rejected. Once the server

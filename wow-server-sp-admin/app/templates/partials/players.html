@@ -5,6 +5,8 @@
   {% else %}
   <div class="stat-value stat-unavailable">Stats unavailable</div>
   <div class="stat-sub">Database statistics could not be loaded.</div>
+  {% if incident_id %}
   <a class="incident-link" href="/?app_event={{ incident_id }}#logs">View App Event {{ incident_id }}</a>
+  {% endif %}
   {% endif %}
 </div>

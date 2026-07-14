@@ -210,6 +210,24 @@ def test_api_players_renders_online_counts_without_recording_an_incident():
     record_exception.assert_not_called()
 
 
+def test_api_players_keeps_safe_degraded_response_when_event_recording_fails():
+    raw_database_error = "database-password-leaked-in-error"
+    raw_recorder_error = "structured-logging-secret"
+    with patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
+         patch("app.main.db_stats.count_online", side_effect=RuntimeError(raw_database_error)), \
+         patch("app.services.app_events.record_exception", side_effect=RuntimeError(raw_recorder_error)):
+        client = TestClient(app)
+        response = client.get("/api/players")
+
+    assert response.status_code == 200
+    assert "Stats unavailable" in response.text
+    assert "Database statistics could not be loaded." in response.text
+    assert "View App Event" not in response.text
+    assert "app_event=" not in response.text
+    assert raw_database_error not in response.text
+    assert raw_recorder_error not in response.text
+
+
 @pytest.mark.asyncio
 async def test_blocked_online_count_keeps_liveness_and_sse_responsive_then_renders_unavailable():
     closed = threading.Event()
