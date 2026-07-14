@@ -23,6 +23,7 @@ from pathlib import Path
 import docker
 import docker.errors
 
+from app.services.backups import resolve_backup_archive
 from app.services.console import WorldserverConsole
 from app.services.docker_client import WORLDSERVER, inspect_worldserver
 from app.services.env_var import config_key_to_ac_env_var
@@ -574,18 +575,13 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
     ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     backups_dir = ac_stack / "backups"
 
-    # 1. Validate the filename (no traversal) + existence.
-    if (
-        "/" in archive_name
-        or ".." in archive_name
-        or not archive_name.startswith("azerothcore-backup-")
-        or not archive_name.endswith(".tar.gz")
-    ):
-        on_progress("validate", "invalid archive name")
-        return ActionResult.ERROR
-    archive = backups_dir / archive_name
-    if not archive.is_file():
-        on_progress("validate", "archive not found")
+    # 1. Resolve the archive name to a real on-disk path WITHOUT following a
+    # symlink, and confirm it lives inside backups_dir. This re-checks from
+    # scratch (rather than trusting any earlier route-level check) because
+    # this function can be reached independently of the HTTP route.
+    archive = resolve_backup_archive(backups_dir=backups_dir, archive_name=archive_name)
+    if archive is None:
+        on_progress("validate", "invalid or missing archive")
         return ActionResult.ERROR
 
     # 2. Validate the complete canonical archive before stopping worldserver.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +66,36 @@ class BackupListingError(RuntimeError):
         super().__init__("Could not read backup metadata.")
 
 
+def resolve_backup_archive(*, backups_dir: Path, archive_name: str) -> Path | None:
+    """Resolve `archive_name` inside `backups_dir` WITHOUT following a final symlink.
+
+    Rejects the name lexically first, then uses `lstat()` to confirm the
+    directory entry itself is a regular file (not a symlink, not a fifo/device/
+    dir), and finally confirms the fully-resolved real path's parent is
+    exactly the canonical backups directory. This defeats both a symlink
+    planted directly in the backups directory and a symlinked intermediate
+    directory trick.
+    """
+    if (
+        "/" in archive_name
+        or ".." in archive_name
+        or _ARCHIVE_RE.fullmatch(archive_name) is None
+    ):
+        return None
+    try:
+        root = backups_dir.resolve(strict=True)
+        candidate = backups_dir / archive_name
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        return None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        return None
+    if resolved.parent != root:
+        return None
+    return candidate
+
+
 def list_backups(*, backups_dir: Path) -> list[BackupInfo]:
     """Single-archive backups, newest first.
 
@@ -88,7 +119,13 @@ def list_backups(*, backups_dir: Path) -> list[BackupInfo]:
                 m = _ARCHIVE_RE.match(entry.name)
                 if not m:
                     continue
-                st = entry.stat()
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    # A matching name that is a symlink (or any other
+                    # non-regular-file entry) is treated as a metadata read
+                    # failure rather than silently followed or skipped — an
+                    # attacker-planted symlink must never resolve here.
+                    raise BackupListingError()
+                st = entry.stat(follow_symlinks=False)
                 out.append(
                     BackupInfo(
                         filename=entry.name,

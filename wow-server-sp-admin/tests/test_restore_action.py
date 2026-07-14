@@ -279,6 +279,25 @@ def test_run_restore_rejects_path_traversal(tmp_path, monkeypatch):
     assert r == ActionResult.ERROR
 
 
+@patch("app.services.actions.run_stop")
+def test_run_restore_rejects_backup_symlink_before_archive_open(
+    mock_stop, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    outside = tmp_path / "outside.tar.gz"
+    outside.write_bytes(b"not an archive")
+    link = backups / "azerothcore-backup-manual-link.tar.gz"
+    link.symlink_to(outside)
+
+    with patch("app.services.actions.tarfile.open", side_effect=AssertionError("archive opened")):
+        result = actions.run_restore(link.name, on_progress=lambda *_: None)
+
+    assert result == ActionResult.ERROR
+    mock_stop.assert_not_called()
+
+
 def test_run_restore_rejects_unknown_db_in_manifest(tmp_path, monkeypatch):
     monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
     _make_archive(tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz", ["evil_db"])

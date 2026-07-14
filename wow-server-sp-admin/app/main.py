@@ -473,15 +473,11 @@ async def api_backups_list(request: Request) -> HTMLResponse:
 
 @app.get("/api/backups/download/{archive_name}")
 async def download_backup(archive_name: str) -> FileResponse:
-    if (
-        "/" in archive_name
-        or ".." in archive_name
-        or not archive_name.startswith("azerothcore-backup-")
-        or not archive_name.endswith(".tar.gz")
-    ):
-        raise HTTPException(status_code=400, detail="invalid archive name")
-    archive = Path(os.environ.get("AC_STACK_DIR", "/ac")) / "backups" / archive_name
-    if not archive.is_file():
+    backups_dir = Path(os.environ.get("AC_STACK_DIR", "/ac")) / "backups"
+    archive = backups_svc.resolve_backup_archive(
+        backups_dir=backups_dir, archive_name=archive_name
+    )
+    if archive is None:
         raise HTTPException(status_code=404, detail="archive not found")
     return FileResponse(archive, media_type="application/gzip", filename=archive.name)
 
@@ -623,6 +619,12 @@ async def post_restore(payload: RestorePayload):
         or not name.endswith(".tar.gz")
     ):
         raise HTTPException(status_code=400, detail="invalid archive name")
+    backups_dir = Path(os.environ.get("AC_STACK_DIR", "/ac")) / "backups"
+    if backups_svc.resolve_backup_archive(backups_dir=backups_dir, archive_name=name) is None:
+        raise HTTPException(status_code=404, detail="archive not found")
+    # run_restore re-checks with resolve_backup_archive itself (it can be
+    # reached independently of this route) — this is a fast-fail HTTP-level
+    # rejection, not the authoritative check.
     record = _kick("restore", lambda cb: run_restore(name, on_progress=cb))
     return {"id": record.id, "status": "running"}
 

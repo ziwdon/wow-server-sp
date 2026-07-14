@@ -10,6 +10,7 @@ from app.services.backups import (
     backup_status,
     backups_summary,
     list_backups,
+    resolve_backup_archive,
 )
 
 
@@ -157,3 +158,16 @@ def test_list_backups_includes_preclear_label(tmp_path):
     rows = list_backups(backups_dir=b)
     assert len(rows) == 1
     assert rows[0].label == "preclear"
+
+
+def test_matching_backup_symlink_is_rejected_without_following(tmp_path):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    outside = tmp_path / "outside.tar.gz"
+    outside.write_bytes(b"secret")
+    link = backups / "azerothcore-backup-manual-link.tar.gz"
+    link.symlink_to(outside)
+
+    assert resolve_backup_archive(backups_dir=backups, archive_name=link.name) is None
+    with pytest.raises(BackupListingError):
+        list_backups(backups_dir=backups)
