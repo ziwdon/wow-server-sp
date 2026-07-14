@@ -72,6 +72,45 @@ for DB in "${DATABASES[@]}"; do
     fi
 done
 
+validate_v2_dump() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+
+DATABASES = ("acore_auth", "acore_characters", "acore_world", "acore_playerbots")
+HEADER_LIMIT = 4096
+TAIL_LIMIT = 8192
+path = sys.argv[1]
+found = []
+prefix = b"-- Current Database: `"
+
+with open(path, "rb") as stream:
+    at_line_start = True
+    while chunk := stream.readline(HEADER_LIMIT + 1):
+        if at_line_start and chunk.startswith(b"-- Current Database:"):
+            if len(chunk) > HEADER_LIMIT or not chunk.endswith(b"\n"):
+                raise SystemExit("oversized database section header")
+            line = chunk.rstrip(b"\r\n")
+            if not (line.startswith(prefix) and line.endswith(b"`") and line.count(b"`") == 2):
+                raise SystemExit("malformed database section header")
+            try:
+                found.append(line.split(b"`", 2)[1].decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise SystemExit("unreadable database section header") from exc
+        at_line_start = chunk.endswith(b"\n")
+
+    if tuple(found) != DATABASES:
+        raise SystemExit("database sections are not exactly canonical and ordered")
+    size = stream.tell()
+    if size <= 0:
+        raise SystemExit("empty SQL stream")
+    stream.seek(max(0, size - TAIL_LIMIT))
+    tail = stream.read(TAIL_LIMIT)
+    if re.search(rb"(?:^|\n)-- Dump completed on [^\r\n]+\s*\Z", tail) is None:
+        raise SystemExit("missing terminal mysqldump completion footer")
+PY
+}
+
 # One mysqldump invocation creates one InnoDB transaction snapshot spanning
 # all four schemas. Separate --single-transaction invocations can otherwise
 # capture cross-database rows at different moments.
@@ -79,6 +118,11 @@ docker exec "${DB_CONTAINER}" mysqldump -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" \
     --single-transaction --routines --triggers --events --databases "${DATABASES[@]}" \
     > "${STAGE}/sql/azerothcore.sql"
 log "Dumped all four databases from one consistent transaction snapshot"
+
+if ! validation_detail="$(validate_v2_dump "${STAGE}/sql/azerothcore.sql" 2>&1)"; then
+    log "ERROR: SQL stream failed canonical validation: ${validation_detail}" >&2
+    exit 1
+fi
 
 TMP_ARCHIVE="${BACKUP_DIR}/.${ARCHIVE##*/}.tmp.$$"
 
