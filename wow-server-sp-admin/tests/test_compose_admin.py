@@ -1,4 +1,24 @@
 from app.services.compose_admin import AdminCompose, validate_restored_overlay
+from app.services.config_index import KeyEntry
+
+FOO_ENABLE_ENTRY = KeyEntry(
+    key="Foo.Enable",
+    default="1",
+    inferred_type="bool",
+    comment="",
+    source_file="worldserver.conf.dist",
+    line_number=1,
+    env_var="AC_FOO_ENABLE",
+)
+AHBOT_GUIDS_ENTRY = KeyEntry(
+    key="AuctionHouseBot.GUIDs",
+    default="",
+    inferred_type="string",
+    comment="",
+    source_file="mod_ahbot.conf.dist",
+    line_number=1,
+    env_var="AC_AUCTION_HOUSE_BOT_GUIDS",
+)
 
 
 def test_read_empty_file_returns_empty_env(tmp_path):
@@ -94,16 +114,18 @@ def test_validate_restored_overlay_accepts_only_the_managed_environment_shape(tm
         "      AC_FOO_ENABLE: '1'\n"
     )
 
-    assert validate_restored_overlay(path, allowed_env_vars={"AC_FOO_ENABLE"}) is None
+    assert validate_restored_overlay(
+        path, entries_by_env={"AC_FOO_ENABLE": FOO_ENABLE_ENTRY},
+    ) is None
 
 
 def test_validate_restored_overlay_rejects_malformed_extra_and_unapproved_content(tmp_path):
     path = tmp_path / "admin.yml"
     path.write_text("services: [not-a-mapping\n")
-    assert "malformed" in validate_restored_overlay(path, allowed_env_vars=set())
+    assert "malformed" in validate_restored_overlay(path, entries_by_env={})
 
     path.write_text("services:\n  ac-database:\n    environment: {}\n")
-    assert "extra services" in validate_restored_overlay(path, allowed_env_vars=set())
+    assert "extra services" in validate_restored_overlay(path, entries_by_env={})
 
     path.write_text(
         "services:\n"
@@ -111,7 +133,7 @@ def test_validate_restored_overlay_rejects_malformed_extra_and_unapproved_conten
         "    environment:\n"
         "      AC_NOT_APPROVED: '1'\n"
     )
-    assert "not approved" in validate_restored_overlay(path, allowed_env_vars=set())
+    assert "not approved" in validate_restored_overlay(path, entries_by_env={})
 
     path.write_text(
         "services:\n"
@@ -121,5 +143,5 @@ def test_validate_restored_overlay_rejects_malformed_extra_and_unapproved_conten
     )
     assert "blocked key" in validate_restored_overlay(
         path,
-        allowed_env_vars={"AC_AUCTION_HOUSE_BOT_GUIDS"},
+        entries_by_env={"AC_AUCTION_HOUSE_BOT_GUIDS": AHBOT_GUIDS_ENTRY},
     )
