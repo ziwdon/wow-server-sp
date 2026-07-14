@@ -120,17 +120,9 @@ def test_backups_list_makes_every_matching_archive_selectable(client, tmp_path):
     assert download.content
 
 
-def test_backups_metadata_errors_are_safe_in_both_fragments(client, tmp_path, monkeypatch):
+def test_backups_metadata_errors_are_safe_in_both_fragments(client, tmp_path):
     archive = tmp_path / "backups" / "azerothcore-backup-manual-secret.tar.gz"
-    archive.write_bytes(b"metadata only")
-    real_stat = Path.stat
-
-    def fail_archive_stat(path, *args, **kwargs):
-        if path == archive:
-            raise OSError("permission denied: /secret/path")
-        return real_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", fail_archive_stat)
+    archive.symlink_to(tmp_path / "secret" / "missing.tar.gz")
 
     for endpoint in ("/api/backups/summary", "/api/backups/list"):
         response = client.get(endpoint)
@@ -139,12 +131,10 @@ def test_backups_metadata_errors_are_safe_in_both_fragments(client, tmp_path, mo
         assert "/secret/path" not in response.text
 
 
-def test_backups_enumeration_errors_are_safe_in_both_fragments(client, monkeypatch):
-    monkeypatch.setattr(
-        Path,
-        "glob",
-        lambda *_a, **_k: (_ for _ in ()).throw(OSError("permission denied: /secret/path")),
-    )
+def test_backups_enumeration_errors_are_safe_in_both_fragments(client, tmp_path):
+    backups = tmp_path / "backups"
+    backups.rmdir()
+    backups.write_text("not a directory")
 
     for endpoint in ("/api/backups/summary", "/api/backups/list"):
         response = client.get(endpoint)

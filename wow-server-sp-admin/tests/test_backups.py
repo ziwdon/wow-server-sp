@@ -138,15 +138,12 @@ def test_list_and_summary_never_open_or_validate_archives(tmp_path, monkeypatch)
     assert summary.total_count == 1
 
 
-def test_list_backups_wraps_directory_enumeration_errors(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        Path,
-        "glob",
-        lambda *_a, **_k: (_ for _ in ()).throw(OSError("permission denied: /secret/path")),
-    )
+def test_list_backups_wraps_real_directory_enumeration_errors(tmp_path):
+    backups = tmp_path / "backups"
+    backups.write_text("not a directory")
 
     with pytest.raises(BackupListingError, match=r"^Could not read backup metadata\.$"):
-        list_backups(backups_dir=tmp_path)
+        list_backups(backups_dir=backups)
 
 
 def test_list_backups_empty_dir(tmp_path):

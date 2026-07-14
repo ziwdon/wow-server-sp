@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,20 +75,30 @@ def list_backups(*, backups_dir: Path) -> list[BackupInfo]:
     card. The filename is still parsed, but only for the label.
     """
     try:
+        entries = os.scandir(backups_dir)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise BackupListingError() from exc
+
+    try:
         out: list[BackupInfo] = []
-        for p in backups_dir.glob("azerothcore-backup-*.tar.gz"):
-            m = _ARCHIVE_RE.match(p.name)
-            if not m:
-                continue
-            st = p.stat()
-            out.append(
-                BackupInfo(
-                    filename=p.name,
-                    label=m.group(1),
-                    created=_dt.datetime.fromtimestamp(st.st_mtime, tz=_dt.timezone.utc),
-                    size_bytes=st.st_size,
+        with entries:
+            for entry in entries:
+                m = _ARCHIVE_RE.match(entry.name)
+                if not m:
+                    continue
+                st = entry.stat()
+                out.append(
+                    BackupInfo(
+                        filename=entry.name,
+                        label=m.group(1),
+                        created=_dt.datetime.fromtimestamp(
+                            st.st_mtime, tz=_dt.timezone.utc
+                        ),
+                        size_bytes=st.st_size,
+                    )
                 )
-            )
     except OSError as exc:
         raise BackupListingError() from exc
     out.sort(key=lambda b: b.created, reverse=True)
