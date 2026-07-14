@@ -9,6 +9,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services import logs as logs_svc
+
 
 _ARCHIVE_RE = re.compile(
     r"^azerothcore-backup-(daily|manual|prerestore|preclear|imported)-(.+)\.tar\.gz$"
@@ -33,15 +35,14 @@ def backup_status(*, backups_dir: Path, log_path: Path) -> BackupStatus:
             last_mtime = max(mtimes)
 
     last_error: str | None = None
-    if log_path.exists():
-        for line in reversed(log_path.read_text(errors="replace").splitlines()):
-            if "Backup complete." in line:
-                # A newer completed run supersedes historical failures. The log
-                # still retains those entries for operators who need history.
-                break
-            if "] ERROR:" in line:
-                last_error = line
-                break
+    for line in reversed(logs_svc.tail_filtered(log_path, n=10_000, max_bytes=1024 * 1024)):
+        if "Backup complete." in line:
+            # A newer completed run supersedes historical failures. The log
+            # still retains those entries for operators who need history.
+            break
+        if "] ERROR:" in line:
+            last_error = line
+            break
 
     return BackupStatus(last_backup_unix=last_mtime, last_error=last_error)
 

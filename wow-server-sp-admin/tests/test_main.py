@@ -8,7 +8,7 @@ import time
 import app.main as main
 from app.main import _format_started_at, _render_done, _render_progress
 from app.services.runner import ActionRecord
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from app.main import app
 from app.services.app_events import AppEvent
@@ -82,6 +82,23 @@ def test_api_backups_timestamp_includes_utc():
         resp = client.get("/api/backups")
     assert resp.status_code == 200
     assert "UTC" in resp.text
+
+
+def test_api_backups_offloads_status_collection(tmp_path, monkeypatch):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    import app.main as main
+    with patch.object(
+        main.asyncio,
+        "to_thread",
+        new=AsyncMock(return_value=BackupStatus(None, None)),
+    ) as offload:
+        response = TestClient(main.app).get("/api/backups")
+    assert response.status_code == 200
+    offload.assert_awaited_once_with(
+        main.backups_svc.backup_status,
+        backups_dir=tmp_path / "backups",
+        log_path=tmp_path / "logs" / "backup.log",
+    )
 
 
 def test_api_logs_requests_forty_lines():

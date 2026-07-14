@@ -327,7 +327,8 @@ async def api_logs(request: Request) -> HTMLResponse:
 @app.get("/api/backups", response_class=HTMLResponse)
 async def api_backups(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
-    s = backups_svc.backup_status(
+    s = await asyncio.to_thread(
+        backups_svc.backup_status,
         backups_dir=ac / "backups",
         log_path=ac / "logs" / "backup.log",
     )
