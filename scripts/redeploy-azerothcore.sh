@@ -115,9 +115,16 @@ if [ "$status" != "running" ]; then
     exit 1
 fi
 
-# Server.log opens in mode 'w' each boot (truncated), so a match here is from
-# THIS boot, not a stale prior one.
-LOG="logs/Server.log"
+# Server.log is a host-mounted file that may not yet have been truncated/
+# rewritten by the freshly recreated container by the time we start polling,
+# so a match there can be a STALE marker from the previous boot. Only trust
+# "World Initialized" observed in this container's own logs since its actual
+# current start time.
+started_at="$(docker inspect -f '{{.State.StartedAt}}' "$SERVICE" 2>/dev/null || true)"
+if [ -z "$started_at" ]; then
+    echo "ERROR: could not determine $SERVICE current start time." >&2
+    exit 1
+fi
 echo "    waiting for 'World Initialized' (up to ${WORLD_INIT_TIMEOUT}s)..."
 deadline=$(( $(date +%s) + WORLD_INIT_TIMEOUT ))
 init_ok=0
@@ -128,7 +135,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         docker compose logs --tail 50 "$SERVICE" || true
         exit 1
     fi
-    if [ -f "$LOG" ] && grep -q "World Initialized" "$LOG" 2>/dev/null; then
+    if docker logs --since "$started_at" "$SERVICE" 2>&1 | grep -q "World Initialized"; then
         init_ok=1
         break
     fi
