@@ -22,6 +22,7 @@ import re
 import uuid
 
 from app.services import backups as backups_svc
+from app.services import app_events
 from app.services import db_stats
 from app.services import docker_client
 from app.services import logs as logs_svc
@@ -267,15 +268,23 @@ async def api_stats_refresh() -> dict:
 @app.get("/api/players", response_class=HTMLResponse)
 async def api_players(request: Request) -> HTMLResponse:
     counts = None
+    context = {"counts": counts}
     try:
         creds = db_credentials()
         counts = await asyncio.to_thread(db_stats.count_online, **creds)
-    except Exception:  # noqa: BLE001 — DB may be down; UI surfaces None
-        counts = None
+        context["counts"] = counts
+    except Exception as exc:  # noqa: BLE001 — DB may be down; UI surfaces an incident
+        event = app_events.record_exception(
+            log,
+            "database_stats",
+            "Database statistics could not be loaded.",
+            exc,
+        )
+        context["incident_id"] = event.incident_id
     return templates.TemplateResponse(
         request,
         "partials/players.html",
-        {"counts": counts},
+        context,
     )
 
 

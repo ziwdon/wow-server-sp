@@ -3,7 +3,8 @@
   {% if counts %}
   <div class="stat-value">{{ counts.real }} real · {{ counts.bots }} bots</div>
   {% else %}
-  <div class="stat-value" style="color:var(--text-muted)">—</div>
-  <div class="stat-sub">DB unreachable</div>
+  <div class="stat-value stat-unavailable">Stats unavailable</div>
+  <div class="stat-sub">Database statistics could not be loaded.</div>
+  <a class="incident-link" href="/?app_event={{ incident_id }}#logs">View App Event {{ incident_id }}</a>
   {% endif %}
 </div>

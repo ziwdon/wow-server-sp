@@ -11,7 +11,9 @@ from app.services.runner import ActionRecord
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from app.main import app
+from app.services.app_events import AppEvent
 from app.services.backups import BackupStatus
+from app.services.db_stats import OnlineCounts
 from starlette.requests import Request
 import pytest
 
@@ -132,20 +134,44 @@ def test_stats_player_card_keeps_its_polling_wrapper_after_a_swap():
     assert 'hx-swap="innerHTML"' in template
 
 
+def test_api_players_renders_online_counts_without_recording_an_incident():
+    with patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
+         patch("app.main.db_stats.count_online", return_value=OnlineCounts(real=3, bots=250)), \
+         patch("app.services.app_events.record_exception") as record_exception:
+        client = TestClient(app)
+        response = client.get("/api/players")
+
+    assert response.status_code == 200
+    assert "3 real · 250 bots" in response.text
+    assert "Stats unavailable" not in response.text
+    record_exception.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_blocked_online_count_keeps_liveness_and_sse_responsive_then_renders_unavailable():
     closed = threading.Event()
+    raw_error = "database-password-leaked-in-error"
+    event = AppEvent(
+        incident_id="EVT-TEST",
+        first_seen=dt.datetime(2026, 7, 14, tzinfo=dt.timezone.utc),
+        last_seen=dt.datetime(2026, 7, 14, tzinfo=dt.timezone.utc),
+        severity="error",
+        component="database_stats",
+        summary="Database statistics could not be loaded.",
+        occurrences=1,
+    )
 
     def blocked_count(**_):
         try:
             time.sleep(0.2)
-            raise TimeoutError("query timed out")
+            raise TimeoutError(raw_error)
         finally:
             closed.set()
 
     request = Request({"type": "http", "method": "GET", "path": "/api/players", "headers": []})
     with patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
          patch("app.main.db_stats.count_online", side_effect=blocked_count), \
+         patch("app.services.app_events.record_exception", return_value=event) as record_exception, \
          patch("app.main.runner.current", return_value=None), \
          patch("app.main.runner.last", return_value=None):
         started = time.monotonic()
@@ -160,7 +186,19 @@ async def test_blocked_online_count_keeps_liveness_and_sse_responsive_then_rende
     assert responsive_after - started < 0.1
     assert health == {"status": "ok"}
     assert heartbeat["event"] == "heartbeat"
-    assert "DB unreachable" in players_response.body.decode()
+    body = players_response.body.decode()
+    assert "Stats unavailable" in body
+    assert "Database statistics could not be loaded." in body
+    assert 'href="/?app_event=EVT-TEST#logs"' in body
+    assert "View App Event EVT-TEST" in body
+    assert raw_error not in body
+    exception = record_exception.call_args.args[3]
+    assert str(exception) == raw_error
+    assert record_exception.call_args.args[:3] == (
+        main.log,
+        "database_stats",
+        "Database statistics could not be loaded.",
+    )
     assert closed.is_set()
 
 
