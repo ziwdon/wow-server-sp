@@ -257,6 +257,47 @@ pre.logview {
   background: var(--log-bg);
   min-height: 0;
 }
+.app-events-log {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  background: var(--log-bg);
+  color: var(--text-warm);
+}
+.app-events-toolbar {
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.app-event-filters { display: flex; gap: 0.25rem; }
+.app-event-filter {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+.app-event-filter.active { border-color: var(--gold); color: var(--gold-bright); }
+.app-event-list { padding: 0.25rem 0.75rem; }
+.app-event-row { padding: 0.5rem 0; border-bottom: 1px solid var(--border-dark); }
+.app-event-row:last-child { border-bottom: 0; }
+.app-event-row:focus { outline: 2px solid var(--gold); outline-offset: -2px; }
+.app-event-heading, .app-event-times { display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; align-items: center; }
+.app-event-heading { font-size: 0.73rem; }
+.app-event-heading code { color: var(--blue); }
+.app-event-severity { font-weight: 700; text-transform: uppercase; }
+.app-event-warning .app-event-severity { color: var(--yellow); }
+.app-event-error .app-event-severity { color: var(--red); }
+.app-event-component { color: var(--gold); }
+.app-event-row p { margin: 0.25rem 0; color: var(--text); font-size: 0.8rem; }
+.app-event-times { color: var(--text-dim); font-size: 0.7rem; }
 
 /* ── Server Activity ── */
 #action-log {

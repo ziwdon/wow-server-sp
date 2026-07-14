@@ -56,6 +56,32 @@ test('HTMX polling swaps every server status in the status matrix', async ({ pag
   }
 });
 
+test('incident links activate and focus App Events and refresh preserves the tab', async ({ page }) => {
+  await page.goto('/?app_event=EVT-BROWSER#logs');
+
+  const appEventsTab = page.getByRole('tab', { name: 'App Events' });
+  const incident = page.locator('[data-incident-id="EVT-BROWSER"]');
+  await expect(appEventsTab).toHaveClass(/active/);
+  await expect(appEventsTab).toHaveAttribute('aria-selected', 'true');
+  await expect(incident).toBeVisible();
+  await expect(incident).toBeFocused();
+
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(appEventsTab).toHaveClass(/active/);
+  await expect(page.locator('#app-events-log')).toBeVisible();
+  await expect(page.locator('[data-incident-id="EVT-BROWSER"]')).toBeFocused();
+});
+
+test('App Events severity filters hide warnings and retain errors', async ({ page }) => {
+  await page.goto('/#logs');
+  await page.getByRole('tab', { name: 'App Events' }).click();
+  await page.getByRole('button', { name: 'Errors', exact: true }).click();
+
+  await expect(page.locator('[data-event-severity="warning"]')).toBeHidden();
+  await expect(page.locator('[data-event-severity="error"]')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Errors', exact: true })).toHaveAttribute('aria-pressed', 'true');
+});
+
 for (const action of ['apply', 'rollback']) {
   test(`${action} waits for real SSE progress before a successful redirect`, async ({ page }) => {
     await page.goto('/settings');

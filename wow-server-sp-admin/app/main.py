@@ -292,6 +292,22 @@ async def api_players(request: Request) -> HTMLResponse:
 async def api_logs(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     logs_dir = ac / "logs"
+    recent_events = [
+        {
+            "incident_id": event.incident_id,
+            "first_seen": event.first_seen.astimezone(dt.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            ),
+            "last_seen": event.last_seen.astimezone(dt.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            ),
+            "severity": event.severity,
+            "component": event.component,
+            "summary": event.summary,
+            "occurrences": event.occurrences,
+        }
+        for event in app_events.events.snapshot()
+    ]
     return templates.TemplateResponse(
         request,
         "partials/logs.html",
@@ -300,6 +316,7 @@ async def api_logs(request: Request) -> HTMLResponse:
             "errors_lines": logs_svc.tail_filtered(logs_dir / "Errors.log", n=40),
             "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=40),
             "pb_lines": logs_svc.tail_filtered(logs_dir / "Playerbots.log", n=40),
+            "app_events": recent_events,
         },
     )
 

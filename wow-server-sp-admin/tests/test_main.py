@@ -116,6 +116,69 @@ def test_api_logs_clean_bar_when_errors_log_empty():
     assert "log-tab-dirty" not in resp.text
 
 
+def test_api_logs_renders_app_events_as_fourth_final_tab_with_safe_fields():
+    warning = AppEvent(
+        incident_id="EVT-WARNING",
+        first_seen=dt.datetime(2026, 7, 14, 10, 0, tzinfo=dt.timezone.utc),
+        last_seen=dt.datetime(2026, 7, 14, 10, 5, tzinfo=dt.timezone.utc),
+        severity="warning",
+        component="backups",
+        summary="Backup metadata could not be read.",
+        occurrences=3,
+    )
+    error = AppEvent(
+        incident_id="EVT-ERROR",
+        first_seen=dt.datetime(2026, 7, 14, 11, 0, tzinfo=dt.timezone.utc),
+        last_seen=dt.datetime(2026, 7, 14, 11, 2, tzinfo=dt.timezone.utc),
+        severity="error",
+        component="database_stats",
+        summary="Database statistics could not be loaded.",
+        occurrences=2,
+    )
+    with patch("app.main.logs_svc.tail_filtered", return_value=[]) as mock_tail, \
+         patch("app.main.logs_svc.file_size", return_value=0), \
+         patch("app.main.app_events.events.snapshot", return_value=(error, warning)):
+        response = TestClient(app).get("/api/logs")
+
+    assert response.status_code == 200
+    body = response.text
+    assert mock_tail.call_count == 3
+    assert all(call.kwargs["n"] == 40 for call in mock_tail.call_args_list)
+    assert body.count('role="tab"') == 4
+    assert body.index("Server.log") < body.index("Playerbots.log") < body.index("Errors.log") < body.index("App Events")
+    assert body.index('id="app-events-log-tab"') < body.index('id="app-events-log"')
+    assert "App Events" in body
+    assert "since the last app restart" in body
+    for value in (
+        "EVT-WARNING",
+        "EVT-ERROR",
+        "backups",
+        "database_stats",
+        "warning",
+        "error",
+        "Backup metadata could not be read.",
+        "Database statistics could not be loaded.",
+        "2026-07-14 10:00 UTC",
+        "2026-07-14 11:02 UTC",
+        "3 occurrences",
+        "2 occurrences",
+    ):
+        assert value in body
+    assert 'data-incident-id="EVT-WARNING"' in body
+    assert 'data-event-severity="warning"' in body
+    assert "exception" not in body.lower()
+
+
+def test_api_logs_renders_empty_app_events_state():
+    with patch("app.main.logs_svc.tail_filtered", return_value=[]), \
+         patch("app.main.logs_svc.file_size", return_value=0), \
+         patch("app.main.app_events.events.snapshot", return_value=()):
+        response = TestClient(app).get("/api/logs")
+
+    assert response.status_code == 200
+    assert "No recent app events." in response.text
+
+
 def test_stats_page_renders_and_nav_between_dashboard_and_settings():
     client = TestClient(app)
     resp = client.get("/stats")

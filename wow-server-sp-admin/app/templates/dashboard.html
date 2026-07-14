@@ -58,11 +58,40 @@
 </div>
 <script>
 function switchLog(btn, targetId) {
-  document.querySelectorAll('.log-tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.log-tab').forEach(function(t) {
+    t.classList.remove('active');
+    t.setAttribute('aria-selected', 'false');
+  });
   document.querySelectorAll('.logview').forEach(function(p) { p.style.display = 'none'; });
   btn.classList.add('active');
+  btn.setAttribute('aria-selected', 'true');
   var el = document.getElementById(targetId);
   if (el) el.style.display = '';
+}
+
+function filterAppEvents(button, severity) {
+  document.querySelectorAll('.app-event-filter').forEach(function(filter) {
+    var selected = filter === button;
+    filter.classList.toggle('active', selected);
+    filter.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  });
+  document.querySelectorAll('.app-event-row').forEach(function(row) {
+    row.hidden = severity !== 'all' && row.dataset.eventSeverity !== severity;
+  });
+}
+
+function activateRequestedAppEvent() {
+  var incidentId = new URLSearchParams(window.location.search).get('app_event');
+  if (!incidentId || !/^EVT-[A-Z0-9-]{1,64}$/.test(incidentId)) return;
+  var match = Array.from(document.querySelectorAll('.app-event-row')).find(function(row) {
+    return row.dataset.incidentId === incidentId;
+  });
+  if (!match) return;
+  var tab = document.querySelector(".log-tab[aria-controls='app-events-log']");
+  if (!tab) return;
+  switchLog(tab, 'app-events-log');
+  match.focus({ preventScroll: true });
+  match.scrollIntoView({ block: 'nearest' });
 }
 
 // Refresh logs while keeping whichever tab is currently active.
@@ -79,10 +108,15 @@ function refreshLogsPreservingTab() {
     logsEl.removeEventListener('htmx:afterSettle', handler);
     var btn = document.querySelector(".log-tab[onclick*=\"'" + tabId + "'\"]");
     if (btn) switchLog(btn, tabId);
+    activateRequestedAppEvent();
   }, { once: true });
 
   htmx.ajax('GET', '/api/logs', {target: '#logs', swap: 'innerHTML'});
 }
+
+document.getElementById('logs').addEventListener('htmx:afterSettle', function() {
+  activateRequestedAppEvent();
+});
 
 // Keep the prior activity visible when a request is rejected. Once the server
 // accepts a new action id, replace the log with that action's progress.
