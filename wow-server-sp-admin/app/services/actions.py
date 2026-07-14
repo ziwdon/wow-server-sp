@@ -7,6 +7,7 @@ HTTP route can stream updates via SSE.
 from __future__ import annotations
 
 import enum
+import fcntl
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,11 +63,39 @@ class ActionTimeout(RuntimeError):
     """A bounded external command exceeded its deadline."""
 
 
+class RestoreBusy(RuntimeError):
+    """The backup/restore mutation lock is already held by another run."""
+
+
 class ActionResult(str, enum.Enum):
     OK = "ok"
     TIMEOUT = "timeout"
     ALREADY = "already"
     ERROR = "error"
+
+
+@contextmanager
+def _backup_mutation_lock(backups_dir: Path):
+    """Serialize DB-mutating work against `scripts/backup.sh`'s own flock.
+
+    Both backup.sh and restore-azerothcore.sh take a non-blocking exclusive
+    flock on `${backups_dir}/.backup.lock` before touching the databases.
+    In-app restore must hold the SAME lock while it mutates, but only around
+    the mutation itself: create_backup() (the pre-restore safety backup)
+    shells out to the same backup.sh script, which acquires this lock
+    itself. Acquiring it any earlier here would make that safety backup's
+    own flock attempt fail against ourselves.
+    """
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    with (backups_dir / ".backup.lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RestoreBusy("backup or restore is already running") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _wait_for_status(target: str, timeout: int, on_progress: ProgressCb) -> bool:
@@ -634,22 +664,41 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
             _restart_after_restore_failure(on_progress)
             return ActionResult.ERROR
         password = str(db_credentials()["password"])
-        if v2:
-            imported = _import_multi_database(stage / "sql" / "azerothcore.sql", password, on_progress)
-            if not imported:
-                on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
-                return ActionResult.ERROR
-        else:
-            for db in selected:
-                sql_path = stage / "sql" / f"{db}.sql"
-                if not _import_db(db, sql_path, password, on_progress):
+        # From here on we are mutating the databases: hold the same lock
+        # backup.sh/restore-azerothcore.sh take, so a concurrent host cron
+        # backup can't race the in-app restore. Acquired only now -- AFTER
+        # the safety backup above has already completed -- because that
+        # safety backup shells out to the same backup.sh, which takes this
+        # exact lock itself; grabbing it any earlier would make the safety
+        # backup fail against ourselves.
+        with _backup_mutation_lock(backups_dir):
+            if v2:
+                imported = _import_multi_database(stage / "sql" / "azerothcore.sql", password, on_progress)
+                if not imported:
                     on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
                     return ActionResult.ERROR
+            else:
+                for db in selected:
+                    sql_path = stage / "sql" / f"{db}.sql"
+                    if not _import_db(db, sql_path, password, on_progress):
+                        on_progress("restore", f"FAILED after replacing database(s); server remains stopped. Restore safety archive: {safety.archive}")
+                        return ActionResult.ERROR
 
-        # 6. Restore admin.yml if present (the one config the admin may write).
-        if admin_yml.is_file():
-            on_progress("restore", "restoring docker-compose.admin.yml")
-            _restore_admin_yml(admin_yml, ac_stack)
+            # 6. Restore admin.yml if present (the one config the admin may write).
+            if admin_yml.is_file():
+                on_progress("restore", "restoring docker-compose.admin.yml")
+                _restore_admin_yml(admin_yml, ac_stack)
+
+            # 7. Start (still under the lock: the running worldserver is
+            # itself part of the mutation window until it's back up).
+            start = run_start(on_progress=on_progress)
+    except RestoreBusy:
+        on_progress(
+            "restore",
+            "backup or restore is already running; aborting and restarting",
+        )
+        _restart_after_restore_failure(on_progress)
+        return ActionResult.ERROR
     except ActionTimeout as e:
         log.warning("restore command timed out: %s", e)
         on_progress("restore", f"{e}; server remains stopped; restore the pre-restore archive to recover")
@@ -665,8 +714,6 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
 
-    # 7. Start.
-    start = run_start(on_progress=on_progress)
     if start not in (ActionResult.OK, ActionResult.ALREADY):
         on_progress(
             "restore",

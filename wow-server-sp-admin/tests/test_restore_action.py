@@ -1,3 +1,4 @@
+import fcntl
 import io
 import json
 import os
@@ -626,6 +627,40 @@ def test_run_restore_aborts_if_safety_backup_fails(
     r = actions.run_restore("azerothcore-backup-manual-x.tar.gz", on_progress=lambda *a: None)
     assert r == ActionResult.ERROR
     mock_start.assert_called_once()  # server brought back up after abort
+
+
+@patch("app.services.actions.run_start", return_value=ActionResult.OK)
+@patch("app.services.actions.run_stop", return_value=ActionResult.OK)
+@patch("app.services.backup.run_backup")
+@patch("app.services.actions.subprocess.run")
+def test_in_app_restore_refuses_backup_lock_before_database_mutation(
+    mock_run, mock_backup, mock_stop, mock_start, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    archive = _make_v2_archive(
+        tmp_path / "backups", "azerothcore-backup-manual-x.tar.gz",
+    )
+    mock_backup.return_value = type(
+        "Result", (), {"ok": True, "archive": "safety.tar.gz", "output": ""}
+    )()
+    mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    progress = []
+    lock_path = archive.parent / ".backup.lock"
+    lock_path.touch()
+
+    with lock_path.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = actions.run_restore(
+            archive.name,
+            on_progress=lambda step, message: progress.append((step, message)),
+        )
+
+    assert result == ActionResult.ERROR
+    mock_stop.assert_called_once()
+    mock_backup.assert_called_once()
+    mock_run.assert_not_called()
+    mock_start.assert_called_once()
+    assert any("backup or restore is already running" in message for _, message in progress)
 
 
 @patch("app.services.actions.run_stop", return_value=ActionResult.OK)
