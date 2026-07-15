@@ -748,6 +748,13 @@ fi
 # the documented graveyard-zone data gap, which is advisory when it is the
 # only content.  Mixed content still fails so a benign line cannot hide an
 # unrelated runtime error.
+#
+# VERIFY_ERRORS_LOG_ADVISORY: when set, downgrade an otherwise-actionable
+# Errors.log from FAIL to advisory.  Callers that do NOT modify the running AC
+# server (e.g. the admin-app verify/redeploy path) set this so a redeploy is
+# not blocked by AC runtime noise that accumulates over hours of uptime — the
+# admin change cannot have caused it, and the other AC checks still gate.  The
+# standalone post-install run leaves it unset and stays strict.
 # ==========================================================================
 ERRORS_LOG="${STACK_DIR}/logs/Errors.log"
 if [ ! -f "$ERRORS_LOG" ]; then
@@ -756,10 +763,12 @@ elif [ ! -s "$ERRORS_LOG" ]; then
     ok "Errors.log is empty (no actionable runtime errors)"
 else
     actionable_errors="$(grep -vE 'Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard' "$ERRORS_LOG" 2>/dev/null || true)"
-    if [ -n "$actionable_errors" ]; then
-        fail "Errors.log has actionable runtime errors (inspect $ERRORS_LOG)"
-    else
+    if [ -z "$actionable_errors" ]; then
         info "Errors.log contains only the known graveyard_zone data-gap warning"
+    elif [ -n "${VERIFY_ERRORS_LOG_ADVISORY:-}" ]; then
+        info "Errors.log has runtime errors, treated as advisory (VERIFY_ERRORS_LOG_ADVISORY set); inspect $ERRORS_LOG"
+    else
+        fail "Errors.log has actionable runtime errors (inspect $ERRORS_LOG)"
     fi
 fi
 

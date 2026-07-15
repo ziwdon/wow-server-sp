@@ -123,10 +123,14 @@ else
 fi
 
 # 9. AC stack still functional (delegate)
+# The admin install/redeploy never modifies the running AC server, so AC runtime
+# noise in Errors.log (e.g. graveyard fallback lines that accumulate over hours
+# of uptime) must not fail admin verification. VERIFY_ERRORS_LOG_ADVISORY
+# downgrades only that check; every other AC check still gates.
 if [ -x "$(dirname "$0")/../../scripts/verify-azerothcore.sh" ]; then
     info "delegating to AC verify script (exit code preserved)"
     # shellcheck disable=SC2015
-    "$(dirname "$0")/../../scripts/verify-azerothcore.sh" >/dev/null 2>&1 \
+    VERIFY_ERRORS_LOG_ADVISORY=1 "$(dirname "$0")/../../scripts/verify-azerothcore.sh" >/dev/null 2>&1 \
         && ok "AC verify passed" \
         || fail "AC verify reported issues"
 else
