@@ -7,5 +7,11 @@
        hx-swap="innerHTML">
     <p class="loading">Loading progression data...</p>
   </div>
+  <div id="raid-unlock-data"
+       hx-get="/api/raid-unlock/characters"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading raid unlock data...</p>
+  </div>
 </div>
 {% endblock %}
