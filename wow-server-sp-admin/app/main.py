@@ -29,6 +29,7 @@ from app.services import logs as logs_svc
 from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
 from app.services import progression as progression_svc
+from app.services import raid_unlock as raid_unlock_svc
 from app.services import wow_reference as wow_ref
 from app.services.config_index import validate_value
 from app.services.stats_cache import refresher as stats_refresher
@@ -794,6 +795,11 @@ class ProgressionApplyPayload(BaseModel):
     target_expansion: str
 
 
+class RaidUnlockPayload(BaseModel):
+    guid: int
+    raid_key: str
+
+
 @app.get("/progression", response_class=HTMLResponse)
 async def progression_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -855,6 +861,53 @@ async def api_progression_apply(payload: ProgressionApplyPayload) -> dict:
         "effective_state": result.effective_state,
         "reason": result.reason,
         "message": result.message,
+    }
+
+
+@app.get("/api/raid-unlock/characters", response_class=HTMLResponse)
+async def api_raid_unlock_characters(request: Request) -> HTMLResponse:
+    rows = ()
+    err = None
+    try:
+        rows = await asyncio.to_thread(raid_unlock_svc.collect_characters, **db_credentials())
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+    rows_json = json.dumps([
+        {"guid": r.guid, "account": r.account, "name": r.name,
+         "level": r.level, "online": r.online}
+        for r in rows
+    ])
+    return templates.TemplateResponse(
+        request,
+        "partials/raid_unlock_page.html",
+        {
+            "rows": rows,
+            "rows_json": rows_json,
+            "raids": raid_unlock_svc.raid_choices(),
+            "error": err,
+        },
+    )
+
+
+@app.post("/api/raid-unlock/apply")
+async def api_raid_unlock_apply(payload: RaidUnlockPayload) -> dict:
+    if not runner.try_acquire_mutation():
+        raise HTTPException(status_code=409, detail="another destructive action is already running")
+    try:
+        result = await _await_thread_completion(lambda: raid_unlock_svc.send_raid_unlock(
+            guid=payload.guid,
+            raid_key=payload.raid_key,
+            **db_credentials(),
+        ))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        runner.release_mutation()
+    return {
+        "status": result.status,
+        "message": result.message,
+        "item_name": result.item_name,
+        "eta": result.eta_epoch,
     }
 
 
