@@ -142,7 +142,7 @@ Always INSERT IGNORE (never delete existing rows) — removing rows can confuse 
 
 **Onyxia 40-man (Tier 0/1) — entry mechanic:**
 - Entrance area trigger is in Dustwallow Marsh at the Onyxia's Lair cave (area trigger 2848, map 1)
-- Requires the **Drakefire Amulet** (item 11086) in your bags — obtained via the Onyxia attunement quest chain (Alliance: Marshal Maxwell in Morgan's Vigil; Horde: Warlord Goretooth in Kargath)
+- Requires the **Drakefire Amulet** (item 16309) in your bags — obtained via the Onyxia attunement quest chain (Alliance: Marshal Maxwell in Morgan's Vigil; Horde: Warlord Goretooth in Kargath)
 - UBRS attunement (Seal of Ascension) is also required as part of the chain
 - The mod uses the **10-man Heroic** difficulty slot (`RAID_DIFFICULTY_10MAN_HEROIC`) for the 40-man — **not** 25-man Normal
 - When a level ≤ 70 character with the amulet walks through the entrance trigger, the script **automatically forces your raid difficulty to 10-man Heroic** and teleports you in — regardless of what you had selected in the UI
