@@ -182,3 +182,21 @@ def test_actionable_errors_log_fails_but_known_graveyard_noise_is_advisory(tmp_p
     advisory = _run(stack, _stubs(tmp_path))
     assert "known graveyard_zone data-gap warning" in advisory.stdout
     _assert_complete_summary(advisory)
+
+
+def test_errors_log_advisory_flag_downgrades_actionable_errors(tmp_path):
+    stack = _stack(tmp_path)
+    errors = stack / "logs" / "Errors.log"
+    # A graveyard-family line the single whitelist pattern does not match — would
+    # fail by default, but the admin verify/redeploy path sets the advisory flag.
+    errors.write_text(
+        "GetClosestGraveyard: unable to find zoneId and areaId for map 1 coords (-26.6, 368.7, 98.4)\n"
+    )
+
+    strict = _run(stack, _stubs(tmp_path))
+    assert "Errors.log has actionable runtime errors" in strict.stdout
+
+    advisory = _run(stack, _stubs(tmp_path), VERIFY_ERRORS_LOG_ADVISORY="1")
+    assert "Errors.log has actionable runtime errors" not in advisory.stdout
+    assert "treated as advisory" in advisory.stdout
+    _assert_complete_summary(advisory)
