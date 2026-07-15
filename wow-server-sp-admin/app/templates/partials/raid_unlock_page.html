@@ -1,0 +1,233 @@
+<div id="raid-unlock-inner">
+  {% if error %}
+  <div class="banner error">Could not load raid unlock data: {{ error }}</div>
+  {% endif %}
+
+  {% if rows %}
+  <script type="application/json" id="raid-unlock-char-data">{{ rows_json | safe }}</script>
+
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">Raid unlock</span></div>
+    <div class="panel-body">
+      <div class="prog-layout">
+
+        <div class="left-col">
+          <div>
+            <label class="field-label" for="raid-account">Account</label>
+            <select id="raid-account" class="prog-account-select">
+              <option value="">— select account —</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label">Character</label>
+            <div class="char-list-box" id="raid-char-list">
+              <div class="char-list-hint">Select an account above</div>
+            </div>
+          </div>
+          <div id="raid-result" class="banner hidden"></div>
+          <button class="btn btn-apply raid-unlock-btn" id="raid-unlock-btn" disabled>Unlock raid</button>
+        </div>
+
+        <div class="right-col">
+          <span class="field-label" id="raid-picker-label">Raid</span>
+          <div class="raid-picker" id="raid-picker" role="group" aria-labelledby="raid-picker-label">
+            {% for key, label in raids %}
+            <button type="button" class="raid-tile" data-raid="{{ key }}" id="raid-tile-{{ key }}"
+                    aria-label="Select {{ label }}" aria-pressed="false">
+              <span class="raid-label">{{ label }}</span>
+            </button>
+            {% endfor %}
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div id="raid-confirm-overlay" class="prog-confirm-overlay hidden" aria-hidden="true">
+    <div class="prog-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="raid-confirm-title"
+         aria-describedby="raid-confirm-body" tabindex="-1">
+      <h3 class="prog-confirm-title" id="raid-confirm-title">Confirm Raid Unlock</h3>
+      <p class="prog-confirm-body" id="raid-confirm-body"></p>
+      <ul class="prog-confirm-notes">
+        <li>The item is delivered to the character's in-game mailbox.</li>
+        <li>Delivery may be delayed by the server's MailDeliveryDelay setting.</li>
+      </ul>
+      <div class="prog-confirm-actions">
+        <button class="btn btn-muted prog-confirm-cancel-btn" id="raid-confirm-cancel">Cancel</button>
+        <button class="btn btn-apply prog-confirm-yes-btn" id="raid-confirm-yes">Yes, send it</button>
+      </div>
+    </div>
+  </div>
+  {% elif not error %}
+  <p class="empty-state">No real-player characters found.</p>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  const dataEl = document.getElementById('raid-unlock-char-data');
+  if (!dataEl) return;
+  const esc = function(value) {
+    return String(value ?? '').replace(/[&<>"']/g, function(ch) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+    });
+  };
+  const chars = JSON.parse(dataEl.textContent || '[]');
+  let selectedChar = null;
+  let selectedRaid = null;
+  let confirmationOpen = false;
+
+  const accountSel = document.getElementById('raid-account');
+  const charList = document.getElementById('raid-char-list');
+  const unlockBtn = document.getElementById('raid-unlock-btn');
+  const resultEl = document.getElementById('raid-result');
+  const raidTiles = Array.prototype.slice.call(document.querySelectorAll('.raid-tile'));
+  if (!accountSel || !charList || !unlockBtn) return;
+
+  const accounts = [...new Set(chars.map(c => c.account))].sort();
+  accounts.forEach(function(a) {
+    const opt = document.createElement('option');
+    opt.value = a; opt.textContent = a;
+    accountSel.appendChild(opt);
+  });
+
+  function setResult(text, tone) {
+    if (!text) { resultEl.className = 'banner hidden'; return; }
+    resultEl.textContent = text;
+    resultEl.className = 'banner ' + (tone || 'ok');
+  }
+
+  function updateUnlock() {
+    unlockBtn.disabled = !(selectedChar && selectedRaid);
+  }
+
+  function raidLabel(key) {
+    const tile = document.getElementById('raid-tile-' + key);
+    return tile ? tile.querySelector('.raid-label').textContent : key;
+  }
+
+  function renderChars(account) {
+    charList.innerHTML = '';
+    selectedChar = null;
+    setResult('');
+    updateUnlock();
+    const filtered = chars.filter(function(c) { return c.account === account; })
+      .sort(function(a, b) { return b.level - a.level || a.name.localeCompare(b.name); });
+    if (!filtered.length) {
+      charList.innerHTML = '<div class="char-list-hint">No characters</div>';
+      return;
+    }
+    filtered.forEach(function(c) {
+      const row = document.createElement('div');
+      row.className = 'char-row' + (c.online ? ' online' : '');
+      row.setAttribute('role', 'button');
+      row.tabIndex = 0;
+      row.dataset.guid = String(c.guid);
+      const onlineBadge = c.online ? ' · <span style="color:#c97f7f">online</span>' : '';
+      row.innerHTML = '<span class="char-row-name">' + esc(c.name) + '</span>'
+        + '<span class="char-row-meta">Lvl ' + c.level + onlineBadge + '</span>';
+      row.addEventListener('click', function() { selectChar(c, row); });
+      row.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
+      });
+      charList.appendChild(row);
+    });
+  }
+
+  function selectChar(c, rowEl) {
+    selectedChar = c;
+    setResult('');
+    charList.querySelectorAll('.char-row').forEach(function(r) { r.classList.remove('selected'); });
+    rowEl.classList.add('selected');
+    updateUnlock();
+  }
+
+  function selectRaid(key) {
+    selectedRaid = key;
+    raidTiles.forEach(function(t) {
+      const on = t.dataset.raid === key;
+      t.classList.toggle('state-selected', on);
+      t.setAttribute('aria-pressed', String(on));
+    });
+    setResult('');
+    updateUnlock();
+  }
+
+  raidTiles.forEach(function(t) {
+    t.addEventListener('click', function() { selectRaid(t.dataset.raid); });
+  });
+
+  accountSel.addEventListener('change', function() {
+    if (accountSel.value) renderChars(accountSel.value);
+  });
+
+  function showConfirm(charName, raidLbl) {
+    return new Promise(function(resolve) {
+      const overlay = document.getElementById('raid-confirm-overlay');
+      const dialog = overlay && overlay.querySelector('.prog-confirm-dialog');
+      const body = document.getElementById('raid-confirm-body');
+      const yesBtn = document.getElementById('raid-confirm-yes');
+      const cancelBtn = document.getElementById('raid-confirm-cancel');
+      if (!overlay || !dialog || !body || !yesBtn || !cancelBtn) { resolve(false); return; }
+      body.textContent = 'Mail the ' + raidLbl + ' unlock item to ' + charName + '?';
+      overlay.classList.remove('hidden');
+      overlay.setAttribute('aria-hidden', 'false');
+      yesBtn.focus();
+      function cleanup(result) {
+        overlay.classList.add('hidden');
+        overlay.setAttribute('aria-hidden', 'true');
+        yesBtn.removeEventListener('click', onYes);
+        cancelBtn.removeEventListener('click', onCancel);
+        overlay.removeEventListener('click', onOverlay);
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      }
+      function onYes() { cleanup(true); }
+      function onCancel() { cleanup(false); }
+      function onOverlay(e) { if (e.target === overlay) cleanup(false); }
+      function trapFocus(e) {
+        const f = dialog.querySelectorAll('button:not([disabled])');
+        const first = f[0], last = f[f.length - 1];
+        if (!first || !last) { e.preventDefault(); dialog.focus(); return; }
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+        if (e.key === 'Tab') trapFocus(e);
+      }
+      yesBtn.addEventListener('click', onYes);
+      cancelBtn.addEventListener('click', onCancel);
+      overlay.addEventListener('click', onOverlay);
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  unlockBtn.addEventListener('click', async function() {
+    if (!selectedChar || !selectedRaid || confirmationOpen) return;
+    confirmationOpen = true;
+    unlockBtn.disabled = true;
+    const raidLbl = raidLabel(selectedRaid);
+    const confirmed = await showConfirm(selectedChar.name, raidLbl);
+    confirmationOpen = false;
+    if (!confirmed) { updateUnlock(); unlockBtn.focus(); return; }
+    try {
+      const response = await fetch('/api/raid-unlock/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({guid: selectedChar.guid, raid_key: selectedRaid})
+      });
+      const data = await response.json();
+      let tone = 'error';
+      if (response.ok && data.status === 'sent') tone = 'ok';
+      else if (response.ok && data.status === 'unconfirmed') tone = 'warning';
+      setResult(data.message || data.detail || 'Unknown result', tone);
+    } catch(e) {
+      setResult('Request failed: ' + e.message, false);
+    } finally {
+      updateUnlock();
+    }
+  });
+})();
+</script>

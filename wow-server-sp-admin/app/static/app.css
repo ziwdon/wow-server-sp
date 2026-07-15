@@ -1161,6 +1161,38 @@ pre.logview {
   filter: grayscale(1) brightness(0.5);
 }
 
+.raid-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: 320px;
+}
+.raid-tile {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  border: 2px solid var(--border);
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  user-select: none;
+}
+.raid-tile:hover { border-color: rgba(200, 155, 60, 0.4); }
+.raid-tile:focus-visible {
+  outline: 3px solid var(--gold-bright);
+  outline-offset: 3px;
+}
+.raid-tile.state-selected {
+  border-color: var(--gold);
+  box-shadow: 0 0 10px rgba(200, 155, 60, 0.35);
+}
+.raid-tile .raid-label { font-weight: 600; }
+
 @media (max-width: 768px) {
   .prog-layout {
     grid-template-columns: 1fr;
