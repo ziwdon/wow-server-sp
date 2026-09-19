@@ -236,6 +236,34 @@ docker compose up -d ac-worldserver
 ```
 Pair this with Solution A or B — otherwise bots will re-stick on the next round of RPG flights.
 
+### Scarlet Monastery Cathedral: "Chapel Door" needs The Scarlet Key even via Dungeon Finder
+
+**Symptom.** A Dungeon Finder group lands inside the Cathedral wing, clears the Chapel Gardens, and the big door to the chapel (Mograine/Whitemane) says *Requires The Scarlet Key*. Nothing is broken — `Errors.log` stays at 0 bytes.
+
+**Root cause (Blizzlike, deliberate upstream).** Dungeon Finder teleports past the *courtyard* key door (map 0, gameobject 101850), but the *inner* **Chapel Door** (gameobject 104591, spawn guid 11875, map 189) carries the same **lock 299** and, since AC update `2025_01_19_02.sql` (Jan 2025, comment *"It takes time to open the door with a key in Blizzard servers"*), `gameobject_template_addon.flags=34` = `GO_FLAG_LOCKED|NODESPAWN`. Matches TrinityCore issue #23432. Before that update AC's door simply opened on click, which is why older guides/AC experience say "no key needed". Herod's Door in the Armory (101854) is the same.
+
+Lock 299 (decoded from the server's `Lock.dbc`) accepts any one of: item **7146 The Scarlet Key**, **Lockpicking ≥ 175** (rogue), or **Blasting ≥ 175** (Engineering — Large Seaforium Charge, item 4398, needs Engineering 200). Retail LFG groups were expected to bring one of those; otherwise the group left to fetch the key.
+
+**Ways to open it (choose one):**
+
+1. **Blizzlike.** Leave through the wing's entrance portal (LFG eye → *Teleport out* also works), enter the **Library** portal in the same courtyard, kill Arcanist Doan, loot **Doan's Strongbox** (gameobject 103821, loot 4668 — 100% Scarlet Key, goes to the keyring). All four wings share one map/instance id, so Cathedral progress is kept; the key also opens the courtyard Cathedral Door on the way back.
+2. **Rogue bot.** mod-playerbots has no "pick lock on a door" action (`unlock items` is lockboxes only), but the bot `use` command calls `GameObject::Use()` directly and the server never enforces door locks on use (the lock is client-side). Whisper any bot standing near the door: `los gos` → shift-click the `[Chapel Door]` link → `use [Chapel Door]`. See `ref-playerbots.md` → "Open a door/lever with a bot". This bypasses the lock rather than picking it.
+3. **GM, in-game and inside that instance:** `.gobject activate 11875` (spawn guid; the GM must be on the same map/instance). Or select the player and `.additem 7146`. From the console: `.send items <Name> "Scarlet Key" "text" 7146:1`.
+4. **Server data (revert upstream's lock — diverges from Blizzlike, lost on a world re-import, needs a worldserver restart because there is no `.reload gameobject_template*`):**
+   ```sql
+   UPDATE acore_world.gameobject_template_addon SET flags = 32 WHERE entry = 104591;  -- Chapel Door
+   -- optionally also 101854 (Herod's Door). Revert: SET flags = 34
+   ```
+
+**Verify the data state:**
+```bash
+source /opt/stacks/azerothcore/.env
+docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e \
+  "SELECT t.entry,t.name,t.Data1 AS lockId,a.flags FROM acore_world.gameobject_template t \
+   JOIN acore_world.gameobject_template_addon a ON a.entry=t.entry WHERE t.entry IN (104591,101854,101850,101851);"
+# flags 34 = locked (upstream default since 2025-01), 32 = opens on click
+```
+
 ### Post-Unexpected-Shutdown Verification (power loss, forced reboot, OOM kill)
 
 Run these in order — stop at the first failure and investigate before continuing:

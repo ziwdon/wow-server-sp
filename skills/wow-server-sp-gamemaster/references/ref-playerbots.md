@@ -294,8 +294,22 @@ who                             # Show bot race, spec, class, level, avg iLvl, z
 who [profession name]           # Show profession skill levels
 stats                           # Show stat summary (inventory, gold, XP, etc.)
 los                             # List game objects, items, creatures, NPCs bot can see
+los gos                         # Only game objects (doors, levers, chests, nodes) as clickable links
 home                            # Set home at selected innkeeper
 ```
+
+---
+
+### Open a door/lever with a bot (`use` on a gameobject)
+
+`use` accepts a gameobject link, not just an item. Whisper a bot standing next to the object:
+
+```
+los gos                  # bot replies with links, e.g. [Chapel Door], [Lever]
+use [Chapel Door]        # shift-click the link into the whisper; bot calls GameObject::Use()
+```
+
+The server does not enforce door locks on use (the key/lockpick check is client-side), so this opens key-locked doors such as Scarlet Monastery's Chapel Door / Herod's Door. There is no lockpicking action for doors — `unlock items` only picks locked *items* (lockboxes). Details: `ref-troubleshooting.md` → "Scarlet Monastery Cathedral".
 
 ---
 
