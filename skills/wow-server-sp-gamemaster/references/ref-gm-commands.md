@@ -117,6 +117,7 @@ account set gmlevel mygm 3 -1
 | `.additemset <setid>` | 2 | Add item set |
 | `.item restore <GUID>` | 2 | Restore deleted item |
 | `.item move <slot> <bag> <slot>` | 2 | Move item to slot |
+| `.send items <player> "<subject>" "<text>" <itemid>[:count] ...` | 2 | Mail items to a player (works from the console; player may be offline) |
 
 > Item IDs: search Wowhead 3.3.5 or query `acore_world.item_template` WHERE name LIKE '%itemname%'
 
@@ -141,6 +142,19 @@ account set gmlevel mygm 3 -1
 | `.npc near [distance]` | 2 | List nearby NPCs |
 | `.lookup creature <name>` | 2 | Search creature entries |
 | `.wp show on` | 2 | Show waypoints of selected creature |
+
+### GameObject (doors, chests, levers)
+
+| Command | Security | Description |
+|---------|----------|-------------|
+| `.gobject near [distance]` | 2 | List gameobject spawns around you with their spawn GUIDs |
+| `.gobject target [entry/name]` | 2 | Select the nearest gameobject (prints entry + spawn GUID) |
+| `.gobject info <entry>` / `.gobject info guid <spawn guid>` | 2 | Show template info (type, display id, lock id) |
+| `.gobject activate <spawn guid>` | 2 | Open/trigger a door, button or lever — **you must be on the same map/instance** as the spawn |
+| `.gobject set state <spawn guid> <type> <state>` | 2 | Force a state (`type 0`: 0 = active/open, 1 = ready/closed) |
+| `.gobject respawn <spawn guid>` | 2 | Respawn a despawned gameobject |
+
+> Spawn GUIDs come from `acore_world.gameobject.guid` (e.g. Scarlet Monastery Chapel Door = 11875) and are the same in every instance of the map. `.gobject activate` ignores locks; there is **no** `.reload gameobject_template` / `gameobject_template_addon` — template/flag edits need a worldserver restart.
 
 ### Quest Management
 
