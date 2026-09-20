@@ -29,7 +29,7 @@ def test_new_account_with_one_character_announces_that_character():
     tracker = PresenceTracker()
     tracker.observe([])
 
-    assert tracker.observe([("CARLOS", "Armando")]) == ["Player Armando is online."]
+    assert tracker.observe([("CARLOS", "Armando")]) == ["Player Carlos (Armando) is online."]
 
 
 def test_new_account_with_several_characters_falls_back_to_account_name():
@@ -56,7 +56,7 @@ def test_offline_is_announced_only_after_two_consecutive_absent_polls():
     tracker.observe([("CARLOS", "Armando")])
 
     assert tracker.observe([]) == []
-    assert tracker.observe([]) == ["Player Armando has gone offline."]
+    assert tracker.observe([]) == ["Player Carlos (Armando) has gone offline."]
     assert tracker.observe([]) == []
 
 
@@ -68,7 +68,7 @@ def test_offline_uses_first_seen_character_not_the_alt_bots():
 
     tracker.observe([])
 
-    assert tracker.observe([]) == ["Player Armando has gone offline."]
+    assert tracker.observe([]) == ["Player Carlos (Armando) has gone offline."]
 
 
 def test_quick_character_swap_produces_no_announcement():
@@ -79,6 +79,8 @@ def test_quick_character_swap_produces_no_announcement():
 
     assert tracker.observe([("CARLOS", "Loriel")]) == []
     assert tracker.human_character("CARLOS") == "Loriel"
+    tracker.observe([])
+    assert tracker.observe([]) == ["Player Carlos (Loriel) has gone offline."]
 
 
 def test_two_accounts_are_tracked_independently():
@@ -87,11 +89,11 @@ def test_two_accounts_are_tracked_independently():
     tracker.observe([("CARLOS", "Armando")])
 
     msgs = tracker.observe([("CARLOS", "Armando"), ("EDUARDO", "Vegivaca")])
-    assert msgs == ["Player Vegivaca is online."]
+    assert msgs == ["Player Eduardo (Vegivaca) is online."]
 
     tracker.observe([("EDUARDO", "Vegivaca")])
     msgs = tracker.observe([("EDUARDO", "Vegivaca")])
-    assert msgs == ["Player Armando has gone offline."]
+    assert msgs == ["Player Carlos (Armando) has gone offline."]
     assert tracker.human_character("EDUARDO") == "Vegivaca"
     assert tracker.human_character("CARLOS") is None
 
@@ -184,7 +186,7 @@ def test_tick_announces_transitions_over_the_console(tmp_path, console):
     ann.tick()
     ann.tick()
 
-    assert console.sent == ["announce Player Armando is online."]
+    assert console.sent == ["announce Player Carlos (Armando) is online."]
 
 
 def test_tick_does_nothing_when_disabled(tmp_path, console):
@@ -253,7 +255,7 @@ def test_tick_skips_while_an_admin_action_is_running(tmp_path, console):
     ann.tick()
 
     assert query.call_count == 2
-    assert console.sent == ["announce Player Armando is online."]
+    assert console.sent == ["announce Player Carlos (Armando) is online."]
 
 
 def test_tick_swallows_console_failure_and_keeps_state(tmp_path, console):

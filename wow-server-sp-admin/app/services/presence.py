@@ -118,7 +118,9 @@ class _AccountState:
 
 
 def _display(account: str, human: str | None) -> str:
-    return human if human is not None else account.capitalize()
+    """'Carlos (Armando)', or just 'Carlos' when the human character is ambiguous."""
+    player = account.capitalize()
+    return f"{player} ({human})" if human is not None else player
 
 
 class PresenceTracker:
