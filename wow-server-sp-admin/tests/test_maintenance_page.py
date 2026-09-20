@@ -1,3 +1,4 @@
+import re
 from fastapi.testclient import TestClient
 
 
@@ -212,6 +213,12 @@ def test_bot_control_card_describes_reset_and_clear(tmp_path, monkeypatch):
     # Each button is immediately followed by its own explanation, inside the card.
     assert reset_btn < reset_desc < clear_btn < clear_desc
     assert "keeps its name, race and class" in card
-    assert "Nothing is deleted" in card
+    assert "Only bots currently logged in are affected" in card
+    assert "No accounts or characters are deleted" in card
     assert "safety backup" in card
-    assert "Requires typing <b>CLEAR</b> to confirm" in card
+    text = re.sub(r"<[^>]+>", "", card)
+    assert "Requires typing CLEAR to confirm" in text
+    # Screen readers announce each description with its button.
+    assert 'id="reset-bots-btn" aria-describedby="reset-bots-desc"' in card
+    assert 'id="clear-bots-btn" aria-describedby="clear-bots-desc"' in card
+    assert 'id="reset-bots-desc"' in card and 'id="clear-bots-desc"' in card

@@ -796,8 +796,7 @@ pre.logview {
 .bot-control-body { display: flex; flex-direction: column; gap: 0.9rem; }
 .bot-control-row { display: flex; gap: 0.9rem; align-items: flex-start; }
 .bot-control-row .btn { flex: 0 0 auto; min-width: 7rem; }
-.bot-control-row .maintenance-help { margin: 0; }
-.bot-control-row .maintenance-help b { color: var(--text-warm); font-weight: 600; }
+.bot-control-row .maintenance-help strong { color: var(--text-warm); font-weight: 600; }
 .maintenance-top-grid { margin-bottom: 1rem; }
 .maintenance-grid {
   display: grid;
