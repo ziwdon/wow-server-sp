@@ -70,6 +70,8 @@ docker run --rm -v "$(pwd)/wow-server-sp-admin:/src:ro" -w /src python:3.12-slim
      pip install -r requirements-dev.txt -q && python -m pytest -q"
 ```
 
+For an iterative TDD loop, start one long-lived sandbox (`docker run -d --name <x> -v "$(pwd)/wow-server-sp-admin:/src:ro" -w /src python:3.12-slim sleep infinity`, `pip install` once, then `docker exec <x> python -m pytest -q -p no:cacheprovider …`) instead of re-installing per run; `-p no:cacheprovider` silences the read-only-mount cache warnings. For a visual check of a template change, run uvicorn + `playwright` (`pip install playwright && playwright install --with-deps chromium`) inside a second sandbox container with the port published on `127.0.0.1` only, `init_state()` pointed at `/tmp` fixtures, and screenshot at 1400px and 390px. Neither container may mount `/var/run/docker.sock` or `/opt/stacks`; `docker rm -f` both when done and re-check `docker ps` for the `ac-*`/`azerothcore-admin` containers.
+
 `# shellcheck disable=SC1091` is used only for dynamic `source` calls. The other intentional cases use narrow local suppressions so the documented ShellCheck command remains a green gate:
 
 - **SC2016 on `escape_regex_metachars`** (~`install-azerothcore.sh:775`): `sed 's/[.[\*^$()+?{}|]/\\&/g'` MUST use single quotes — `\&` is sed's back-reference; double quotes would let the shell eat the backslash and break escaping.
