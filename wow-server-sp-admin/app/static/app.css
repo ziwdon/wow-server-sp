@@ -12,6 +12,7 @@
   --text-dim:    #55504a;
   --green:       #88c870;
   --red:         #c85050;
+  --orange:      #e08a3c;
   --blue:        #7ab0e0;
   --yellow:      #e0c45a;
   --yellow-bg:   #2a2410;
@@ -141,6 +142,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .btn-gold   { background: #2a2010; border-color: var(--gold);  color: var(--gold-bright); }
 .btn-green  { background: #0e1f0e; border-color: #2a6a1a;      color: var(--green); }
 .btn-danger { background: #1f0e0e; border-color: #6a1a1a;      color: var(--red); }
+.btn-warn   { background: #1f150a; border-color: #7a4a14;      color: var(--orange); }
 .btn-muted  { background: none;    border-color: var(--border); color: var(--text-muted); }
 .btn-apply  { background: #2a2010; border-color: var(--gold);   color: var(--gold-bright); width: 100%; }
 .btn-apply:disabled { opacity: 0.4; cursor: not-allowed; }
