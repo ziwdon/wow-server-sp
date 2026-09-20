@@ -793,7 +793,8 @@ pre.logview {
 
 /* --- Maintenance page --- */
 .maintenance-page { overflow-y: auto; }
-.bot-control-body { display: flex; gap: 0.75rem; justify-content: center; }
+.bot-control-body { display: flex; gap: 0.75rem; justify-content: center; align-items: center; }
+.maintenance-top-grid { margin-bottom: 1rem; }
 .maintenance-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

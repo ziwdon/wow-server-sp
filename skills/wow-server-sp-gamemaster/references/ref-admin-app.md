@@ -97,6 +97,12 @@ The Progression page (`/progression`) lets you advance individual characters thr
 - Progression is **forward-only** — the service rejects downgrade requests server-side as well as in the UI
 - The internal key `"vanilla"` is displayed as **"Classic"** throughout the UI; the database and service always use `"vanilla"`
 
+## Maintenance Page
+
+- **Bot Control** — `Reset bots` (re-rolls the rndbot pool via `playerbot rndbot init`) and `Clear bots` (destructive: stops the server, safety backup, deletes the whole RNDBOT pool, restarts).
+- **Player Announcements** — one checkbox, saves immediately. When on, the admin polls `acore_characters.characters.online` every 15 s for real accounts (not `RNDBOT%`/`ahbot`) and sends `announce Player <Name> is online.` / `announce Player <Name> has gone offline.` over the worldserver console. Presence is tracked **per account**: the first character to come online is the human, so alt-bots summoned from your own account are never announced; "offline" needs two consecutive empty polls, so a quick character swap is silent. Nothing is announced around admin Stop/Restart or worldserver boots (state reseeds silently). Config: `azerothcore-admin/data/presence.json`; API: `GET/POST /api/presence`.
+- **Scheduled Restart** / **Stop / Start Window** — daily UTC-hour jobs run by the in-app scheduler (`maintenance.json`); the log below shows the last 20 runs.
+
 ## Backups & Restore
 
 The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first.

@@ -2,13 +2,28 @@
 {% block main %}
 <div class="dashboard-content maintenance-page">
 
-  <section class="panel">
-    <div class="panel-header"><span class="panel-title">Bot Control</span></div>
-    <div class="panel-body bot-control-body">
-      <button class="btn btn-muted" id="reset-bots-btn">Reset bots</button>
-      <button class="btn btn-danger" id="clear-bots-btn">Clear bots</button>
-    </div>
-  </section>
+  <div class="maintenance-grid maintenance-top-grid">
+    <section class="panel maintenance-card">
+      <div class="panel-header"><span class="panel-title">Bot Control</span></div>
+      <div class="panel-body bot-control-body">
+        <button class="btn btn-muted" id="reset-bots-btn">Reset bots</button>
+        <button class="btn btn-danger" id="clear-bots-btn">Clear bots</button>
+      </div>
+    </section>
+
+    <section class="panel maintenance-card">
+      <div class="panel-header"><span class="panel-title">Player Announcements</span></div>
+      <div class="panel-body maintenance-form">
+        <label class="toggle-item">
+          <input type="checkbox" id="presence-announce-toggle" {% if presence.announce_enabled %}checked{% endif %}>
+          <span class="toggle-label-wrap">
+            <span>Announce player logins and logouts in-game</span>
+          </span>
+        </label>
+        <p class="maintenance-help">Sends <code>announce Player &lt;name&gt; is online / has gone offline</code> to everyone when a real account logs in or out. Bots are ignored; a quick character swap is not announced. Saves immediately.</p>
+      </div>
+    </section>
+  </div>
 
   {% if error %}<p class="settings-banner error">{{ error }}</p>{% endif %}
   {% if diagnostic %}<p class="settings-banner error">{{ diagnostic }}</p>{% endif %}
@@ -137,6 +152,21 @@ document.getElementById('clear-cancel-btn').addEventListener('click', function (
 clearConfirm.addEventListener('click', function () {
   clearDlg.close();
   startAction('/api/action/clear-bots', 'Clear bots started — watch the dashboard activity log.');
+});
+document.getElementById('presence-announce-toggle').addEventListener('change', function (e) {
+  const enabled = e.target.checked;
+  fetch('/api/presence', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ announce_enabled: enabled }),
+  }).then(function (response) {
+    if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || 'Save failed'); });
+    const msg = 'Player announcements ' + (enabled ? 'enabled' : 'disabled') + '.';
+    window.showActionToast ? window.showActionToast(msg) : alert(msg);
+  }).catch(function (error) {
+    e.target.checked = !enabled;
+    window.showActionToast ? window.showActionToast(error.message) : alert(error.message);
+  });
 });
 function startAction(url, success) {
   fetch(url, { method: 'POST' }).then(function (response) {

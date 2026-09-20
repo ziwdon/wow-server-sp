@@ -144,3 +144,53 @@ def test_maintenance_post_rejects_invalid_window(tmp_path, monkeypatch):
 
     assert resp.status_code == 200
     assert "start hour must be after stop hour" in resp.text
+
+
+def test_maintenance_page_has_player_announcements_card_beside_bot_control(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.get("/maintenance").text
+
+    assert "Player Announcements" in body
+    assert 'id="presence-announce-toggle"' in body
+    # Both cards share one grid row: Bot Control first, announcements to its right.
+    grid_start = body.index('class="maintenance-grid maintenance-top-grid"')
+    bot = body.index("Bot Control")
+    presence = body.index("Player Announcements")
+    assert grid_start < bot < presence
+    assert "checked" not in body[body.index('id="presence-announce-toggle"') - 200:presence]
+
+
+def test_presence_api_round_trips_toggle(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.get("/api/presence").json() == {"announce_enabled": False}
+
+    resp = client.post("/api/presence", json={"announce_enabled": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"announce_enabled": True}
+    assert client.get("/api/presence").json() == {"announce_enabled": True}
+    assert (tmp_path / "admin-data" / "presence.json").exists()
+
+    body = client.get("/maintenance").text
+    toggle = body.index('id="presence-announce-toggle"')
+    assert "checked" in body[toggle:toggle + 200]
+
+
+def test_presence_api_rejects_non_boolean(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    resp = client.post("/api/presence", json={"announce_enabled": "yes"})
+
+    assert resp.status_code == 422
+
+
+def test_lifespan_starts_presence_announcer(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    from app.services.presence import PresenceAnnouncer
+
+    with client:
+        announcer = client.app.state.presence_announcer
+        assert isinstance(announcer, PresenceAnnouncer)
+        assert announcer.interval_seconds == 15
+        assert announcer.store.data_dir == tmp_path / "admin-data"
