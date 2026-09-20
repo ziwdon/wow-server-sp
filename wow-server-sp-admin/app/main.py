@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 import datetime as dt
 import json
@@ -28,6 +28,7 @@ from app.services import docker_client
 from app.services import logs as logs_svc
 from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
+from app.services import presence as presence_svc
 from app.services import progression as progression_svc
 from app.services import raid_unlock as raid_unlock_svc
 from app.services import wow_reference as wow_ref
@@ -83,9 +84,13 @@ async def lifespan(app: FastAPI):
     )
     maintenance_scheduler.start()
     app.state.maintenance_scheduler = maintenance_scheduler
+    presence_announcer = presence_svc.PresenceAnnouncer(presence_svc.store_from_env())
+    presence_announcer.start()
+    app.state.presence_announcer = presence_announcer
     try:
         yield
     finally:
+        await presence_announcer.stop()
         await maintenance_scheduler.stop()
 
 
@@ -375,8 +380,28 @@ async def maintenance_page(request: Request) -> HTMLResponse:
             "hours": list(range(24)),
             "error": request.query_params.get("error"),
             "diagnostic": store.degradation_diagnostic(),
+            "presence": presence_svc.store_from_env().load_config(),
         },
     )
+
+
+class PresencePayload(BaseModel):
+    announce_enabled: StrictBool
+
+
+@app.get("/api/presence")
+async def api_presence() -> dict:
+    return asdict(presence_svc.store_from_env().load_config())
+
+
+@app.post("/api/presence")
+async def post_presence(payload: PresencePayload) -> dict:
+    cfg = presence_svc.PresenceConfig(announce_enabled=payload.announce_enabled)
+    try:
+        presence_svc.store_from_env().save_config(cfg)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"could not save presence config: {e}")
+    return asdict(cfg)
 
 
 @app.get("/api/maintenance")
