@@ -7,8 +7,10 @@ from app.services.players import (
     PlayersSnapshot,
     PvpRankRow,
     RankRow,
+    apply_presence,
     char_row,
     group_by_account,
+    online_humans,
     online_sorted,
     rank_rows,
 )
@@ -35,14 +37,71 @@ def test_char_row_maps_names_colors_faction():
     assert c.last_logout == 1716000000
 
 
-def test_online_sorted_filters_offline_and_orders_level_then_name():
+def test_char_row_starts_not_online_now():
+    assert char_row(_raw("U", "Bob", 1, 1, 80, 1, 12)).online_now is False
+
+
+def test_online_sorted_filters_to_online_now_and_orders_level_then_name():
     a = char_row(_raw("U", "Bob", 1, 1, 80, 1, 12))
     b = char_row(_raw("U", "amy", 1, 1, 80, 1, 12))              # same level → name asc (amy<Bob)
     c = char_row(_raw("U", "Zed", 1, 1, 90, 0, 12))              # offline → excluded
     d = char_row(_raw("U", "Cara", 1, 1, 70, 1, 12))             # lower level → last
     e = char_row(_raw("U", "Bot", 1, 1, 60, 1, 12, latency=0))   # online altbot → excluded
-    out = online_sorted([a, b, c, d, e])
+    out = online_sorted(apply_presence([a, b, c, d, e], {}))
     assert [x.name for x in out] == ["amy", "Bob", "Cara"]
+
+
+# --- online_humans: the one presence rule shared by the Players page + dashboard card ---
+
+
+def test_online_humans_uses_tracker_human_immediately_regardless_of_latency():
+    rows = [("CARLOS", "Armando", 0), ("CARLOS", "Altbot", 0)]
+    assert online_humans(rows, {"CARLOS": "Armando"}) == {("CARLOS", "Armando")}
+
+
+def test_online_humans_tracker_excludes_alt_bots_even_with_latency():
+    rows = [("CARLOS", "Armando", 12), ("CARLOS", "Altbot", 30)]
+    assert online_humans(rows, {"CARLOS": "Armando"}) == {("CARLOS", "Armando")}
+
+
+def test_online_humans_falls_back_to_latency_when_tracker_has_no_memory():
+    rows = [("CARLOS", "Armando", 12), ("CARLOS", "Altbot", 0), ("EDUARDO", "Vegivaca", 0)]
+    assert online_humans(rows, {}) == {("CARLOS", "Armando")}
+    assert online_humans(rows, None) == {("CARLOS", "Armando")}
+
+
+def test_online_humans_falls_back_when_tracker_human_is_ambiguous():
+    rows = [("CARLOS", "Armando", 12), ("CARLOS", "Altbot", 0)]
+    assert online_humans(rows, {"CARLOS": None}) == {("CARLOS", "Armando")}
+
+
+def test_online_humans_falls_back_when_tracker_human_already_logged_out():
+    # Tracker is up to 15 s stale: Armando left, Sariel (with latency) is the human now.
+    rows = [("CARLOS", "Sariel", 12)]
+    assert online_humans(rows, {"CARLOS": "Armando"}) == {("CARLOS", "Sariel")}
+
+
+def test_online_humans_tracker_entry_without_online_rows_yields_nothing():
+    assert online_humans([], {"CARLOS": "Armando"}) == set()
+
+
+def test_online_humans_tracks_accounts_independently():
+    rows = [("CARLOS", "Armando", 0), ("EDUARDO", "Vegivaca", 12), ("EDUARDO", "Pitocas", 0)]
+    assert online_humans(rows, {"CARLOS": "Armando"}) == {
+        ("CARLOS", "Armando"), ("EDUARDO", "Vegivaca"),
+    }
+
+
+def test_apply_presence_marks_online_now_and_preserves_order():
+    rows = [
+        char_row(_raw("CARLOS", "Armando", 1, 1, 80, 1, 12, latency=0)),
+        char_row(_raw("CARLOS", "Altbot", 1, 1, 70, 1, 12, latency=0)),
+        char_row(_raw("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637)),
+    ]
+    out = apply_presence(rows, {"CARLOS": "Armando"})
+    assert [(c.name, c.online_now) for c in out] == [
+        ("Armando", True), ("Altbot", False), ("Vegivaca", False),
+    ]
 
 
 def test_group_by_account_groups_az_and_orders_within_level_then_name():
@@ -111,8 +170,8 @@ def test_collect_players_builds_snapshot(mock_connect):
             ("Sariel", 11, 4, 11, 300),
         ],
     ]
-    # fetchone is the (2) headline aggregate: total, online, cap60, cap70, cap80.
-    cur.fetchone.return_value = (3, 1, 0, 0, 0)
+    # fetchone is the (2) headline aggregate: total, cap60, cap70, cap80.
+    cur.fetchone.return_value = (3, 0, 0, 0)
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cur
 
@@ -121,8 +180,10 @@ def test_collect_players_builds_snapshot(mock_connect):
     assert snap.total_players == 3
     assert snap.online_players == 1
     assert (snap.cap_vanilla, snap.cap_tbc, snap.cap_wotlk) == (0, 0, 0)
-    # online_now: only Sariel is online
+    # online_now: only Sariel is online (latency fallback: no presence passed)
     assert [c.name for c in snap.online_now] == ["Sariel"]
+    assert snap.all_groups[0].chars[0].online_now is True   # Sariel
+    assert snap.all_groups[0].chars[1].online_now is False  # Tester
     # all_groups: A→Z (carlos, EDUARDO), within-group level desc
     assert [g.account for g in snap.all_groups] == ["carlos", "EDUARDO"]
     assert [c.name for c in snap.all_groups[1].chars] == ["Vegivaca", "Pitocas"]
@@ -152,17 +213,47 @@ def test_collect_players_builds_snapshot(mock_connect):
 def test_collect_players_coerces_null_headline_to_zero(mock_connect):
     cur = MagicMock()
     cur.fetchall.side_effect = [[], [], []]      # no roster, no top PvE/PvP
-    cur.fetchone.return_value = (0, 0, None, None, None)  # SUM over no rows → NULL
+    cur.fetchone.return_value = (0, None, None, None)  # SUM over no rows → NULL
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cur
 
     snap = players.collect_players(host="h", port=3306, user="u", password="p")
     assert snap.total_players == 0
+    assert snap.online_players == 0
     assert (snap.cap_vanilla, snap.cap_tbc, snap.cap_wotlk) == (0, 0, 0)
     assert snap.online_now == ()
     assert snap.all_groups == ()
     assert snap.top_pve == ()
     assert snap.top_pvp == ()
+
+
+@patch("app.services.players.mysql.connector.connect")
+def test_collect_players_uses_presence_for_online_now_and_headline(mock_connect):
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [
+            ("CARLOS", "Armando", 1, 1, 80, 1, 1519, 0, 0),   # just logged in: latency 0
+            ("CARLOS", "Altbot", 1, 1, 70, 1, 1519, 0, 0),    # summoned alt-bot
+            ("EDUARDO", "Vegivaca", 1, 6, 58, 1, 1637, 9, 0), # no tracker memory → latency
+            ("EDUARDO", "Pitocas", 3, 3, 24, 1, 1519, 0, 0),
+        ],
+        [], [],
+    ]
+    cur.fetchone.return_value = (2, 0, 0, 1)
+    conn = mock_connect.return_value
+    conn.cursor.return_value.__enter__.return_value = cur
+
+    snap = players.collect_players(
+        host="h", port=3306, user="u", password="p", presence={"CARLOS": "Armando"},
+    )
+
+    assert [(c.account, c.name) for c in snap.online_now] == [
+        ("CARLOS", "Armando"), ("EDUARDO", "Vegivaca"),
+    ]
+    assert snap.online_players == 2
+    # The headline SQL no longer counts online accounts with the latency rule.
+    executed_sql = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "c.latency > 0" not in executed_sql
 
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -191,6 +282,7 @@ def _sample_snapshot():
         account="CARLOS", name="Sariel", class_name="Druid", class_color="#FF7C0A",
         race_name="Night Elf", faction="Alliance", faction_color="#4080C0",
         level=25, online=True, zone_name="Stormwind City", latency=8, last_logout=0,
+        online_now=True,
     )
     return PlayersSnapshot(
         fetched_at=1716144665.0,
@@ -216,6 +308,8 @@ def test_api_players_data_renders_with_snapshot():
     assert "Sariel" in body
     assert "#FF7C0A" in body                       # class color applied
     assert "CARLOS" in body                        # account group header
+    # Online now: "Account (Character)" like the in-game announcement
+    assert 'Carlos (<span style="color: #FF7C0A">Sariel</span>)' in body
     assert "Vanilla 60" in body                    # expansion-cap breakdown
     assert 'id="players-last-refreshed"' in body and 'hx-swap-oob="true"' in body
     assert "—" in body                             # None avg_ilvl → dash
@@ -234,6 +328,32 @@ def test_api_players_data_renders_with_snapshot():
     # Faction columns in the Top PvE/PvP cards (Sariel = Alliance)
     assert "#4080C0" in body
     assert "Alliance" in body
+
+
+def test_api_players_data_passes_tracker_snapshot_to_collect_players():
+    creds = {"host": "h", "port": 3306, "user": "u", "password": "p"}
+    tracker = MagicMock()
+    tracker.snapshot.return_value = {"CARLOS": "Sariel"}
+    announcer = MagicMock(tracker=tracker)
+    with _patch("app.main.players_svc.collect_players", return_value=_sample_snapshot()) as collect, \
+         _patch("app.main.db_credentials", return_value=creds), \
+         _patch.object(app.state, "presence_announcer", announcer, create=True):
+        client = TestClient(app)
+        resp = client.get("/api/players/data")
+    assert resp.status_code == 200
+    assert collect.call_args.kwargs["presence"] == {"CARLOS": "Sariel"}
+
+
+def test_api_players_data_without_announcer_falls_back_to_no_presence():
+    creds = {"host": "h", "port": 3306, "user": "u", "password": "p"}
+    with _patch("app.main.players_svc.collect_players", return_value=_sample_snapshot()) as collect, \
+         _patch("app.main.db_credentials", return_value=creds):
+        if hasattr(app.state, "presence_announcer"):
+            del app.state.presence_announcer
+        client = TestClient(app)
+        resp = client.get("/api/players/data")
+    assert resp.status_code == 200
+    assert collect.call_args.kwargs["presence"] is None
 
 
 def test_api_players_data_db_down_shows_empty_state():

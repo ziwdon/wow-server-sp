@@ -1,10 +1,17 @@
-"""Player + bot online counts via the acore_characters schema."""
+"""Player + bot online counts via the acore_characters schema.
+
+"Real" applies the Players page's presence rule (players.online_humans:
+PresenceTracker human first, ``latency > 0`` fallback) so the dashboard
+"Online" card and the Players tab always agree.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import mysql.connector
+
+from app.services.players import _REAL, Presence, online_humans
 
 
 @dataclass(frozen=True)
@@ -13,17 +20,24 @@ class OnlineCounts:
     bots: int
 
 
-QUERY = """
-SELECT /*+ MAX_EXECUTION_TIME(2000) */
-    COUNT(DISTINCT CASE WHEN a.username NOT LIKE 'RNDBOT%%' AND c.latency > 0 THEN a.id ELSE NULL END) AS real_players,
-    SUM(CASE WHEN a.username LIKE 'RNDBOT%%' THEN 1 ELSE 0 END) AS bots
+BOTS_QUERY = """
+SELECT /*+ MAX_EXECUTION_TIME(2000) */ COUNT(*)
 FROM acore_characters.characters c
 JOIN acore_auth.account a ON a.id = c.account
-WHERE c.online = 1
+WHERE c.online = 1 AND a.username LIKE 'RNDBOT%%'
+"""
+
+REAL_ONLINE_QUERY = f"""
+SELECT /*+ MAX_EXECUTION_TIME(2000) */ a.username, c.name, c.latency
+FROM acore_characters.characters c
+JOIN acore_auth.account a ON a.id = c.account
+WHERE c.online = 1 AND {_REAL}
 """
 
 
-def count_online(*, host: str, port: int, user: str, password: str) -> OnlineCounts:
+def count_online(
+    *, host: str, port: int, user: str, password: str, presence: Presence | None = None
+) -> OnlineCounts:
     conn = mysql.connector.connect(
         host=host,
         port=port,
@@ -34,10 +48,12 @@ def count_online(*, host: str, port: int, user: str, password: str) -> OnlineCou
     )
     try:
         with conn.cursor() as cur:
-            cur.execute(QUERY)
-            row = cur.fetchone() or (0, 0)
-            real, bots = row
-            return OnlineCounts(real=int(real or 0), bots=int(bots or 0))
+            cur.execute(BOTS_QUERY)
+            (bots,) = cur.fetchone() or (0,)
+            cur.execute(REAL_ONLINE_QUERY)
+            rows = [(str(u), str(n), int(lat or 0)) for u, n, lat in cur.fetchall()]
+        humans = online_humans(rows, presence)
+        return OnlineCounts(real=len({acct for acct, _ in humans}), bots=int(bots or 0))
     finally:
         try:
             conn.close()

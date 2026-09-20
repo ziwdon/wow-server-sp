@@ -1,9 +1,13 @@
-"""Announce real-player logins/logouts in-game via the worldserver console.
+"""Track real-player presence and announce logins/logouts in-game.
 
 Presence is derived from ``acore_characters.characters.online`` on real
 (non-RNDBOT / non-ahbot) accounts, which AC writes synchronously at
-character login and logout. The 15-min ``latency`` heuristic the Players
-page uses is deliberately not reused here (see issue #32).
+character login and logout — not the 15-min ``latency`` heuristic (issue #32).
+
+Tracking is always on while the worldserver runs; the Players page and the
+dashboard "Online" card read ``PresenceTracker.snapshot()`` to name the human
+character per online account. Only the console announcements are gated by
+the ``announce_enabled`` toggle.
 
 Per-account semantics: an account is "in" when at least one of its
 characters is online. The first character to appear on the 0 -> >=1
@@ -22,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -124,21 +129,45 @@ def _display(account: str, human: str | None) -> str:
 
 
 class PresenceTracker:
-    """Turn successive (account, character) snapshots into announcement strings."""
+    """Turn successive (account, character) snapshots into announcement strings.
+
+    ``observe``/``reset`` run on the announcer's worker thread while request
+    handlers call ``snapshot``; the lock keeps the dict iteration consistent.
+    """
 
     def __init__(self) -> None:
         self._accounts: dict[str, _AccountState] = {}
         self._seeded = False
+        self._lock = threading.Lock()
 
     def reset(self) -> None:
-        self._accounts.clear()
-        self._seeded = False
+        with self._lock:
+            self._accounts.clear()
+            self._seeded = False
 
     def human_character(self, account: str) -> str | None:
-        state = self._accounts.get(account)
-        return state.human if state is not None else None
+        with self._lock:
+            state = self._accounts.get(account)
+            return state.human if state is not None else None
+
+    def snapshot(self) -> dict[str, str | None]:
+        """Present accounts → human character (None when ambiguous).
+
+        Accounts inside the logout debounce window are already absent from
+        the DB, so they are left out; the roster query is authoritative.
+        """
+        with self._lock:
+            return {
+                acct: state.human
+                for acct, state in self._accounts.items()
+                if state.absent_polls == 0
+            }
 
     def observe(self, rows: Iterable[tuple[str, str]]) -> list[str]:
+        with self._lock:
+            return self._observe(rows)
+
+    def _observe(self, rows: Iterable[tuple[str, str]]) -> list[str]:
         present: dict[str, list[str]] = {}
         for account, name in rows:
             present.setdefault(account, []).append(name)
@@ -202,9 +231,6 @@ class PresenceAnnouncer:
         self._task: asyncio.Task | None = None
 
     def tick(self) -> None:
-        if not self.store.load_config().announce_enabled:
-            self.tracker.reset()
-            return
         if self._runner.current() is not None:
             return  # an admin action may own the console; skip this poll
         info = self._inspect()
@@ -221,7 +247,7 @@ class PresenceAnnouncer:
             log.warning("presence poll skipped: %s", e)
             return
         messages = self.tracker.observe(rows)
-        if not messages:
+        if not messages or not self.store.load_config().announce_enabled:
             return
         try:
             with self._console_factory(WORLDSERVER) as console:

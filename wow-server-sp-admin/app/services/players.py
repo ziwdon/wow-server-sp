@@ -8,13 +8,21 @@ account — do NOT switch to LOWER(username) (redundant + non-sargable).
 
 No background cache: real players are few, so collect_players() runs
 synchronously per request (4 small queries on one connection).
+
+"Online now" (issue #32): ``online_humans`` names the human character per
+online account from the PresenceTracker snapshot (first character seen on the
+account's 0 -> >=1 transition — immediate, alt-bots excluded). Accounts the
+tracker has no usable memory for fall back to ``online AND latency > 0``
+(``latency`` is only written on PlayerSave.Interval, so that lags ~15 min).
+The dashboard "Online" card (db_stats) applies the same function so both agree.
 """
 
 from __future__ import annotations
 
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 
 import mysql.connector
 
@@ -26,6 +34,10 @@ CAP_TBC = 70
 CAP_WOTLK = 80
 
 _REAL = "a.username NOT LIKE 'RNDBOT%%' AND a.username <> 'ahbot'"
+
+# account -> human character name, or None when the tracker saw several
+# characters appear at once and could not tell which is the human.
+Presence = Mapping[str, str | None]
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,7 @@ class CharRow:
     zone_name: str
     latency: int
     last_logout: int  # unix ts of last logout; 0 = never logged in
+    online_now: bool = False  # confirmed human session (set by apply_presence)
 
 
 @dataclass(frozen=True)
@@ -116,9 +129,41 @@ def _by_level_then_name(c: CharRow):
     return (-c.level, c.name.casefold())
 
 
+def online_humans(
+    rows: Iterable[tuple[str, str, int]], presence: Presence | None
+) -> set[tuple[str, str]]:
+    """(account, name) of every confirmed human session.
+
+    ``rows`` are (account, name, latency) for characters with ``online=1`` on
+    real accounts. Per account: the tracker's human wins when it is still
+    online; otherwise (no memory, ambiguous, or already logged out) every
+    character with ``latency > 0`` counts, as before issue #32.
+    """
+    by_account: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for account, name, latency in rows:
+        by_account[account].append((name, latency))
+
+    out: set[tuple[str, str]] = set()
+    for account, chars in by_account.items():
+        human = presence.get(account) if presence else None
+        if human is not None and any(name == human for name, _ in chars):
+            out.add((account, human))
+            continue
+        out.update((account, name) for name, latency in chars if latency > 0)
+    return out
+
+
+def apply_presence(chars: list[CharRow], presence: Presence | None) -> list[CharRow]:
+    """Return the roster with ``online_now`` set per ``online_humans``; order preserved."""
+    humans = online_humans(
+        ((c.account, c.name, c.latency) for c in chars if c.online), presence
+    )
+    return [replace(c, online_now=(c.account, c.name) in humans) for c in chars]
+
+
 def online_sorted(chars: list[CharRow]) -> tuple[CharRow, ...]:
     return tuple(sorted(
-        (c for c in chars if c.online and c.latency > 0),
+        (c for c in chars if c.online_now),
         key=_by_level_then_name,
     ))
 
@@ -179,7 +224,9 @@ def pvp_rank_rows(rows) -> tuple[PvpRankRow, ...]:
     return tuple(out)
 
 
-def collect_players(*, host: str, port: int, user: str, password: str) -> PlayersSnapshot:
+def collect_players(
+    *, host: str, port: int, user: str, password: str, presence: Presence | None = None
+) -> PlayersSnapshot:
     conn = mysql.connector.connect(
         host=host,
         port=port,
@@ -198,18 +245,18 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
                 f"WHERE {_REAL} "
                 "ORDER BY c.level DESC, c.name ASC"
             )
-            roster = [char_row(r) for r in cur.fetchall()]
+            roster = apply_presence([char_row(r) for r in cur.fetchall()], presence)
 
-            # 2. Headline aggregate.
+            # 2. Headline aggregate (online count is derived from the roster below
+            #    so the card can never disagree with the Online now list).
             cur.execute(
                 "SELECT COUNT(DISTINCT a.id), "
-                "COUNT(DISTINCT CASE WHEN c.online=1 AND c.latency > 0 THEN a.id END), "
                 "SUM(c.level=60), SUM(c.level=70), SUM(c.level=80) "
                 "FROM acore_auth.account a "
                 "JOIN acore_characters.characters c ON c.account = a.id "
                 f"WHERE {_REAL}"
             )
-            h = cur.fetchone() or (0, 0, 0, 0, 0)
+            h = cur.fetchone() or (0, 0, 0, 0)
 
             # 3. Top PvE by level, then gear (avg equipped item level), then name.
             cur.execute(
@@ -238,14 +285,15 @@ def collect_players(*, host: str, port: int, user: str, password: str) -> Player
             )
             top_pvp_rows = cur.fetchall()
 
+        online_now = online_sorted(roster)
         return PlayersSnapshot(
             fetched_at=time.time(),
             total_players=int(h[0] or 0),
-            online_players=int(h[1] or 0),
-            cap_vanilla=int(h[2] or 0),
-            cap_tbc=int(h[3] or 0),
-            cap_wotlk=int(h[4] or 0),
-            online_now=online_sorted(roster),
+            online_players=len({c.account for c in online_now}),
+            cap_vanilla=int(h[1] or 0),
+            cap_tbc=int(h[2] or 0),
+            cap_wotlk=int(h[3] or 0),
+            online_now=online_now,
             all_groups=group_by_account(roster),
             top_pve=rank_rows(top_pve_rows),
             top_pvp=pvp_rank_rows(top_pvp_rows),

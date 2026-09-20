@@ -49,6 +49,8 @@ Shows the latest backup status from `/opt/stacks/azerothcore/backups/`.
 ### Players Panel
 Shows online real players with basic info.
 
+**Who counts as "online" (Players tab + dashboard "Online" card):** the admin's presence tracker (see Player Announcements below) remembers the first character that came online on each real account — that is the human; alt-bots summoned afterwards are ignored. The Players tab's **Online now** card lists it as `Account (Character)`, exactly like the in-game announcement, and shows it immediately after login. If the tracker has no memory for an account (admin restarted while you were playing, or you were already logged in when the admin started), the page falls back to the old rule — a character with `online=1` **and** `latency > 0` — which can lag up to 15 minutes after login because AC only writes `latency` on its periodic character save. So a human never disappears from the list; they may just appear late in that fallback case. The "Last online" column in All characters shows `online` under the same rule, otherwise today/yesterday/N days ago.
+
 ## Settings Page
 
 The Settings page allows browsing and modifying AzerothCore configuration via `AC_*` env vars.
@@ -100,7 +102,7 @@ The Progression page (`/progression`) lets you advance individual characters thr
 ## Maintenance Page
 
 - **Bot Control** — `Reset bots` (re-rolls the rndbot pool via `playerbot rndbot init`) and `Clear bots` (destructive: stops the server, safety backup, deletes the whole RNDBOT pool, restarts).
-- **Player Announcements** — one checkbox, saves immediately. When on, the admin polls `acore_characters.characters.online` every 15 s for real accounts (not `RNDBOT%`/`ahbot`) and sends `announce Player <Account> (<Character>) is online.` / `… has gone offline.` over the worldserver console (account name title-cased; the character is omitted only when two characters appeared in the same poll). Presence is tracked **per account**: the first character to come online is the human, so alt-bots summoned from your own account are never announced; "offline" needs two consecutive empty polls, so a quick character swap is silent. Nothing is announced around admin Stop/Restart or worldserver boots (state reseeds silently). Config: `azerothcore-admin/data/presence.json`; API: `GET/POST /api/presence`.
+- **Player Announcements** — one checkbox, saves immediately. The admin always polls `acore_characters.characters.online` every 15 s for real accounts (not `RNDBOT%`/`ahbot`) to track who is in (this feeds the Players tab and the dashboard "Online" card); when the checkbox is on it also sends `announce Player <Account> (<Character>) is online.` / `… has gone offline.` over the worldserver console (account name title-cased; the character is omitted only when two characters appeared in the same poll). Presence is tracked **per account**: the first character to come online is the human, so alt-bots summoned from your own account are never announced; "offline" needs two consecutive empty polls, so a quick character swap is silent. Nothing is announced around admin Stop/Restart or worldserver boots (state reseeds silently). Config: `azerothcore-admin/data/presence.json`; API: `GET/POST /api/presence`.
 - **Scheduled Restart** / **Stop / Start Window** — daily UTC-hour jobs run by the in-app scheduler (`maintenance.json`); the log below shows the last 20 runs.
 
 ## Backups & Restore

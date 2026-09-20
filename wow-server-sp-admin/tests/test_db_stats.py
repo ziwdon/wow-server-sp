@@ -19,13 +19,22 @@ def test_connection_options_are_supported_by_pinned_connector():
     )
 
 
-@patch("app.services.db_stats.mysql.connector.connect")
-def test_count_online_returns_split_counts(mock_connect):
+def _cursor(mock_connect, *, bots, real_rows):
     cursor = MagicMock()
-    cursor.fetchone.return_value = (3, 250)
-
+    cursor.fetchone.return_value = (bots,)
+    cursor.fetchall.return_value = real_rows
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cursor
+    return cursor
+
+
+@patch("app.services.db_stats.mysql.connector.connect")
+def test_count_online_returns_split_counts(mock_connect):
+    # No presence → latency fallback: 3 accounts with a pinged character.
+    cursor = _cursor(mock_connect, bots=250, real_rows=[
+        ("CARLOS", "Sariel", 8), ("CARLOS", "Altbot", 0),
+        ("EDUARDO", "Vegivaca", 12), ("MARIA", "Nyx", 3), ("PEDRO", "Fresh", 0),
+    ])
 
     counts = count_online(
         host="ac-database",
@@ -37,8 +46,29 @@ def test_count_online_returns_split_counts(mock_connect):
     connection_options = mock_connect.call_args.kwargs
     assert connection_options["connection_timeout"] == 2
     assert "read_timeout" not in connection_options
-    sql = cursor.execute.call_args.args[0]
-    assert "SELECT /*+ MAX_EXECUTION_TIME(2000) */" in sql
+    for call in cursor.execute.call_args_list:
+        assert "SELECT /*+ MAX_EXECUTION_TIME(2000) */" in call.args[0]
+
+
+@patch("app.services.db_stats.mysql.connector.connect")
+def test_count_online_applies_the_players_page_presence_rule(mock_connect):
+    # Same rule as the Players page (players.online_humans): the tracker's human
+    # counts immediately (latency 0), alt-bots never do.
+    _cursor(mock_connect, bots=0, real_rows=[
+        ("CARLOS", "Armando", 0), ("CARLOS", "Altbot", 30), ("PEDRO", "Fresh", 0),
+    ])
+
+    counts = count_online(
+        host="ac-database", port=3306, user="root", password="secret",
+        presence={"CARLOS": "Armando"},
+    )
+    assert counts == OnlineCounts(real=1, bots=0)
+
+
+@patch("app.services.db_stats.mysql.connector.connect")
+def test_count_online_coerces_null_bots_to_zero(mock_connect):
+    _cursor(mock_connect, bots=None, real_rows=[])
+    assert count_online(host="h", port=3306, user="u", password="p") == OnlineCounts(real=0, bots=0)
 
 
 def test_count_online_exits_cursor_and_closes_connection_after_query_timeout():

@@ -30,13 +30,12 @@
       {% if snap.online_now %}
       <div class="player-table">
         <div class="player-row player-row--head player-row--online">
-          <span>Account</span><span>Character</span><span>Class</span>
+          <span>Player</span><span>Class</span>
           <span>Race</span><span>Level</span><span>Faction</span><span>Zone</span>
         </div>
         {% for c in snap.online_now %}
         <div class="player-row player-row--online">
-          <span>{{ c.account }}</span>
-          <span style="color: {{ c.class_color }}">{{ c.name }}</span>
+          <span>{{ c.account.capitalize() }} (<span style="color: {{ c.class_color }}">{{ c.name }}</span>)</span>
           <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
           <span>{{ c.race_name }}</span>
           <span>{{ c.level }}</span>
@@ -70,7 +69,7 @@
               <span>{{ c.race_name }}</span>
               <span>{{ c.level }}</span>
               <span style="color: {{ c.faction_color }}">{{ c.faction }}</span>
-              <span>{{ last_online(c.last_logout, c.online, c.latency) }}</span>
+              <span>{{ last_online(c.last_logout, c.online_now) }}</span>
             </div>
             {% endfor %}
           </div>
