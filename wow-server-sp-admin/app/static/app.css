@@ -793,7 +793,11 @@ pre.logview {
 
 /* --- Maintenance page --- */
 .maintenance-page { overflow-y: auto; }
-.bot-control-body { display: flex; gap: 0.75rem; justify-content: center; align-items: center; }
+.bot-control-body { display: flex; flex-direction: column; gap: 0.9rem; }
+.bot-control-row { display: flex; gap: 0.9rem; align-items: flex-start; }
+.bot-control-row .btn { flex: 0 0 auto; min-width: 7rem; }
+.bot-control-row .maintenance-help { margin: 0; }
+.bot-control-row .maintenance-help b { color: var(--text-warm); font-weight: 600; }
 .maintenance-top-grid { margin-bottom: 1rem; }
 .maintenance-grid {
   display: grid;
@@ -872,6 +876,8 @@ pre.logview {
 }
 @media (max-width: 768px) {
   .maintenance-grid { grid-template-columns: 1fr; }
+  .bot-control-row { flex-direction: column; gap: 0.4rem; }
+  .bot-control-row .btn { align-self: flex-start; }
   .maintenance-two-col { grid-template-columns: 1fr; }
   .maintenance-actions { max-width: none; }
   .maintenance-log-panel { min-height: 220px; }

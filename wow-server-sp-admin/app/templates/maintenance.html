@@ -6,8 +6,14 @@
     <section class="panel maintenance-card">
       <div class="panel-header"><span class="panel-title">Bot Control</span></div>
       <div class="panel-body bot-control-body">
-        <button class="btn btn-muted" id="reset-bots-btn">Reset bots</button>
-        <button class="btn btn-danger" id="clear-bots-btn">Clear bots</button>
+        <div class="bot-control-row">
+          <button class="btn btn-muted" id="reset-bots-btn">Reset bots</button>
+          <p class="maintenance-help">Re-rolls the online random bots in place (<code>playerbot rndbot init</code>). Each bot keeps its name, race and class but gets a fresh level within the configured min/max range, new talents and gear, and is teleported to a zone for its level. Nothing is deleted. Server must be running; runs in the background.</p>
+        </div>
+        <div class="bot-control-row">
+          <button class="btn btn-danger" id="clear-bots-btn">Clear bots</button>
+          <p class="maintenance-help"><b>Destructive.</b> Stops the server, takes a safety backup, <b>permanently deletes every RNDBOT account</b> and its characters, then restarts. The bot pool regenerates from scratch on the next boot. Requires typing <b>CLEAR</b> to confirm.</p>
+        </div>
       </div>
     </section>
 
@@ -130,7 +136,8 @@
 <script>
 document.getElementById('reset-bots-btn').addEventListener('click', function () {
   if (!window.confirm(
-    'Reset bots? This re-rolls the existing rndbot pool (playerbot rndbot init). ' +
+    'Reset bots? This re-rolls every online random bot (playerbot rndbot init): ' +
+    'new level, talents and gear; name, race and class are kept. ' +
     'No data is deleted. Consider a backup first. Continue?')) return;
   startAction('/api/action/reset-bots', 'Reset bots started — watch the dashboard activity log.');
 });

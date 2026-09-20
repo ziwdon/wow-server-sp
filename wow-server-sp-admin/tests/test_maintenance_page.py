@@ -194,3 +194,24 @@ def test_lifespan_starts_presence_announcer(tmp_path, monkeypatch):
         assert isinstance(announcer, PresenceAnnouncer)
         assert announcer.interval_seconds == 15
         assert announcer.store.data_dir == tmp_path / "admin-data"
+
+
+def test_bot_control_card_describes_reset_and_clear(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.get("/maintenance").text
+
+    card_start = body.index("Bot Control")
+    card_end = body.index("Player Announcements")
+    card = body[card_start:card_end]
+
+    reset_btn = card.index('id="reset-bots-btn"')
+    clear_btn = card.index('id="clear-bots-btn"')
+    reset_desc = card.index("playerbot rndbot init")
+    clear_desc = card.index("permanently deletes every RNDBOT account")
+    # Each button is immediately followed by its own explanation, inside the card.
+    assert reset_btn < reset_desc < clear_btn < clear_desc
+    assert "keeps its name, race and class" in card
+    assert "Nothing is deleted" in card
+    assert "safety backup" in card
+    assert "Requires typing <b>CLEAR</b> to confirm" in card
