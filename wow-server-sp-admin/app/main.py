@@ -271,13 +271,21 @@ async def api_stats_refresh() -> dict:
     return {"status": "refreshing" if started else "already_running"}
 
 
+def _presence_snapshot() -> dict[str, str | None] | None:
+    """Current PresenceTracker view, or None when no announcer is wired (tests)."""
+    announcer = getattr(app.state, "presence_announcer", None)
+    return announcer.tracker.snapshot() if announcer is not None else None
+
+
 @app.get("/api/players", response_class=HTMLResponse)
 async def api_players(request: Request) -> HTMLResponse:
     counts = None
     context = {"counts": counts}
     try:
         creds = db_credentials()
-        counts = await asyncio.to_thread(db_stats.count_online, **creds)
+        counts = await asyncio.to_thread(
+            db_stats.count_online, **creds, presence=_presence_snapshot(),
+        )
         context["counts"] = counts
     except Exception as exc:  # noqa: BLE001 — DB may be down; UI surfaces an incident
         try:
@@ -798,7 +806,9 @@ async def api_players_data(request: Request) -> HTMLResponse:
     snap = None
     err = None
     try:
-        snap = await asyncio.to_thread(players_svc.collect_players, **db_credentials())
+        snap = await asyncio.to_thread(
+            players_svc.collect_players, **db_credentials(), presence=_presence_snapshot(),
+        )
     except Exception as e:  # noqa: BLE001 — DB down must not 500 the page
         err = str(e)
     return templates.TemplateResponse(

@@ -1000,7 +1000,7 @@ pre.logview {
   padding-bottom: 3px; margin-bottom: 2px;
 }
 /* Column templates per card. */
-.player-row--online { grid-template-columns: 1.1fr 1.2fr 1fr 1fr 0.6fr 1fr 1.4fr; }
+.player-row--online { grid-template-columns: 2fr 1fr 1fr 0.6fr 1fr 1.4fr; }
 .player-row--all    { grid-template-columns: 1.4fr 1fr 1fr 0.6fr 1fr 1.1fr; }
 .player-row--rank,
 .player-row--rank-pvp {

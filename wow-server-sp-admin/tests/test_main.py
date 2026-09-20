@@ -8,7 +8,7 @@ import time
 import app.main as main
 from app.main import _format_started_at, _render_done, _render_progress
 from app.services.runner import ActionRecord
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 from app.main import app
 from app.services.app_events import AppEvent
@@ -215,8 +215,11 @@ def test_stats_player_card_keeps_its_polling_wrapper_after_a_swap():
 
 
 def test_api_players_renders_online_counts_without_recording_an_incident():
+    tracker = MagicMock()
+    tracker.snapshot.return_value = {"CARLOS": "Sariel"}
     with patch("app.main.db_credentials", return_value={"host": "h", "port": 3306, "user": "u", "password": "p"}), \
-         patch("app.main.db_stats.count_online", return_value=OnlineCounts(real=3, bots=250)), \
+         patch("app.main.db_stats.count_online", return_value=OnlineCounts(real=3, bots=250)) as count, \
+         patch.object(app.state, "presence_announcer", MagicMock(tracker=tracker), create=True), \
          patch("app.services.app_events.record_exception") as record_exception:
         client = TestClient(app)
         response = client.get("/api/players")
@@ -225,6 +228,8 @@ def test_api_players_renders_online_counts_without_recording_an_incident():
     assert "3 real · 250 bots" in response.text
     assert "Stats unavailable" not in response.text
     record_exception.assert_not_called()
+    # The dashboard card applies the same presence rule as the Players page.
+    assert count.call_args.kwargs["presence"] == {"CARLOS": "Sariel"}
 
 
 def test_api_players_keeps_safe_degraded_response_when_event_recording_fails():

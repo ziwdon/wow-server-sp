@@ -109,6 +109,45 @@ def test_reset_reseeds_silently_on_next_observation():
     assert tracker.observe([("EDUARDO", "Vegivaca")]) == []
 
 
+def test_snapshot_is_empty_before_seeding():
+    assert PresenceTracker().snapshot() == {}
+
+
+def test_snapshot_maps_present_accounts_to_their_human_character():
+    tracker = PresenceTracker()
+    tracker.observe([("CARLOS", "Armando"), ("EDUARDO", "Vegivaca"), ("EDUARDO", "Pitocas")])
+
+    # Seeded with two EDUARDO characters at once → human unknown (None).
+    assert tracker.snapshot() == {"CARLOS": "Armando", "EDUARDO": None}
+
+
+def test_snapshot_keeps_first_seen_character_when_alt_bots_join():
+    tracker = PresenceTracker()
+    tracker.observe([])
+    tracker.observe([("CARLOS", "Armando")])
+    tracker.observe([("CARLOS", "Armando"), ("CARLOS", "Altbot")])
+
+    assert tracker.snapshot() == {"CARLOS": "Armando"}
+
+
+def test_snapshot_drops_an_account_as_soon_as_it_is_absent():
+    tracker = PresenceTracker()
+    tracker.observe([])
+    tracker.observe([("CARLOS", "Armando")])
+    tracker.observe([])  # first absent poll: announcer still debouncing
+
+    assert tracker.snapshot() == {}
+
+
+def test_snapshot_is_a_copy():
+    tracker = PresenceTracker()
+    tracker.observe([("CARLOS", "Armando")])
+    snap = tracker.snapshot()
+    snap["CARLOS"] = "Other"
+
+    assert tracker.snapshot() == {"CARLOS": "Armando"}
+
+
 # --- PresenceStore: presence.json in ADMIN_DATA_DIR ---
 
 
@@ -189,22 +228,38 @@ def test_tick_announces_transitions_over_the_console(tmp_path, console):
     assert console.sent == ["announce Player Carlos (Armando) is online."]
 
 
-def test_tick_does_nothing_when_disabled(tmp_path, console):
+def test_tick_tracks_but_does_not_announce_when_disabled(tmp_path, console):
     ann, query = _announcer(tmp_path, console, enabled=False, rows=[[], [("CARLOS", "Armando")]])
 
     ann.tick()
     ann.tick()
 
-    assert query.call_count == 0
+    assert query.call_count == 2
     assert console.sent == []
+    assert ann.tracker.snapshot() == {"CARLOS": "Armando"}  # Players page still benefits
 
 
-def test_tick_reseeds_silently_after_being_enabled(tmp_path, console):
+def test_tick_does_not_announce_sessions_that_began_while_disabled(tmp_path, console):
+    ann, _ = _announcer(
+        tmp_path, console, enabled=False,
+        rows=[[], [("CARLOS", "Armando")], [("CARLOS", "Armando")], [("CARLOS", "Armando"), ("EDUARDO", "Vegivaca")]],
+    )
+
+    ann.tick()
+    ann.tick()  # Carlos logs in while announcements are off
+    ann.store.save_config(PresenceConfig(announce_enabled=True))
+    ann.tick()  # nothing to say: Carlos is already known
+    ann.tick()  # Eduardo's login is announced
+
+    assert console.sent == ["announce Player Eduardo (Vegivaca) is online."]
+
+
+def test_tick_stays_silent_for_accounts_already_online_when_enabled(tmp_path, console):
     ann, _ = _announcer(tmp_path, console, enabled=False, rows=[[("CARLOS", "Armando")]] * 3)
 
-    ann.tick()  # disabled: nothing observed
+    ann.tick()  # disabled: seeds the tracker quietly
     ann.store.save_config(PresenceConfig(announce_enabled=True))
-    ann.tick()  # first enabled tick seeds silently
+    ann.tick()
     ann.tick()
 
     assert console.sent == []
