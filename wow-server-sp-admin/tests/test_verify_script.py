@@ -142,3 +142,37 @@ def test_executable_verifier_reports_docker_permission_and_delegated_root_failur
     assert "Docker readiness failed: cannot inspect ac-worldserver from admin container" in result.stdout
     assert "AC verify reported issues" in result.stdout
     assert "docker exec azerothcore-admin docker inspect ac-worldserver" in log.read_text()
+
+
+def test_executable_verifier_checks_optional_lan_bind(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    admin_stack.joinpath(".env").write_text(
+        "TAILSCALE_IP=100.64.0.5\nLAN_IP=192.168.0.11\nADMIN_PORT=8000\n"
+    )
+    bind, log = _fake_commands(tmp_path)
+
+    missing = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert missing.returncode == 1
+    assert "[FAIL] admin port NOT listening on LAN bind 192.168.0.11:8000" in missing.stdout
+
+    _executable(
+        bind / "ss",
+        "#!/bin/sh\n"
+        "printf 'LISTEN 0 0 100.64.0.5:8000 0.0.0.0:*\\n'\n"
+        "printf 'LISTEN 0 0 192.168.0.11:8000 0.0.0.0:*\\n'\n",
+    )
+    present = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert present.returncode == 0, present.stdout + present.stderr
+    assert "admin port listening on LAN interface (192.168.0.11:8000)" in present.stdout
+    assert "/healthz returns 200 on LAN bind" in present.stdout
+
+
+def test_executable_verifier_skips_lan_checks_without_lan_ip(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    admin_stack.joinpath(".env").write_text("TAILSCALE_IP=100.64.0.5\nLAN_IP=\nADMIN_PORT=8000\n")
+    bind, log = _fake_commands(tmp_path)
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LAN" not in result.stdout

@@ -161,9 +161,13 @@ docker image rm "$CANDIDATE_IMAGE" >/dev/null 2>&1 || \
 
 echo ""
 TAILSCALE_IP=""
+LAN_IP=""
 ADMIN_PORT=""
 # shellcheck disable=SC1090,SC1091
 source "$STACK_DIR/.env"
 if [ -n "${TAILSCALE_IP:-}" ] && [ -n "${ADMIN_PORT:-}" ]; then
     echo "Admin app available at http://${TAILSCALE_IP}:${ADMIN_PORT}/"
+fi
+if [ -n "${LAN_IP:-}" ] && [ -n "${ADMIN_PORT:-}" ]; then
+    echo "Also on the LAN at http://${LAN_IP}:${ADMIN_PORT}/"
 fi

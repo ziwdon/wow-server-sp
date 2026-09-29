@@ -60,6 +60,8 @@ Install the web admin after the server is running:
 
 Then open `http://<tailscale-ip>:8765` in a browser.
 
+To also reach it from your LAN without Tailscale, install with `LAN_IP=<server-lan-ip>` (or add `LAN_IP=<ip>` to `/opt/stacks/azerothcore-admin/.env` and run the admin redeploy script). The admin has no login, so anyone on that network gets full control. The game server itself stays Tailscale-only.
+
 Verify it's working:
 
 ```bash

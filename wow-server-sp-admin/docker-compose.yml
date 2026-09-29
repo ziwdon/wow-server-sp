@@ -22,6 +22,9 @@ services:
       - "${DOCKER_GID:-999}"
     ports:
       - "${TAILSCALE_IP}:${ADMIN_PORT:-8765}:8000"
+      # Optional LAN bind (LAN_IP in .env). Unset falls back to loopback --
+      # never an empty host IP, which Docker would publish on 0.0.0.0.
+      - "${LAN_IP:-127.0.0.1}:${ADMIN_PORT:-8765}:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/stacks/azerothcore:/ac:ro

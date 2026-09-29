@@ -41,6 +41,7 @@ fi
 
 # 3. listening on tailscale interface
 TAILSCALE_IP=""
+LAN_IP=""
 ADMIN_PORT=""
 if [ -f "$STACK_DIR/.env" ]; then
     # shellcheck disable=SC1090,SC1091
@@ -60,6 +61,20 @@ else
         ok "admin port listening on Tailscale interface ($bind)"
     else
         fail "admin port NOT listening on $bind"
+    fi
+fi
+# 3b. optional LAN bind (LAN_IP in .env)
+if [ -n "${LAN_IP:-}" ] && [ -n "${ADMIN_PORT:-}" ]; then
+    lan_bind="${LAN_IP}:${ADMIN_PORT}"
+    if ss -ltn -H 2>/dev/null | awk '{print $4}' | grep -Fxq "$lan_bind"; then
+        ok "admin port listening on LAN interface ($lan_bind)"
+    else
+        fail "admin port NOT listening on LAN bind $lan_bind"
+    fi
+    if curl -fsS "http://${lan_bind}/healthz" >/dev/null; then
+        ok "/healthz returns 200 on LAN bind"
+    else
+        fail "/healthz unreachable at $lan_bind"
     fi
 fi
 
