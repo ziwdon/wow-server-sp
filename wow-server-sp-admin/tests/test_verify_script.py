@@ -48,6 +48,12 @@ esac
 """)
     _executable(bind / "ss", "#!/bin/sh\nprintf 'LISTEN 0 0 100.64.0.5:8000 0.0.0.0:*\\n'\n")
     _executable(bind / "curl", "#!/bin/sh\nexit 0\n")
+    _executable(bind / "ip", """#!/bin/sh
+printf '1: lo    inet 127.0.0.1/8 scope host lo\\n'
+[ "${FAKE_LAN_ASSIGNED:-1}" = 1 ] && printf '2: enp2s0    inet 192.168.0.11/24 scope global enp2s0\\n'
+exit 0
+""")
+    _executable(bind / "sysctl", "#!/bin/sh\necho \"${FAKE_NONLOCAL_BIND:-1}\"\n")
     _executable(bind / "id", "#!/bin/sh\n[ \"$1\" = -un ] && echo verifier || echo verifygroup\n")
     _executable(bind / "stat", "#!/bin/sh\necho verifier:verifygroup\n")
     _executable(bind / "systemctl", "#!/bin/sh\nexit 0\n")
@@ -165,6 +171,24 @@ def test_executable_verifier_checks_optional_lan_bind(tmp_path):
     assert present.returncode == 0, present.stdout + present.stderr
     assert "admin port listening on LAN interface (192.168.0.11:8000)" in present.stdout
     assert "/healthz returns 200 on LAN bind" in present.stdout
+
+
+def test_executable_verifier_treats_unassigned_lan_ip_as_advisory(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    admin_stack.joinpath(".env").write_text(
+        "TAILSCALE_IP=100.64.0.5\nLAN_IP=192.168.0.11\nADMIN_PORT=8000\n"
+    )
+    bind, log = _fake_commands(tmp_path)
+
+    result = _run_admin_verifier(
+        script, admin_stack, ac_stack, bind, log,
+        FAKE_LAN_ASSIGNED="0", FAKE_NONLOCAL_BIND="0",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 FAIL" in result.stdout
+    assert "[INFO] LAN_IP 192.168.0.11 is not assigned to this host" in result.stdout
+    assert "[INFO] net.ipv4.ip_nonlocal_bind is not 1" in result.stdout
 
 
 def test_executable_verifier_skips_lan_checks_without_lan_ip(tmp_path):

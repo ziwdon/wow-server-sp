@@ -131,7 +131,7 @@ For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: r
 | Variable | Description |
 |----------|-------------|
 | `TAILSCALE_IP` | Admin app bind address (always on) |
-| `LAN_IP` | Optional second bind on a LAN interface (empty = Tailscale only; unset falls back to loopback, never `0.0.0.0`). Set via `LAN_IP=<ip> ./install-azerothcore-admin.sh`, or add to `.env` and redeploy. The admin has no login — anyone on the LAN gets full control |
+| `LAN_IP` | Optional second bind on a LAN interface (empty = Tailscale only; unset falls back to loopback, never `0.0.0.0`). Set via `LAN_IP=<ip> ./install-azerothcore-admin.sh`, or add to `.env` and redeploy. The admin has no login — anyone on the LAN gets full control. Needs host sysctl `net.ipv4.ip_nonlocal_bind=1`, or a missing LAN IP stops the whole container (Tailscale too) |
 | `ADMIN_PORT` | Port the admin listens on |
 | `HOST_UID` / `HOST_GID` | User/group IDs for file ownership |
 | `DOCKER_GID` | Docker group GID for socket access |

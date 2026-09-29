@@ -61,7 +61,11 @@ def _systemd_prompt_script(tmp_path: Path) -> Path:
 
 
 def _lan_ip_step_run(
-    tmp_path: Path, *, lan_ip: str | None, existing_env: str | None = None
+    tmp_path: Path,
+    *,
+    lan_ip: str | None,
+    existing_env: str | None = None,
+    nonlocal_bind: str = "1",
 ) -> subprocess.CompletedProcess[str]:
     """Run a test copy of the installer that stops after the LAN_IP step."""
     admin_stack = tmp_path / "admin-stack"
@@ -97,8 +101,10 @@ def _lan_ip_step_run(
         "printf '1: lo    inet 127.0.0.1/8 scope host lo\\n'\n"
         "printf '2: enp2s0    inet 192.168.0.11/24 brd 192.168.0.255 scope global enp2s0\\n'\n",
     )
+    _write_stub(stubs / "sysctl", "#!/bin/sh\necho \"${FAKE_NONLOCAL_BIND:-1}\"\n")
     env = os.environ.copy()
     env.pop("LAN_IP", None)
+    env["FAKE_NONLOCAL_BIND"] = nonlocal_bind
     env["PATH"] = f"{stubs}:{env['PATH']}"
     if lan_ip is not None:
         env["LAN_IP"] = lan_ip
@@ -239,6 +245,16 @@ class InstallerScriptTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("LAN IP: 192.168.0.11", result.stdout)
 
+    def test_lan_ip_warns_when_nonlocal_bind_is_off(self):
+        for value, warns in (("0", True), ("1", False)):
+            with self.subTest(nonlocal_bind=value), tempfile.TemporaryDirectory() as temp_dir:
+                result = _lan_ip_step_run(
+                    Path(temp_dir), lan_ip="192.168.0.11", nonlocal_bind=value
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual("ip_nonlocal_bind is not 1" in result.stderr, warns)
+
     def test_lan_ip_rejects_unassigned_and_tailscale_addresses(self):
         cases = {
             "10.9.9.9": "not assigned to any local interface",
@@ -287,10 +303,36 @@ class InstallerScriptTest(unittest.TestCase):
         self.assertEqual(len(exec_start_pre), 2)
         self.assertIn('Waiting for LAN IP $LAN_IP', exec_start_pre[1])
         self.assertIn('[ -z "$LAN_IP" ] && exit 0', exec_start_pre[1])
+        self.assertTrue(exec_start_pre[1].endswith("exit 0'"), exec_start_pre[1])
         # systemd substitutes ${VAR} inside words; the bash snippets must not
         # rely on brace expansion of their own variables.
         for line in exec_start_pre:
             self.assertNotIn("${", line)
+
+    def test_systemd_lan_wait_never_blocks_start_when_lan_ip_missing(self):
+        source = INSTALLER.read_text()
+        unit = source.split("<<'UNIT' >/dev/null\n", 1)[1].split("\nUNIT\n", 1)[0]
+        lan_wait = [line for line in unit.splitlines() if "LAN IP" in line][0]
+        snippet = shlex.split(lan_wait.removeprefix("ExecStartPre="))[2]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            env_file = tmp_path / "admin.env"
+            env_file.write_text("TAILSCALE_IP=100.64.0.1\nLAN_IP=192.168.0.11\n")
+            snippet = snippet.replace("/opt/stacks/azerothcore-admin/.env", str(env_file))
+            stubs = tmp_path / "stubs"
+            stubs.mkdir()
+            _write_stub(stubs / "ip", "#!/bin/sh\nprintf '1: lo    inet 127.0.0.1/8 scope host lo\\n'\n")
+            _write_stub(stubs / "sleep", "#!/bin/sh\nexit 0\n")
+            env = os.environ.copy()
+            env["PATH"] = f"{stubs}:{env['PATH']}"
+
+            result = subprocess.run(
+                ["bash", "-c", snippet], text=True, capture_output=True, env=env, check=False
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING: LAN IP 192.168.0.11 not assigned; starting anyway", result.stdout)
 
     def test_admin_yml_bind_mount_disables_implicit_host_path_creation(self):
         compose = ADMIN_COMPOSE.read_text()

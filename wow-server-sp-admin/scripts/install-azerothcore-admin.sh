@@ -46,6 +46,14 @@ if [ -n "$LAN_IP" ]; then
         exit 1
     fi
     echo "LAN IP: $LAN_IP"
+    # Without ip_nonlocal_bind, Docker cannot publish on LAN_IP while it is
+    # unassigned (DHCP change, cable out) and the whole container -- Tailscale
+    # bind included -- fails to start.
+    if [ "$(sysctl -n net.ipv4.ip_nonlocal_bind 2>/dev/null || echo 0)" != 1 ]; then
+        echo "WARNING: net.ipv4.ip_nonlocal_bind is not 1. If $LAN_IP is ever missing," >&2
+        echo "         the admin container will not start (Tailscale access included). Fix:" >&2
+        echo "         echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf && sudo sysctl --system" >&2
+    fi
 fi
 
 # --- Step 2: port selection / collision check ---
@@ -221,7 +229,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/stacks/azerothcore-admin
 ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TAILSCALE_IP" && exit 0; echo "Waiting for Tailscale IP $TAILSCALE_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TAILSCALE_IP not assigned"; exit 1'
-ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; [ -z "$LAN_IP" ] && exit 0; for i in {1..60}; do ip -4 -o addr show | grep -Fq " $LAN_IP/" && exit 0; echo "Waiting for LAN IP $LAN_IP..."; sleep 2; done; echo "ERROR: LAN IP $LAN_IP not assigned"; exit 1'
+ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; [ -z "$LAN_IP" ] && exit 0; for i in {1..15}; do ip -4 -o addr show | grep -Fq " $LAN_IP/" && exit 0; echo "Waiting for LAN IP $LAN_IP..."; sleep 2; done; echo "WARNING: LAN IP $LAN_IP not assigned; starting anyway (Tailscale only)"; exit 0'
 ExecStart=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env up -d
 ExecStop=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env down
 TimeoutStartSec=300
