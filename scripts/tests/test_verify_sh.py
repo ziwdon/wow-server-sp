@@ -50,7 +50,7 @@ printf 'docker %s\\n' "$*" >> "${VERIFY_CALL_LOG:-/dev/null}"
 case "$1" in
   inspect)
     case "$*" in *ExitCode*) echo 0 ;; *StartedAt*) echo 2026-07-12T00:00:00Z ;; *) echo running ;; esac ;;
-  exec) exit 0 ;;
+  exec) case "$*" in *localAddress*) echo "${FAKE_REALM_LOCAL:-}" ;; esac; exit 0 ;;
   compose) exit 0 ;;
   images) exit 0 ;;
 esac
@@ -200,3 +200,61 @@ def test_errors_log_advisory_flag_downgrades_actionable_errors(tmp_path):
     assert "Errors.log has actionable runtime errors" not in advisory.stdout
     assert "treated as advisory" in advisory.stdout
     _assert_complete_summary(advisory)
+
+
+LAN_OVERRIDE = (
+    "services:\n"
+    "  ac-worldserver:\n    ports:\n      - \"192.168.0.11:8085:8085\"\n"
+    "  ac-authserver:\n    ports:\n      - \"192.168.0.11:3724:3724\"\n"
+)
+LAN_SS = (
+    "State Recv-Q Send-Q Local Address:Port Peer Address:Port\n"
+    "LISTEN 0 0 100.64.0.5:3724 0.0.0.0:*\n"
+    "LISTEN 0 0 192.168.0.11:3724 0.0.0.0:*\n"
+    "LISTEN 0 0 100.64.0.5:8085 0.0.0.0:*\n"
+    "LISTEN 0 0 192.168.0.11:8085 0.0.0.0:*"
+)
+
+
+def test_lan_play_bind_is_an_expected_listener_and_realmlist_local_address_is_checked(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("docker-compose.override.yml").write_text(LAN_OVERRIDE)
+    bind = _stubs(tmp_path, ss_output=LAN_SS)
+    _executable(bind / "ip", "#!/bin/sh\nprintf '2: enp2s0    inet 192.168.0.11/24 scope global enp2s0\\n'\n")
+    _executable(bind / "sysctl", "#!/bin/sh\necho 1\n")
+
+    good = _run(stack, bind, FAKE_REALM_LOCAL="192.168.0.11")
+    assert "[OK] Realmlist localAddress (192.168.0.11) matches the LAN bind" in good.stdout
+    assert "Port 3724 (authserver) listening only on expected scope: 100.64.0.5 192.168.0.11" in good.stdout
+    assert "Port 8085 (worldserver) listening only on expected scope: 100.64.0.5 192.168.0.11" in good.stdout
+    assert "LAN IP 192.168.0.11 is assigned locally" in good.stdout
+    assert "net.ipv4.ip_nonlocal_bind=1" in good.stdout
+
+    stale = _run(stack, bind, FAKE_REALM_LOCAL="127.0.0.1")
+    assert "Realmlist localAddress '127.0.0.1' != LAN bind '192.168.0.11'" in stale.stdout
+    _assert_complete_summary(stale)
+
+
+def test_lan_play_missing_lan_ip_is_advisory(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("docker-compose.override.yml").write_text(LAN_OVERRIDE)
+    bind = _stubs(tmp_path, ss_output=LAN_SS)
+    _executable(bind / "ip", "#!/bin/sh\nexit 0\n")
+
+    result = _run(stack, bind, FAKE_REALM_LOCAL="192.168.0.11")
+
+    assert "[INFO] LAN IP 192.168.0.11 is not assigned to this host -- LAN play unavailable" in result.stdout
+    assert "[INFO] net.ipv4.ip_nonlocal_bind is not 1" in result.stdout
+    assert "Realmlist localAddress '" not in result.stdout
+
+
+def test_lan_play_off_placeholder_allows_loopback_listener_without_realm_check(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("docker-compose.override.yml").write_text(LAN_OVERRIDE.replace("192.168.0.11", "127.0.0.1"))
+    bind = _stubs(tmp_path, ss_output=LAN_SS.replace("192.168.0.11", "127.0.0.1"))
+
+    result = _run(stack, bind)
+
+    assert "Port 3724 (authserver) listening only on expected scope: 100.64.0.5 127.0.0.1" in result.stdout
+    assert "Realmlist localAddress" not in result.stdout
+    assert "LAN IP" not in result.stdout

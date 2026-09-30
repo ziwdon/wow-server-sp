@@ -1468,6 +1468,66 @@ prompt_string() {
     done
 }
 
+# Optional direct-LAN play (LAN_IP). Prints the CIDR prefix length of $1 on
+# the local interface that holds it, or nothing when it is not assigned here.
+lan_ip_prefix_len() {
+    ip -4 -o addr show 2>/dev/null \
+        | awk -v want="$1" '{split($4, a, "/"); if (a[1] == want) { print a[2]; exit }}'
+}
+
+# Convert a CIDR prefix length (0-32) to a dotted netmask (24 -> 255.255.255.0).
+prefix_to_netmask() {
+    local bits="$1" mask="" octet i
+    for i in 1 2 3 4; do
+        if [ "$bits" -ge 8 ]; then
+            octet=255
+            bits=$((bits - 8))
+        else
+            octet=$((256 - (1 << (8 - bits))))
+            bits=0
+        fi
+        mask+="${mask:+.}${octet}"
+    done
+    printf '%s\n' "$mask"
+}
+
+# LAN IP bound by an existing docker-compose.override.yml (its authserver
+# LAN port line); empty when absent or set to the 127.0.0.1 "off" placeholder.
+existing_override_lan_ip() {
+    local ip
+    ip="$(sed -nE 's/^      - "([0-9.]+):3724:3724"$/\1/p' "${STACK_DIR}/docker-compose.override.yml" 2>/dev/null | head -n1)"
+    [ "$ip" = "127.0.0.1" ] && ip=""
+    printf '%s\n' "$ip"
+}
+
+# Prompt for the optional LAN IP. Blank keeps WoW Tailscale-only. The address
+# must be a locally assigned IPv4 outside loopback and Tailscale's CGNAT range.
+prompt_lan_ip() {
+    local response o2
+    while true; do
+        read -rp "LAN IP for direct LAN play without Tailscale (blank = Tailscale only): " response || true
+        if [ -z "$response" ]; then
+            PROMPT_RESULT=""
+            return 0
+        fi
+        if ! [[ "$response" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            echo "  ✗ Must be an IPv4 address, or blank for Tailscale only." >&2
+            continue
+        fi
+        o2="$(printf '%s' "$response" | cut -d. -f2)"
+        if [[ "$response" == 127.* ]] || { [[ "$response" == 100.* ]] && [ "$o2" -ge 64 ] && [ "$o2" -le 127 ]; }; then
+            echo "  ✗ $response is a loopback/Tailscale address; enter this host's LAN address." >&2
+            continue
+        fi
+        if [ -z "$(lan_ip_prefix_len "$response")" ]; then
+            echo "  ✗ $response is not assigned to any local interface (see 'ip -4 addr')." >&2
+            continue
+        fi
+        PROMPT_RESULT="$response"
+        return 0
+    done
+}
+
 prompt_integer_range() {
     # Args: prompt_text, min, max, default
     local prompt_text="$1"
@@ -1737,6 +1797,7 @@ AHBOT_CHARACTER_COUNT=${AHBOT_CHARACTER_COUNT}
 INSTALL_UFW=${INSTALL_UFW}
 ENABLE_SYSTEMD=${ENABLE_SYSTEMD}
 TAILSCALE_IP=${TAILSCALE_IP:-}
+LAN_IP=${LAN_IP:-}
 EOF
     # Preserve AHBOT_GUIDS across save_config rewrites. Pause 3 sets this
     # value in-memory and appends it to the config file; without this block,
@@ -1924,6 +1985,17 @@ else
     prompt_yn "Enable systemd auto-start on boot?" y
     ENABLE_SYSTEMD="$PROMPT_RESULT"
 
+    if [ "$ADOPT" = true ]; then
+        # Adopt never regenerates docker-compose.override.yml (Phase 2.5), so
+        # a new LAN IP would reach the realmlist (Phase 5) with no listener.
+        # Keep whatever LAN bind the existing override already has.
+        LAN_IP="$(existing_override_lan_ip)"
+        echo "LAN IP from existing docker-compose.override.yml: ${LAN_IP:-<none -- Tailscale only>}"
+    else
+        prompt_lan_ip
+        LAN_IP="$PROMPT_RESULT"
+    fi
+
     TAILSCALE_IP=""
     save_config
 
@@ -1939,6 +2011,9 @@ validate_xp_rate_choice
 # Older saved prompt files do not contain SERVER_PVP. Default to y (PvP), which
 # is the default for new prompt runs.
 SERVER_PVP="${SERVER_PVP:-y}"
+
+# Older saved prompt files do not contain LAN_IP. Blank = Tailscale-only WoW.
+LAN_IP="${LAN_IP:-}"
 
 # Derive InnoDB buffer pool instance count from the chosen buffer pool size:
 # MySQL only honors innodb_buffer_pool_instances when each instance has at
@@ -2783,6 +2858,12 @@ services:
       - ./configs/mysql/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
 
   ac-worldserver:
+    ports:
+      # Direct-LAN play (optional LAN_IP prompt). The Tailscale bind comes from
+      # .env DOCKER_WORLD_EXTERNAL_PORT; this adds a second host bind. The
+      # 127.0.0.1 placeholder means LAN play is off -- never leave the host IP
+      # empty, which would publish on 0.0.0.0.
+      - "127.0.0.1:8085:8085"
     volumes:
       # Debug/source visibility only. Modules are compiled into the image at build time;
       # changing files under ./modules still requires docker compose build.
@@ -2888,6 +2969,11 @@ services:
 
       # ----- progression rate overrides -----
 
+  ac-authserver:
+    ports:
+      # Direct-LAN play -- see the ac-worldserver ports note above.
+      - "127.0.0.1:3724:3724"
+
   ac-db-import:
     volumes:
       # Keep custom SQL mount points available, but do not copy Playerbots SQL here.
@@ -2906,6 +2992,10 @@ EOF
     [ "${SERVER_PVP}" = "y" ] && GAME_TYPE_VALUE=1
     sed -i -E "s|^(      AC_GAME_TYPE: \")0(\")$|\1${GAME_TYPE_VALUE}\2|" docker-compose.override.yml
     insert_xp_rate_overrides_into_compose docker-compose.override.yml
+    LAN_BIND_IP="${LAN_IP:-127.0.0.1}"
+    for lan_port in 3724 8085; do
+        sed -i -E "s|^(      - \")127\.0\.0\.1(:${lan_port}:${lan_port}\")$|\1${LAN_BIND_IP}\2|" docker-compose.override.yml
+    done
 
     # Verification greps (per spec refinement #1 — disambiguated messages)
     if ! grep -qE "^      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: \"${PLAYERBOT_COUNT}\"$" docker-compose.override.yml; then
@@ -2925,6 +3015,20 @@ EOF
         exit 1
     fi
     verify_xp_rate_overrides_in_compose docker-compose.override.yml
+    for lan_port in 3724 8085; do
+        if ! grep -qFx "      - \"${LAN_BIND_IP}:${lan_port}:${lan_port}\"" docker-compose.override.yml; then
+            echo "ERROR: LAN port substitution did not match (expected ${LAN_BIND_IP}:${lan_port}:${lan_port})"
+            exit 1
+        fi
+    done
+    # Without ip_nonlocal_bind, Docker cannot publish on LAN_IP while it is
+    # unassigned (DHCP change, cable out) and ac-authserver/ac-worldserver --
+    # Tailscale binds included -- fail to start.
+    if [ -n "$LAN_IP" ] && [ "$(sysctl -n net.ipv4.ip_nonlocal_bind 2>/dev/null || echo 0)" != 1 ]; then
+        echo "WARNING: net.ipv4.ip_nonlocal_bind is not 1. If ${LAN_IP} is ever missing, the"
+        echo "         auth/world servers will not start (Tailscale players included). Fix:"
+        echo "         echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf && sudo sysctl --system"
+    fi
 
     for expected in \
         "      AC_PLAYERBOTS_DATABASE_INFO: \"ac-database;3306;root;\${DOCKER_DB_ROOT_PASSWORD:-password};acore_playerbots\"" \
@@ -3030,7 +3134,9 @@ if should_run_phase "2.6"; then
     for binding in "${DOCKER_DB_EXTERNAL_PORT}" \
                    "${DOCKER_AUTH_EXTERNAL_PORT}" \
                    "${DOCKER_WORLD_EXTERNAL_PORT}" \
-                   "${DOCKER_SOAP_EXTERNAL_PORT}"
+                   "${DOCKER_SOAP_EXTERNAL_PORT}" \
+                   "${LAN_IP:-127.0.0.1}:3724" \
+                   "${LAN_IP:-127.0.0.1}:8085"
     do
         if ! check_port "${binding}"; then
             echo "MISSING port binding: ${binding}"
@@ -3581,9 +3687,29 @@ if should_run_phase "5"; then
         -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" acore_auth \
         -e "UPDATE realmlist SET address='${TAILSCALE_IP}' WHERE id=1;"
 
+    # Direct-LAN play: the authserver hands localAddress to clients whose IP is
+    # inside localAddress/localSubnetMask (Realm::GetAddressForClient), and
+    # address to everyone else -- so Tailscale clients (100.x) keep the
+    # Tailscale IP. Without LAN_IP, restore AC's loopback default.
+    REALM_LOCAL_ADDRESS="127.0.0.1"
+    REALM_LOCAL_MASK="255.255.255.0"
+    if [ -n "${LAN_IP:-}" ]; then
+        LAN_PREFIX="$(lan_ip_prefix_len "$LAN_IP")"
+        if [ -z "$LAN_PREFIX" ]; then
+            echo "ERROR: LAN_IP $LAN_IP is not currently assigned to this host."
+            ip -4 -o addr show 2>/dev/null || true
+            exit 1
+        fi
+        REALM_LOCAL_ADDRESS="$LAN_IP"
+        REALM_LOCAL_MASK="$(prefix_to_netmask "$LAN_PREFIX")"
+    fi
     docker exec ac-database mysql \
         -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" acore_auth \
-        -e "SELECT id, name, address, port FROM realmlist;"
+        -e "UPDATE realmlist SET localAddress='${REALM_LOCAL_ADDRESS}', localSubnetMask='${REALM_LOCAL_MASK}' WHERE id=1;"
+
+    docker exec ac-database mysql \
+        -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" acore_auth \
+        -e "SELECT id, name, address, localAddress, localSubnetMask, port FROM realmlist;"
 
     docker compose restart ac-authserver
     sleep 3
@@ -3962,6 +4088,7 @@ WorkingDirectory=/opt/stacks/azerothcore
 # Prefer `tailscale ip -4` because it reflects Tailscale state directly.
 # Keep a tailscale0 interface fallback, but match a real CIDR suffix such as /32.
 ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore/.env; TS_IP="${DOCKER_AUTH_EXTERNAL_PORT%%:*}"; if [ -z "$TS_IP" ]; then echo "ERROR: DOCKER_AUTH_EXTERNAL_PORT is empty or missing in /opt/stacks/azerothcore/.env"; exit 1; fi; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TS_IP" && exit 0; ip -4 -o addr show dev tailscale0 2>/dev/null | grep -Eq "inet ${TS_IP//./\\.}/[0-9]+" && exit 0; echo "Waiting for Tailscale IP $TS_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TS_IP is not assigned locally"; echo "tailscale ip -4:"; tailscale ip -4 2>/dev/null || true; echo "tailscale0 IPv4 addresses:"; ip -4 -o addr show dev tailscale0 2>/dev/null || true; exit 1'
+ExecStartPre=/bin/bash -lc 'LAN=$(grep -oE "[0-9.]+:3724:3724" /opt/stacks/azerothcore/docker-compose.override.yml 2>/dev/null | head -n1 | cut -d: -f1); if [ -z "$LAN" ] || [ "$LAN" = 127.0.0.1 ]; then exit 0; fi; for i in {1..15}; do ip -4 -o addr show | grep -Fq " $LAN/" && exit 0; echo "Waiting for LAN IP $LAN..."; sleep 2; done; echo "WARNING: LAN IP $LAN not assigned; starting anyway (needs net.ipv4.ip_nonlocal_bind=1)"; exit 0'
 
 ExecStart=/usr/bin/docker compose up -d --no-build REPLACE_WITH_SCALE_FRAGMENT
 ExecStop=/usr/bin/docker compose down --timeout 60
@@ -4008,6 +4135,7 @@ echo "════════════════════════�
 echo ""
 echo "Stack:           ${STACK_DIR}"
 echo "Tailscale IP:    ${TAILSCALE_IP:-<unknown>}"
+echo "LAN IP:          ${LAN_IP:-<off -- Tailscale only>}"
 echo "Log:             ${LOG_FILE}"
 echo "State file:      ${STATE_FILE}"
 echo ""

@@ -5,6 +5,10 @@
 - **Client version:** World of Warcraft 3.3.5a (build 12340) — no other version works with AzerothCore
 - AzerothCore does not distribute the client; you must obtain your own clean 3.3.5a copy
 
+## Direct-LAN play without Tailscale (optional)
+
+If the installer's **LAN IP** prompt was answered (e.g. `192.168.0.11`), LAN clients can skip Tailscale: set `set realmlist 192.168.0.11` (or a hosts-file name for it). The authserver and worldserver also listen on that IP (`docker-compose.override.yml` LAN port lines), and `acore_auth.realmlist.localAddress`/`localSubnetMask` send clients whose own IP is inside that subnet to the LAN address. Everyone else, Tailscale clients (`100.x`) included, still gets the Tailscale `address`. A missing LAN IP only breaks LAN play, provided the host has `net.ipv4.ip_nonlocal_bind=1`; without it, the auth/world containers can't start at all.
+
 ## Connecting via Tailscale (this repo's networking model)
 
 This server uses Tailscale — there is no public IP and no router port forwarding. Every player must have Tailscale installed and connected to the same Tailscale network before they can connect.
@@ -29,7 +33,7 @@ set realmlist 100.x.y.z
 
 Replace `100.x.y.z` with the server's actual Tailscale IP.
 
-> Do not use `localhost` or `127.0.0.1` unless connecting from the same machine as the server — use the Tailscale IP even for local LAN connections, because the server binds to its Tailscale address.
+> Do not use `localhost` or `127.0.0.1` unless connecting from the same machine as the server. On the LAN, use the Tailscale IP unless the optional direct-LAN play below is enabled.
 
 ### Step 4 — Launch the game
 Use `WoW.exe` (not `Launcher.exe`). If you must use Launcher.exe, also set `patchlist` to the same Tailscale IP in `realmlist.wtf`.
