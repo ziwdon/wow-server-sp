@@ -135,3 +135,75 @@ def test_lan_ip_is_persisted_and_checked_everywhere():
     phase5 = INSTALL.split("# PHASE 5 ", 1)[1].split("# PHASE 5.1", 1)[0]
     assert "UPDATE realmlist SET localAddress='${REALM_LOCAL_ADDRESS}', localSubnetMask='${REALM_LOCAL_MASK}' WHERE id=1;" in phase5
     assert 'REALM_LOCAL_ADDRESS="127.0.0.1"' in phase5
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ('  ac-authserver:\n    ports:\n      - "192.168.0.11:3724:3724"\n', "192.168.0.11"),
+        ('  ac-authserver:\n    ports:\n      - "127.0.0.1:3724:3724"\n', ""),
+        ("services: {}\n", ""),
+        (None, ""),
+    ],
+)
+def test_existing_override_lan_ip_reads_the_authserver_lan_line(tmp_path, override, expected):
+    if override is not None:
+        (tmp_path / "docker-compose.override.yml").write_text(override)
+    result = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\nSTACK_DIR={tmp_path}\n{_function('existing_override_lan_ip')}\n"
+         'echo "[$(existing_override_lan_ip)]"'],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"[{expected}]"
+
+
+def test_adopt_mode_never_prompts_for_a_new_lan_ip():
+    # Adopt skips Phase 2.5, so a prompted LAN IP would reach the realmlist
+    # (Phase 5) without any listener. It must come from the existing override.
+    block = INSTALL.split('    prompt_yn "Enable systemd auto-start on boot?" y\n', 1)[1].split("    save_config\n", 1)[0]
+    adopt, _, fresh = block.partition("    else\n")
+    assert 'if [ "$ADOPT" = true ]; then' in adopt
+    assert 'LAN_IP="$(existing_override_lan_ip)"' in adopt
+    assert "prompt_lan_ip" not in adopt
+    assert "prompt_lan_ip" in fresh
+
+
+def _ac_unit_lan_wait() -> str:
+    unit = re.search(
+        r"sudo tee /etc/systemd/system/azerothcore\.service <<'EOF' >/dev/null\n(.*?)\nEOF", INSTALL, re.S
+    ).group(1)
+    waits = [line for line in unit.splitlines() if line.startswith("ExecStartPre=") and "LAN IP" in line]
+    assert len(waits) == 1
+    return waits[0]
+
+
+@pytest.mark.parametrize(
+    ("override_ip", "assigned", "warns"),
+    [("192.168.0.11", False, True), ("192.168.0.11", True, False), ("127.0.0.1", False, False), (None, False, False)],
+)
+def test_ac_systemd_lan_wait_never_blocks_start(tmp_path, override_ip, assigned, warns):
+    import shlex
+
+    line = _ac_unit_lan_wait()
+    snippet = shlex.split(line.removeprefix("ExecStartPre="))[2]
+    override = tmp_path / "docker-compose.override.yml"
+    if override_ip:
+        override.write_text(f'  ac-authserver:\n    ports:\n      - "{override_ip}:3724:3724"\n')
+    snippet = snippet.replace("/opt/stacks/azerothcore/docker-compose.override.yml", str(override))
+    bind = tmp_path / "bin"
+    bind.mkdir()
+    ip_out = "2: enp2s0    inet 192.168.0.11/24 scope global enp2s0\\n" if assigned else ""
+    for name, body in (("ip", f"#!/bin/sh\nprintf '{ip_out}'\n"), ("sleep", "#!/bin/sh\nexit 0\n")):
+        (bind / name).write_text(body)
+        (bind / name).chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", snippet], text=True, capture_output=True,
+        env={"PATH": f"{bind}:/usr/bin:/bin"}, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert ("WARNING: LAN IP 192.168.0.11 not assigned; starting anyway" in result.stdout) == warns
+    # systemd substitutes ${VAR} inside words; the snippet must not rely on it.
+    assert "${" not in line

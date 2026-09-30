@@ -1491,6 +1491,15 @@ prefix_to_netmask() {
     printf '%s\n' "$mask"
 }
 
+# LAN IP bound by an existing docker-compose.override.yml (its authserver
+# LAN port line); empty when absent or set to the 127.0.0.1 "off" placeholder.
+existing_override_lan_ip() {
+    local ip
+    ip="$(sed -nE 's/^      - "([0-9.]+):3724:3724"$/\1/p' "${STACK_DIR}/docker-compose.override.yml" 2>/dev/null | head -n1)"
+    [ "$ip" = "127.0.0.1" ] && ip=""
+    printf '%s\n' "$ip"
+}
+
 # Prompt for the optional LAN IP. Blank keeps WoW Tailscale-only. The address
 # must be a locally assigned IPv4 outside loopback and Tailscale's CGNAT range.
 prompt_lan_ip() {
@@ -1976,8 +1985,16 @@ else
     prompt_yn "Enable systemd auto-start on boot?" y
     ENABLE_SYSTEMD="$PROMPT_RESULT"
 
-    prompt_lan_ip
-    LAN_IP="$PROMPT_RESULT"
+    if [ "$ADOPT" = true ]; then
+        # Adopt never regenerates docker-compose.override.yml (Phase 2.5), so
+        # a new LAN IP would reach the realmlist (Phase 5) with no listener.
+        # Keep whatever LAN bind the existing override already has.
+        LAN_IP="$(existing_override_lan_ip)"
+        echo "LAN IP from existing docker-compose.override.yml: ${LAN_IP:-<none -- Tailscale only>}"
+    else
+        prompt_lan_ip
+        LAN_IP="$PROMPT_RESULT"
+    fi
 
     TAILSCALE_IP=""
     save_config
@@ -4071,6 +4088,7 @@ WorkingDirectory=/opt/stacks/azerothcore
 # Prefer `tailscale ip -4` because it reflects Tailscale state directly.
 # Keep a tailscale0 interface fallback, but match a real CIDR suffix such as /32.
 ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore/.env; TS_IP="${DOCKER_AUTH_EXTERNAL_PORT%%:*}"; if [ -z "$TS_IP" ]; then echo "ERROR: DOCKER_AUTH_EXTERNAL_PORT is empty or missing in /opt/stacks/azerothcore/.env"; exit 1; fi; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TS_IP" && exit 0; ip -4 -o addr show dev tailscale0 2>/dev/null | grep -Eq "inet ${TS_IP//./\\.}/[0-9]+" && exit 0; echo "Waiting for Tailscale IP $TS_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TS_IP is not assigned locally"; echo "tailscale ip -4:"; tailscale ip -4 2>/dev/null || true; echo "tailscale0 IPv4 addresses:"; ip -4 -o addr show dev tailscale0 2>/dev/null || true; exit 1'
+ExecStartPre=/bin/bash -lc 'LAN=$(grep -oE "[0-9.]+:3724:3724" /opt/stacks/azerothcore/docker-compose.override.yml 2>/dev/null | head -n1 | cut -d: -f1); if [ -z "$LAN" ] || [ "$LAN" = 127.0.0.1 ]; then exit 0; fi; for i in {1..15}; do ip -4 -o addr show | grep -Fq " $LAN/" && exit 0; echo "Waiting for LAN IP $LAN..."; sleep 2; done; echo "WARNING: LAN IP $LAN not assigned; starting anyway (needs net.ipv4.ip_nonlocal_bind=1)"; exit 0'
 
 ExecStart=/usr/bin/docker compose up -d --no-build REPLACE_WITH_SCALE_FRAGMENT
 ExecStop=/usr/bin/docker compose down --timeout 60
