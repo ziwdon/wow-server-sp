@@ -65,7 +65,7 @@ State is saved in `~/.azerothcore-install-state`. Each phase can be resumed indi
 | `3.1` | Install module conf templates |
 | `4` | First run + DB init + client data download |
 | `pause-2` | **Manual pause 2**: Account creation (GM + AHBOT) via `docker attach ac-worldserver` |
-| `5` | Networking — Tailscale realmlist |
+| `5` | Networking — Tailscale realmlist (+ `localAddress`/`localSubnetMask` for the optional LAN IP) |
 | `5.1` | UFW firewall (conditional) |
 | `pause-3` | **Manual pause 3**: AH bot character creation in WoW client |
 | `6.1.4` | Write GUID(s) into `configs/modules/mod_ahbot.conf` |

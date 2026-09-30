@@ -56,6 +56,15 @@ done
 EXPECTED_TS_IP="${DOCKER_AUTH_EXTERNAL_PORT:-}"
 EXPECTED_TS_IP="${EXPECTED_TS_IP%%:*}"
 
+# Optional direct-LAN play: the installer substitutes LAN_IP into the
+# authserver's second port line in docker-compose.override.yml; 127.0.0.1
+# means LAN play is off. Empty on installs that predate the feature.
+LAN_BIND_IP="$(sed -nE 's/^      - "([0-9.]+):3724:3724"$/\1/p' "${STACK_DIR}/docker-compose.override.yml" 2>/dev/null | head -n1)"
+LAN_PLAY_IP=""
+if [ -n "$LAN_BIND_IP" ] && [ "$LAN_BIND_IP" != "127.0.0.1" ]; then
+    LAN_PLAY_IP="$LAN_BIND_IP"
+fi
+
 # ============================================================================
 # Helpers
 # ============================================================================
@@ -130,13 +139,15 @@ verify_port_scope() {
 }
 
 # Convenience: split an addr:port string from .env, then check exposure scope.
+# Extra args are additional allowed listen addresses (e.g. the LAN bind).
 verify_port_scope_from_env() {
     local name="$1" var_value="$2"
+    shift 2
     if [[ "$var_value" != *:* ]]; then
         fail "$name .env value is malformed (no addr:port): '$var_value'"
         return
     fi
-    verify_port_scope "$name" "${var_value##*:}" "${var_value%:*}"
+    verify_port_scope "$name" "${var_value##*:}" "${var_value%:*}" "$@"
 }
 
 # Escape regex metachars in a literal conf key. Mirrors the helper in the
@@ -358,6 +369,28 @@ else
         ok "Tailscale is currently assigning $EXPECTED_TS_IP locally"
     else
         fail "Tailscale is not assigning $EXPECTED_TS_IP locally (run 'tailscale ip -4' to inspect)"
+    fi
+fi
+
+# Check 6b — direct-LAN play (only when override.yml binds a LAN IP). The
+# realmlist localAddress routes LAN clients to the LAN IP; a missing LAN IP
+# only breaks LAN play, so that state is advisory.
+if [ -n "$LAN_PLAY_IP" ]; then
+    realm_local="$(mysql_exec "SELECT localAddress FROM acore_auth.realmlist WHERE id=1;" || echo "")"
+    if [ "$realm_local" = "$LAN_PLAY_IP" ]; then
+        ok "Realmlist localAddress ($realm_local) matches the LAN bind in override.yml"
+    else
+        fail "Realmlist localAddress '${realm_local}' != LAN bind '$LAN_PLAY_IP' in override.yml (LAN clients would be sent to the wrong address)"
+    fi
+    if ip -4 -o addr show 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | grep -Fxq "$LAN_PLAY_IP"; then
+        info "LAN IP $LAN_PLAY_IP is assigned locally -- direct-LAN play available"
+    else
+        info "LAN IP $LAN_PLAY_IP is not assigned to this host -- LAN play unavailable (Tailscale unaffected)"
+    fi
+    if [ "$(sysctl -n net.ipv4.ip_nonlocal_bind 2>/dev/null || echo 0)" = 1 ]; then
+        info "net.ipv4.ip_nonlocal_bind=1 -- a missing LAN IP cannot block auth/world server start"
+    else
+        info "net.ipv4.ip_nonlocal_bind is not 1 -- if $LAN_PLAY_IP disappears, auth/world servers will not start (Tailscale included)"
     fi
 fi
 
@@ -832,8 +865,10 @@ done
 # ============================================================================
 verify_port_scope_from_env "MySQL"       "${DOCKER_DB_EXTERNAL_PORT:-}"
 verify_port_scope_from_env "SOAP"        "${DOCKER_SOAP_EXTERNAL_PORT:-}"
-verify_port_scope_from_env "authserver"  "${DOCKER_AUTH_EXTERNAL_PORT:-}"
-verify_port_scope_from_env "worldserver" "${DOCKER_WORLD_EXTERNAL_PORT:-}"
+# The override.yml LAN line (LAN IP, or the 127.0.0.1 "off" placeholder) is
+# an expected second listener for the auth/world ports.
+verify_port_scope_from_env "authserver"  "${DOCKER_AUTH_EXTERNAL_PORT:-}" ${LAN_BIND_IP:+"$LAN_BIND_IP"}
+verify_port_scope_from_env "worldserver" "${DOCKER_WORLD_EXTERNAL_PORT:-}" ${LAN_BIND_IP:+"$LAN_BIND_IP"}
 
 # ============================================================================
 # Check 22 — auctions count (informational, with stale-empty warning)

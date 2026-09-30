@@ -2,7 +2,7 @@
 
 A Docker-based AzerothCore installer for solo or small-group play, with AI bots to fill the world, an active auction house, and per-character expansion progression. Includes a web admin UI for managing and tuning the server.
 
-Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that lets you reach the server without exposing any port to the internet.
+Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that lets you reach the server without exposing any port to the internet. Optionally, clients on the server's own LAN can also connect directly (the installer's *LAN IP* prompt).
 
 ## What's in the box
 
@@ -60,7 +60,7 @@ Install the web admin after the server is running:
 
 Then open `http://<tailscale-ip>:8765` in a browser.
 
-To also reach it from your LAN without Tailscale, install with `LAN_IP=<server-lan-ip>` (or add `LAN_IP=<ip>` to `/opt/stacks/azerothcore-admin/.env` and run the admin redeploy script). The admin has no login, so anyone on that network gets full control. The game server itself stays Tailscale-only. Also set `net.ipv4.ip_nonlocal_bind=1` (e.g. in `/etc/sysctl.d/99-nonlocal-bind.conf`) so a missing LAN IP can't stop the admin container from starting on Tailscale.
+To also reach it from your LAN without Tailscale, install with `LAN_IP=<server-lan-ip>` (or add `LAN_IP=<ip>` to `/opt/stacks/azerothcore-admin/.env` and run the admin redeploy script). The admin has no login, so anyone on that network gets full control. The game server is LAN-reachable only if its own *LAN IP* prompt was answered. Also set `net.ipv4.ip_nonlocal_bind=1` (e.g. in `/etc/sysctl.d/99-nonlocal-bind.conf`) so a missing LAN IP can't stop the admin container from starting on Tailscale.
 
 Verify it's working:
 
