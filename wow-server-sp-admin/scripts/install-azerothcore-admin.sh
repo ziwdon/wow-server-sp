@@ -28,6 +28,34 @@ if [ -z "$TAILSCALE_IP" ]; then
 fi
 echo "Tailscale IP: $TAILSCALE_IP"
 
+# --- Step 1b: optional LAN bind ---
+# Tailscale stays the always-on bind. LAN_IP adds a second bind on a local
+# interface so LAN devices can reach the admin without Tailscale. Taken from
+# the environment (LAN_IP= disables it), else preserved from an existing .env.
+if [ -z "${LAN_IP+x}" ] && [ -f "$STACK_DIR/.env" ]; then
+    LAN_IP="$(sed -n 's/^LAN_IP=//p' "$STACK_DIR/.env" | head -n1)"
+fi
+LAN_IP="${LAN_IP:-}"
+if [ -n "$LAN_IP" ]; then
+    if [ "$LAN_IP" = "$TAILSCALE_IP" ]; then
+        echo "ERROR: LAN_IP must differ from the Tailscale IP ($TAILSCALE_IP)." >&2
+        exit 1
+    fi
+    if ! ip -4 -o addr show 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | grep -Fxq "$LAN_IP"; then
+        echo "ERROR: LAN_IP=$LAN_IP is not assigned to any local interface." >&2
+        exit 1
+    fi
+    echo "LAN IP: $LAN_IP"
+    # Without ip_nonlocal_bind, Docker cannot publish on LAN_IP while it is
+    # unassigned (DHCP change, cable out) and the whole container -- Tailscale
+    # bind included -- fails to start.
+    if [ "$(sysctl -n net.ipv4.ip_nonlocal_bind 2>/dev/null || echo 0)" != 1 ]; then
+        echo "WARNING: net.ipv4.ip_nonlocal_bind is not 1. If $LAN_IP is ever missing," >&2
+        echo "         the admin container will not start (Tailscale access included). Fix:" >&2
+        echo "         echo 'net.ipv4.ip_nonlocal_bind=1' | sudo tee /etc/sysctl.d/99-nonlocal-bind.conf && sudo sysctl --system" >&2
+    fi
+fi
+
 # --- Step 2: port selection / collision check ---
 ADMIN_PORT="${ADMIN_PORT:-8765}"
 while ss -ltn "sport = :$ADMIN_PORT" 2>/dev/null | grep -q ":$ADMIN_PORT"; do
@@ -164,6 +192,7 @@ if [ -z "$DOCKER_GID" ]; then
 fi
 cat > "$STACK_DIR/.env" <<EOF
 TAILSCALE_IP=$TAILSCALE_IP
+LAN_IP=$LAN_IP
 ADMIN_PORT=$ADMIN_PORT
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
@@ -178,6 +207,9 @@ docker compose --env-file "$STACK_DIR/.env" up -d
 
 echo ""
 echo "Admin app starting at http://${TAILSCALE_IP}:${ADMIN_PORT}/"
+if [ -n "$LAN_IP" ]; then
+    echo "Also on the LAN at http://${LAN_IP}:${ADMIN_PORT}/"
+fi
 echo "Verify with: $REPO_DIR/scripts/verify-azerothcore-admin.sh"
 
 # --- Step 9: optional systemd unit ---
@@ -197,6 +229,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/stacks/azerothcore-admin
 ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TAILSCALE_IP" && exit 0; echo "Waiting for Tailscale IP $TAILSCALE_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TAILSCALE_IP not assigned"; exit 1'
+ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; [ -z "$LAN_IP" ] && exit 0; for i in {1..15}; do ip -4 -o addr show | grep -Fq " $LAN_IP/" && exit 0; echo "Waiting for LAN IP $LAN_IP..."; sleep 2; done; echo "WARNING: LAN IP $LAN_IP not assigned; starting anyway (Tailscale only)"; exit 0'
 ExecStart=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env up -d
 ExecStop=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env down
 TimeoutStartSec=300

@@ -4,7 +4,7 @@
 
 `wow-server-sp-admin` is a FastAPI + HTMX web admin for monitoring and managing the running AzerothCore server. It runs as a separate Docker stack at `/opt/stacks/azerothcore-admin/`.
 
-- **Access:** `http://<tailscale-ip>:<admin-port>/` (port set during install)
+- **Access:** `http://<tailscale-ip>:<admin-port>/` (port set during install); optionally also `http://<lan-ip>:<admin-port>/` when `LAN_IP` is set
 - **Stack:** Separate from AC's Docker stack — admin can manage AC without being affected by AC restarts
 - **Filesystem writes:** Inside `/opt/stacks/azerothcore/`, the admin only writes `docker-compose.admin.yml` and files in `backups/`. In-app Restore also mutates AzerothCore databases via `docker exec`, as documented below.
 
@@ -130,7 +130,8 @@ For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: r
 
 | Variable | Description |
 |----------|-------------|
-| `TAILSCALE_IP` | Admin app bind address |
+| `TAILSCALE_IP` | Admin app bind address (always on) |
+| `LAN_IP` | Optional second bind on a LAN interface (empty = Tailscale only; unset falls back to loopback, never `0.0.0.0`). Set via `LAN_IP=<ip> ./install-azerothcore-admin.sh`, or add to `.env` and redeploy. The admin has no login — anyone on the LAN gets full control. Needs host sysctl `net.ipv4.ip_nonlocal_bind=1`, or a missing LAN IP stops the whole container (Tailscale too) |
 | `ADMIN_PORT` | Port the admin listens on |
 | `HOST_UID` / `HOST_GID` | User/group IDs for file ownership |
 | `DOCKER_GID` | Docker group GID for socket access |

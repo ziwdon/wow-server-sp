@@ -41,6 +41,7 @@ fi
 
 # 3. listening on tailscale interface
 TAILSCALE_IP=""
+LAN_IP=""
 ADMIN_PORT=""
 if [ -f "$STACK_DIR/.env" ]; then
     # shellcheck disable=SC1090,SC1091
@@ -60,6 +61,32 @@ else
         ok "admin port listening on Tailscale interface ($bind)"
     else
         fail "admin port NOT listening on $bind"
+    fi
+fi
+# 3b. optional LAN bind (LAN_IP in .env). The LAN bind is best-effort: when
+# LAN_IP is not currently assigned, LAN access is down but Tailscale is not,
+# so that state is advisory. ip_nonlocal_bind=1 is what lets the container
+# start at all in that state.
+if [ -n "${LAN_IP:-}" ] && [ -n "${ADMIN_PORT:-}" ]; then
+    lan_bind="${LAN_IP}:${ADMIN_PORT}"
+    if [ "$(sysctl -n net.ipv4.ip_nonlocal_bind 2>/dev/null || echo 0)" = 1 ]; then
+        info "net.ipv4.ip_nonlocal_bind=1 -- a missing LAN IP cannot block container start"
+    else
+        info "net.ipv4.ip_nonlocal_bind is not 1 -- if $LAN_IP disappears the admin container will not start (Tailscale included)"
+    fi
+    if ! ip -4 -o addr show 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | grep -Fxq "$LAN_IP"; then
+        info "LAN_IP $LAN_IP is not assigned to this host -- LAN access unavailable (Tailscale unaffected)"
+    else
+        if ss -ltn -H 2>/dev/null | awk '{print $4}' | grep -Fxq "$lan_bind"; then
+            ok "admin port listening on LAN interface ($lan_bind)"
+        else
+            fail "admin port NOT listening on LAN bind $lan_bind"
+        fi
+        if curl -fsS "http://${lan_bind}/healthz" >/dev/null; then
+            ok "/healthz returns 200 on LAN bind"
+        else
+            fail "/healthz unreachable at $lan_bind"
+        fi
     fi
 fi
 
