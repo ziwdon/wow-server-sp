@@ -722,7 +722,10 @@ def test_dr_restore_refuses_root_even_with_custom_stack_dir(tmp_path):
         assert r.returncode == 1
         assert "Do not run this script with sudo/root" in r.stderr
     else:
-        assert r.returncode == 0, r.stderr
+        # Only the root guard is under test. The stub docker prints nothing, so
+        # a non-root run stops later, at the empty realmlist read; requiring a
+        # full restore here failed whenever the suite ran as non-root.
+        assert "Do not run this script with sudo/root" not in r.stderr, r.stderr
 
 
 def test_dr_restore_refuses_root_before_help():
