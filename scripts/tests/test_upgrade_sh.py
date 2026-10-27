@@ -542,3 +542,87 @@ def test_resume_refuses_when_the_pinned_versions_changed_since_the_cutover_start
     assert "pinned versions changed" in r.stderr
     assert not any(m in _calls(tmp_path) for m in MUTATING)
     assert "STEP_switch_code" not in (state / "state.env").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Live-switch collision check (controller addendum R7).
+
+def _commit_beside_head(repo: Path, path: str, content: str, scratch: Path) -> str:
+    """Create a child commit of HEAD that adds PATH, without touching HEAD, the
+    index or the working tree (the pinned revision's objects are then present
+    in the live checkout, as after 'stage' fetched them)."""
+    env = {**os.environ, **GIT_ENV, "GIT_INDEX_FILE": str(scratch / f"index-{repo.name}")}
+    def git(*args: str, stdin: str = "") -> str:
+        return subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True,
+                              text=True, input=stdin).stdout.strip()
+    git("read-tree", "HEAD")
+    blob = git("hash-object", "-w", "--stdin", stdin=content)
+    git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    return git("commit-tree", git("write-tree"), "-p", "HEAD", "-m", f"add {path}")
+
+
+def _pin(tools: Path, key: str, rev: str) -> None:
+    versions = tools / "upstream-versions.env"
+    versions.write_text(re.sub(rf"(?m)^{key}=.*$", f"{key}={rev}", versions.read_text()))
+
+
+def test_stage_refuses_when_a_local_file_collides_with_a_pinned_path(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    module = stack / "modules/mod-individual-progression"
+    pinned = _commit_beside_head(module, "new.txt", "upstream\n", tmp_path)
+    _pin(tools, "MOD_IP_REV", pinned)
+    # An already-prepared staging checkout keeps the test offline.
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    shutil.copytree(stack, tmp_path / "work" / "staging" / f"src-{core12}", symlinks=True)
+    (module / "new.txt").write_text("operator's local file\n")
+    r = _run(tmp_path, tools, stack, bind, "stage")
+    out = r.stdout + r.stderr
+    assert r.returncode != 0
+    assert "new.txt" in out
+    assert "would be overwritten" in out or "collide" in out
+    calls = _calls(tmp_path)
+    assert "compose" not in calls and "volume create" not in calls and "docker run" not in calls
+
+
+@pytest.mark.parametrize("pinned_path, collides", [
+    ("modules/CMakeLists.txt", False),
+    ("modules/mod-ah-bot-plus/extra.txt", True),
+])
+def test_cutover_reports_nested_module_checkouts_only_when_the_pinned_core_tracks_paths_inside(
+        tmp_path, pinned_path, collides):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    pinned = _commit_beside_head(stack, pinned_path, "upstream\n", tmp_path)
+    _pin(tools, "AC_CORE_REV", pinned)
+    staging = tmp_path / "work" / "staging"
+    staging.mkdir(parents=True)
+    (staging / f"stage-{pinned[:12]}.env").write_text("".join(
+        f"CANDIDATE_ID_{svc}=sha256:abc\n" for svc in ("worldserver", "authserver", "db_import", "client_data")))
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--skip-rehearsal", "--dry-run")
+    assert not any(m in _calls(tmp_path) for m in MUTATING)
+    if collides:
+        assert r.returncode == 1
+        assert "[FAIL] core: 1 local file(s)" in r.stdout and "collide" in r.stdout
+        assert "modules/mod-ah-bot-plus/" in r.stdout
+        assert "modules/mod-playerbots/" not in r.stdout
+    else:
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert f"[OK]   core: no local file collides with {pinned[:12]}" in r.stdout
+        assert "[FAIL]" not in r.stdout
+
+
+def test_stage_reports_an_ignored_local_file_at_a_pinned_path_as_overwritten(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    module = stack / "modules/mod-ah-bot-plus"
+    pinned = _commit_beside_head(module, "conf/local.log", "upstream\n", tmp_path)
+    _pin(tools, "MOD_AHBOT_REV", pinned)
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    shutil.copytree(stack, tmp_path / "work" / "staging" / f"src-{core12}", symlinks=True)
+    (module / ".git/info/exclude").write_text("*.log\n")
+    (module / "conf").mkdir()
+    (module / "conf/local.log").write_text("operator's local file\n")
+    r = _run(tmp_path, tools, stack, bind, "stage")
+    assert r.returncode == 1
+    assert "ignored: conf/local.log" in r.stdout
+    assert "would be overwritten" in r.stdout
+    assert "compose" not in _calls(tmp_path)

@@ -290,6 +290,75 @@ module_diff_is_only_managed_patches() {
     [ -z "$(comm -23 <(printf '%s\n' "$changed" | sort -u) <(printf '%s' "$patched_files" | sort -u))" ]
 }
 
+# live_switch_collisions DIR REV — print "untracked: PATH" / "ignored: PATH" for
+# every local file in DIR's working tree that a checkout of REV would have to
+# create or overwrite. Paths are compared as files, not directories: a nested
+# repository (git lists it as "dir/", e.g. modules/mod-* under the core) or any
+# other directory collides only when REV tracks a path inside it, a file only
+# when REV tracks that path or a path below it, or a file where REV needs a
+# directory. Returns 2 when git cannot list the trees (never "no collisions").
+live_switch_collisions() {
+    local dir="$1" rev="$2" tracked untracked ignored
+    tracked="$(git -C "$dir" ls-tree -r --name-only "$rev")" || return 2
+    untracked="$(git -C "$dir" ls-files --others --exclude-standard)" || return 2
+    ignored="$(git -C "$dir" ls-files --others --ignored --exclude-standard)" || return 2
+    awk '
+        $0 == "" { next }
+        FILENAME == ARGV[1] {
+            tracked[$0] = 1
+            p = $0
+            while (sub(/\/[^\/]*$/, "", p)) tracked_dir[p] = 1
+            next
+        }
+        {
+            path = $0
+            sub(/\/$/, "", path)
+            hit = (path in tracked) || (path in tracked_dir)
+            p = path
+            while (!hit && sub(/\/[^\/]*$/, "", p)) hit = (p in tracked)
+            if (hit) print ((FILENAME == ARGV[2]) ? "untracked: " : "ignored: ") $0
+        }
+    ' <(printf '%s\n' "$tracked") <(printf '%s\n' "$untracked") <(printf '%s\n' "$ignored")
+}
+
+# check_live_switch_collisions — prove, before any downtime, that switching the
+# live checkouts to the pinned revisions cannot collide with local files: an
+# untracked one makes `checkout -B` fail mid-cutover, an ignored one would be
+# silently overwritten. Needs the pinned commits in the live checkouts (stage
+# fetches them); a dry-run stage has not fetched them yet and only notes that.
+check_live_switch_collisions() {
+    local label rel url branch rev dir hits n fails=0
+    echo "== Live checkout switch check"
+    while IFS='|' read -r label rel url branch rev; do
+        dir="$STACK_DIR/$rel"
+        if ! git -C "$dir" cat-file -e "${rev}^{commit}" 2>/dev/null; then
+            if [ "$DRY_RUN" = true ]; then
+                check_info "$label: pinned ${rev:0:12} not fetched into $dir yet (dry-run); not checked"
+            else
+                check_fail "$label: pinned ${rev:0:12} is not present in $dir; run 'stage' first"
+                fails=$((fails + 1))
+            fi
+            continue
+        fi
+        if ! hits="$(live_switch_collisions "$dir" "$rev")"; then
+            check_fail "$label: cannot compare $dir with ${rev:0:12}"
+            fails=$((fails + 1))
+        elif [ -z "$hits" ]; then
+            check_ok "$label: no local file collides with ${rev:0:12}"
+        else
+            n="$(printf '%s\n' "$hits" | wc -l)"
+            check_fail "$label: ${n} local file(s) in $dir collide with paths tracked at ${rev:0:12} (untracked: the checkout would fail mid-cutover; ignored: it would be overwritten):"
+            sed -n '1,20s/^/           /p' <<< "$hits"
+            if [ "$n" -gt 20 ]; then echo "           ... and $((n - 20)) more"; fi
+            fails=$((fails + 1))
+        fi
+    done < <(upstream_repo_specs)
+    if [ "$fails" -gt 0 ]; then
+        echo "  Move or remove the files listed above (or commit them upstream), then re-run."
+        return 1
+    fi
+}
+
 # -------------------------------------------------------------- preflight ---
 preflight_checks() {
     local mode="$1" label rel url branch rev dir free_gb name now_min humans
@@ -429,6 +498,7 @@ cmd_stage() {
             run git -C "$STACK_DIR/$rel" fetch -q --depth 1 origin "$rev"
         fi
     done < <(upstream_repo_specs)
+    check_live_switch_collisions || die "local files collide with the pinned revisions; nothing was built"
     run "$SCRIPT_DIR/apply-local-patches.sh" "$src"
 
     for spec in "${MODULE_CONFS[@]}"; do
@@ -743,6 +813,9 @@ cmd_cutover() {
             [ "$(grep -s '^CANDIDATE_TAG=' "$UPGRADE_ROOT/rehearsal-latest/result.env" | cut -d= -f2)" = "$CANDIDATE_TAG" ] \
                 || die "no passing rehearsal for ${CANDIDATE_TAG}; run 'rehearse' (or pass --skip-rehearsal)"
         fi
+        # Again here, not only in stage: a file created after staging must be
+        # caught before the downtime starts.
+        check_live_switch_collisions || die "local files collide with the pinned revisions; nothing was changed"
         echo ""
         echo "This stops the realm, takes a cold backup, switches code/images/configs to"
         echo "core ${AC_CORE_REV:0:12} and boots it. Players are disconnected for the duration."
