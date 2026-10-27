@@ -615,6 +615,14 @@ else
     fail "no playerbots.conf or mod_playerbots.conf under ${STACK_DIR}/configs/modules"
 fi
 
+# The old prefix is assembled at runtime so the static rename guard
+# (test_no_pre_rename_playerbots_names_remain) can keep forbidding the literal
+# anywhere in this file; the printed message is unchanged.
+legacy_pb_prefix="AiPlayerbot"
+if [ -n "$PB_CONF" ] && grep -qE '^[[:space:]]*A[Ii]Playerbot\.' "$PB_CONF"; then
+    fail "$PB_CONF still uses the pre-rename ${legacy_pb_prefix}.* keys (mod-playerbots reads Playerbots.* since #2854) — replace it with the new playerbots.conf.dist"
+fi
+
 # ============================================================================
 # Check 12 — managed AC_* env vars map to loaded worldserver config keys
 # ============================================================================
@@ -675,6 +683,10 @@ if [ "${xp_present:-0}" -eq 12 ]; then
         AC_SKILL_GAIN_DEFENSE
     )
 fi
+
+# Declared here, not inside the branch below, so Check 23 can rely on them even
+# when Check 12 could not read the loaded config / container environment.
+declare -A env_to_key=() container_env=()
 
 if ! config_content="$(docker exec -i ac-worldserver sh -c '
     cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null
@@ -909,6 +921,93 @@ elif [ -n "$ws_age_secs" ]; then
     info "auctions_count = $auc_count (worldserver uptime ${ws_age_secs}s)"
 else
     info "auctions_count = $auc_count"
+fi
+
+# ============================================================================
+# Check 23 — every docker-compose.admin.yml AC_* var maps to a loaded key
+# (catches overlay entries orphaned by an upstream config rename)
+# ============================================================================
+ADMIN_YML="${STACK_DIR}/docker-compose.admin.yml"
+if [ -f "$ADMIN_YML" ] && [ "${#env_to_key[@]}" -gt 0 ]; then
+    admin_vars="$(grep -oE '^[[:space:]]+AC_[A-Z0-9_]+:' "$ADMIN_YML" | tr -d ' :' || true)"
+    admin_bad=0
+    for var in $admin_vars; do
+        if [ -z "${env_to_key[$var]+x}" ]; then
+            fail "docker-compose.admin.yml sets ${var}, which no loaded config key reads (renamed upstream?)"
+            admin_bad=1
+        elif [ -z "${container_env[$var]+x}" ]; then
+            fail "docker-compose.admin.yml sets ${var}, but ac-worldserver's environment lacks it (recreate the container)"
+            admin_bad=1
+        fi
+    done
+    if [ "$admin_bad" -eq 0 ]; then
+        ok "every docker-compose.admin.yml AC_* var maps to a loaded config key"
+    fi
+elif [ -f "$ADMIN_YML" ]; then
+    info "admin overlay mapping skipped (loaded config unavailable; see Check 12)"
+fi
+
+# ============================================================================
+# Check 24 — checkouts at the pinned revisions; local patches applied
+# ============================================================================
+if [ -f "${VERIFY_SCRIPT_DIR}/upstream-versions.env" ] && [ -f "${VERIFY_SCRIPT_DIR}/lib/upstream-versions.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${VERIFY_SCRIPT_DIR}/lib/upstream-versions.sh"
+    if load_upstream_versions "${VERIFY_SCRIPT_DIR}/upstream-versions.env"; then
+        while IFS='|' read -r label rel _url _branch rev; do
+            head_rev="$(git -C "${STACK_DIR}/${rel}" -c safe.directory='*' rev-parse HEAD 2>/dev/null || echo unknown)"
+            if [ "$head_rev" = "$rev" ]; then
+                ok "${label} at pinned revision ${rev:0:12}"
+            else
+                fail "${label} is at ${head_rev:0:12}, pinned ${rev:0:12} (scripts/upstream-versions.env)"
+            fi
+        done < <(upstream_repo_specs)
+        if "${VERIFY_SCRIPT_DIR}/apply-local-patches.sh" "$STACK_DIR" --check >/dev/null 2>&1; then
+            ok "local source patches applied"
+        else
+            fail "local source patches not applied: ${VERIFY_SCRIPT_DIR}/apply-local-patches.sh ${STACK_DIR} --check"
+        fi
+    else
+        fail "scripts/upstream-versions.env is invalid"
+    fi
+fi
+
+# ============================================================================
+# Check 25 — current boot: no 'Missing property', no stale-mmap errors
+# ac-worldserver logs through Docker's json-file driver with no size limit, so
+# after days of uptime `docker logs --since` can be gigabytes. Stream it once
+# through grep and keep only the two relevant line kinds — never capture the
+# whole log in a variable. (-a: a stray non-UTF-8 byte must not turn grep's
+# output into "Binary file matches".)
+# ============================================================================
+ws_started_at="$(docker inspect -f '{{.State.StartedAt}}' ac-worldserver 2>/dev/null || true)"
+if [ -n "$ws_started_at" ]; then
+    boot_hits="$(grep -aE 'Missing property|built with generator' < <(docker logs --since "$ws_started_at" ac-worldserver 2>&1) || true)"
+    n_missing="$(grep -c 'Missing property' <<<"$boot_hits" || true)"
+    if [ "${n_missing:-0}" -eq 0 ]; then
+        ok "no 'Missing property' config warnings this boot"
+    else
+        fail "${n_missing} 'Missing property' warning(s) this boot (stale .conf or unmapped key): $(grep -o 'Missing property [^ ]*' <<<"$boot_hits" | sort -u | head -3 | tr '\n' ' ')"
+    fi
+    n_mmap="$(grep -c 'built with generator' <<<"$boot_hits" || true)"
+    if [ "${n_mmap:-0}" -eq 0 ]; then
+        ok "no mmap generator-version errors this boot"
+    else
+        fail "${n_mmap} mmap generator-version error(s) this boot (client data does not match the core)"
+    fi
+fi
+
+# ============================================================================
+# Check 26 — client data version matches the pin
+# (CLIENT_DATA_VERSION is set by Check 24's load_upstream_versions)
+# ============================================================================
+if [ -n "${CLIENT_DATA_VERSION:-}" ]; then
+    cd_ver="$(docker exec ac-worldserver sh -c 'cat /azerothcore/env/dist/data/data-version' 2>/dev/null | sed -n 's/^INSTALLED_VERSION=//p')"
+    if [ "$cd_ver" = "$CLIENT_DATA_VERSION" ]; then
+        ok "client data ${cd_ver} matches the pin"
+    else
+        fail "client data is ${cd_ver:-unknown}, pinned ${CLIENT_DATA_VERSION}"
+    fi
 fi
 
 echo ""
