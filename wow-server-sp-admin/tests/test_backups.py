@@ -193,3 +193,5 @@ def test_list_backups_includes_preupgrade_label(tmp_path):
     rows = list_backups(backups_dir=b)
     assert len(rows) == 1
     assert rows[0].label == "preupgrade"
+    # Download and in-app restore resolve names through the same pattern.
+    assert resolve_backup_archive(backups_dir=b, archive_name=rows[0].filename) == b / rows[0].filename

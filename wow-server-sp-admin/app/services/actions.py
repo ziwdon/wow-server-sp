@@ -610,14 +610,19 @@ def current_stack_revisions(ac_stack: Path) -> dict[str, str]:
     """HEAD of the core and each module checkout; "unknown" when unreadable."""
     out: dict[str, str] = {}
     for key, rel in REVISION_DIRS.items():
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(ac_stack / rel), "-c", "safe.directory=*", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=QUICK_TIMEOUT,
-            )
-            rev = r.stdout.strip() if r.returncode == 0 else ""
-        except (OSError, subprocess.TimeoutExpired):
-            rev = ""
+        repo = ac_stack / rel
+        rev = ""
+        # Only a checkout with its own .git (file or dir) counts: git would
+        # otherwise walk up and report a parent repo's HEAD for a plain directory.
+        if (repo / ".git").exists():
+            try:
+                r = subprocess.run(
+                    ["git", "-C", str(repo), "-c", "safe.directory=*", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=QUICK_TIMEOUT,
+                )
+                rev = r.stdout.strip() if r.returncode == 0 else ""
+            except (OSError, subprocess.TimeoutExpired):
+                rev = ""
         out[key] = rev or "unknown"
     return out
 
@@ -627,7 +632,7 @@ def revision_mismatch(manifest: dict, current: dict[str, str]) -> str | None:
 
     Newer binaries would re-run their migrations against an old dump; older
     binaries cannot read a migrated schema. Unknown revisions fail closed.
-    Cross-version recovery is a host-side operation (upgrade rollback).
+    Cross-version recovery is a host-side operation (scripts/restore-azerothcore.sh).
     """
     archived = manifest.get("git_revisions")
     if not isinstance(archived, dict):
@@ -635,11 +640,12 @@ def revision_mismatch(manifest: dict, current: dict[str, str]) -> str | None:
     for key in REVISION_DIRS:
         want, have = archived.get(key), current.get(key)
         if not isinstance(want, str) or want in ("", "unknown") or have in (None, "", "unknown"):
-            return f"cannot confirm the {key} revision of this archive; restore it with scripts/restore-azerothcore.sh"
+            return (f"cannot confirm the {key} revision of this archive; restore it with "
+                    "scripts/restore-azerothcore.sh (--allow-version-mismatch accepts unknown revisions)")
         if want != have:
             return (f"archive was taken on a different {key} revision ({want[:12]}; "
-                    f"the server runs {have[:12]}); "
-                    "use scripts/upgrade-azerothcore.sh rollback for a cross-version restore")
+                    f"the server runs {have[:12]}); cross-version restores are host-only: "
+                    "scripts/restore-azerothcore.sh after checking out the archive's revisions")
     return None
 
 
