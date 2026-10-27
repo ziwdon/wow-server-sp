@@ -804,7 +804,7 @@ fi
 # two documented upstream data gaps, advisory when they are the only content:
 #   - the graveyard_zone "does not have a linked graveyard" line, and
 #   - the "Pool Id N is empty (...). The pool will not be spawned." line (e.g.
-#     pool 1072 "Mirelow" has no members in the stock world DB; newer cores log
+#     pool 1072 "Mirelow" had no members in this server's world DB before the 2026-10 upgrade; newer cores log
 #     it once at startup).
 # The pool pattern is fully anchored (numeric id, exact wording) so a near-miss
 # line is still actionable.  Mixed content still fails so a benign line cannot
