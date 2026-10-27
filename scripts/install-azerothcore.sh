@@ -910,7 +910,10 @@ worldserver_has_playerbots_fatal_logs() {
         logs_args+=(--since "$since")
     fi
 
-    docker logs "${logs_args[@]}" ac-worldserver 2>&1 | grep -qiE "$(worldserver_playerbots_fatal_pattern)"
+    # Process substitution, not a pipe: with pipefail, grep -q closing the pipe
+    # early kills `docker logs` with SIGPIPE (141) once the log is long, which
+    # would turn a real fatal match into "no match".
+    grep -qiE "$(worldserver_playerbots_fatal_pattern)" < <(docker logs "${logs_args[@]}" ac-worldserver 2>&1)
 }
 
 is_upper_char() {
@@ -3947,7 +3950,9 @@ if [ "$count" != "1" ]; then
 fi
 SH
 
-    if docker logs --since "$RESTART_TS" ac-worldserver 2>&1 | grep -qE "Duplicate key name 'AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)'"; then
+    # Process substitution, not a pipe: with pipefail, grep -q closing the pipe
+    # early kills `docker logs` with SIGPIPE (141) once the log is long.
+    if grep -qE "Duplicate key name 'AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)'" < <(docker logs --since "$RESTART_TS" ac-worldserver 2>&1); then
         echo "ERROR: worldserver still reported duplicate AH bot config keys after restart."
         docker logs --since "$RESTART_TS" ac-worldserver 2>&1 | grep -E "Duplicate key name 'AuctionHouseBot\.(GUIDs|EnableSeller|Buyer\.Enabled)'" || true
         exit 1
