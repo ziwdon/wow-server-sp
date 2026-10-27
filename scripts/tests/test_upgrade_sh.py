@@ -264,7 +264,10 @@ def _stub_docker(bind: Path) -> None:
     default "100 4096") and FAKE_MARKER_<vol> (the .acup-complete numbers, default
     the volume's own; empty = no marker) — a volume a copy wrote to (`-v VOL:/dst`)
     always carries a valid marker; and the rehearsal's compose render
-    (FAKE_COMPOSE_JSON), isolated containers and rehearsal database answers."""
+    (FAKE_COMPOSE_JSON), isolated containers and rehearsal database answers.
+
+    Follow-up additions: the rehearsal worldserver's exit code after its stop
+    (FAKE_REHEARSAL_WORLD_EXIT, default 0)."""
     _executable(bind / "docker", r"""#!/bin/bash
 markers=""
 if [ -n "${PEEK_STATE:-}" ] && [ -f "$PEEK_STATE" ]; then
@@ -291,6 +294,7 @@ case "$*" in
   "inspect -f {{.State.StartedAt}} "*)
     case " ${FAKE_RESTARTED:-} " in *" $last "*) echo 2099-01-01T00:00:00Z ;; *) echo 2026-10-27T08:00:00Z ;; esac ;;
   "inspect -f {{.State.ExitCode}} ac-worldserver") echo "${FAKE_WORLD_EXIT:-0}" ;;
+  "inspect -f {{.State.ExitCode}} acup-rehearsal-world") echo "${FAKE_REHEARSAL_WORLD_EXIT:-0}" ;;
   "inspect -f {{.State.ExitCode}} "*) echo "${FAKE_DBIMPORT_EXIT:-0}" ;;
   "inspect -f {{.State.OOMKilled}} "*) echo "${FAKE_OOM:-false}" ;;
   "inspect -f {{.HostConfig.NetworkMode}}"*) echo "acup-rehearsal-net|{}|volume:acup-x:/y:false;" ;;
@@ -1853,3 +1857,169 @@ def test_f10_a_count_increase_warns_records_and_continues(tmp_path):
     text = (state / "state.env").read_text()
     assert "COUNTS_WARNING=characters 10 -> 12 (+2)" in text
     assert "STEP_verify=1" in text and "CUTOVER_OK=1" in text
+
+
+# Follow-up G1-G5 --------------------------------------------------------------
+
+def _copies_carry_the_source_tree(bind: Path) -> None:
+    """Make the docker stub model a stage copy: once the rollback volume was
+    copied into, its probe reports the live volume's tree and data-version."""
+    real = bind / "docker-stub"
+    (bind / "docker").rename(real)
+    rollback, live = _key(ROLLBACK_VOL), _key(LIVE_VOL)
+    _executable(bind / "docker", "#!/bin/bash\n"
+                f'if grep -qx {ROLLBACK_VOL} "$UPGRADE_CALLS.copied" 2>/dev/null; then\n'
+                f'    export FAKE_TREE_{rollback}="${{FAKE_TREE_{live}:-100 4096}}"'
+                f' FAKE_VERSION_{rollback}="${{FAKE_VERSION_{live}:-v19}}"\n'
+                f'fi\nexec "{real}" "$@"\n')
+
+
+@pytest.mark.parametrize("steps, facts, shown", [
+    (_before("switch_images"), {"CLIENT_DATA_SWITCH_STARTED": "1"}, "incomplete"),
+    (STEPS, {"CUTOVER_OK": "1", "BOOT_STARTED": "1", "CLIENT_DATA_SWITCH_STARTED": "1", "ROLLBACK_STARTED": "1"},
+     "a rollback was started"),
+])
+def test_g1_stage_refuses_while_a_cutover_or_its_rollback_is_unfinished(tmp_path, steps, facts, shown):
+    # The live client data may be half-switched or half-restored: a stage copy
+    # would replace the only complete pre-upgrade copy with it.
+    tools, stack, bind, staging = _stage_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, steps, ADMIN_WAS_RUNNING="true", **CLIENT_FACTS, **facts)
+    (tmp_path / "work" / "current").symlink_to(state)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_TREE_{_key(LIVE_VOL)}": "37 99",
+                                                      f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0"})
+    assert r.returncode == 1
+    assert shown in r.stderr and str(state) in r.stderr
+    assert "finish or roll back that cutover first" in r.stderr
+    calls = _calls(tmp_path)
+    assert "docker run" not in calls and "docker volume" not in calls and "compose" not in calls, calls
+    assert not list(staging.parent.glob("stage-*.env"))
+
+
+@pytest.mark.parametrize("facts", [{"CUTOVER_OK": "1"}, {"ROLLBACK_STARTED": "1", "ROLLED_BACK": "1"}])
+def test_g1_stage_runs_after_a_finished_cutover_or_rollback(tmp_path, facts):
+    tools, stack, bind, _ = _stage_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, STEPS, ADMIN_WAS_RUNNING="true", **CLIENT_FACTS, **facts)
+    (tmp_path / "work" / "current").symlink_to(state)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0"})
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_g1_stage_never_overwrites_a_complete_rollback_copy_that_differs_from_the_live_data(tmp_path):
+    # A switch or rollback killed mid-copy leaves the live volume partial: the
+    # marked copy is then the only complete one and must never be replaced.
+    tools, stack, bind, staging = _stage_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_TREE_{_key(LIVE_VOL)}": "37 99",
+                                                      f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0"})
+    assert r.returncode == 1
+    assert "rollback copy and live client data differ" in r.stderr
+    assert ROLLBACK_VOL in r.stderr and "by hand" in r.stderr
+    calls = _calls(tmp_path)
+    assert f"-v {ROLLBACK_VOL}:/dst" not in calls and "find /dst -mindepth 1 -delete" not in calls, calls
+    assert "docker volume create" not in calls
+    assert not list(staging.parent.glob("stage-*.env"))
+
+
+@pytest.mark.parametrize("env", [
+    {f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": "", f"FAKE_TREE_{_key(ROLLBACK_VOL)}": "37 99"},  # interrupted copy
+    {f"FAKE_TREE_{_key(ROLLBACK_VOL)}": "99 4096", f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": "100 4096"},
+    {f"FAKE_VERSION_{_key(ROLLBACK_VOL)}": "v18"},
+])
+def test_g1_stage_recopies_a_rollback_copy_that_is_itself_incomplete(tmp_path, env):
+    # Only the copy's own state decides a re-copy, even when it also differs from the live data.
+    tools, stack, bind, staging = _stage_fixture(tmp_path)
+    _copies_carry_the_source_tree(bind)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0", **env})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "differ" not in r.stderr
+    copies = [line for line in _calls(tmp_path).splitlines() if f"-v {ROLLBACK_VOL}:/dst " in line]
+    assert len(copies) == 1 and f"-v {LIVE_VOL}:/src:ro" in copies[0], copies
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    assert f"CLIENT_DATA_ROLLBACK_VOLUME={ROLLBACK_VOL}" in (staging.parent / f"stage-{core12}.env").read_text()
+
+
+@pytest.mark.parametrize("code, rc, shown", [
+    ("0", 0, "[OK]   candidate worldserver exited 0 on SIGTERM"),
+    ("137", 1, "[FAIL] candidate worldserver did not exit cleanly on SIGTERM (code 137); "
+               "the cutover's stop step would refuse"),
+])
+def test_g2_rehearsal_checks_the_candidate_worldserver_exit_code_after_its_stop(tmp_path, code, rc, shown):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive),
+             FAKE_REHEARSAL_WORLD_EXIT=code, **env)
+    assert r.returncode == rc, r.stdout + r.stderr
+    assert shown in r.stdout
+    lines = _calls(tmp_path).splitlines()
+    assert _index(lines, "docker stop -t 120 acup-rehearsal-world") \
+        < _index(lines, "docker inspect -f {{.State.ExitCode}} acup-rehearsal-world")
+    assert ("Rehearsal PASSED" in r.stdout) == (rc == 0)
+    assert (tmp_path / "work" / "rehearsal-latest").exists() == (rc == 0)
+
+
+def test_g3_the_switch_step_probes_the_rollback_copy_with_the_live_client_data_image(tmp_path):
+    # The marker was written and verified by the live image; the candidate image is not exercised mid-cutover.
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_client_data", **CLIENT_FACTS)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    probes = [line for line in _calls(tmp_path).splitlines() if ":/d:ro --entrypoint sh " in line]
+    assert probes and all("--entrypoint sh acore/ac-wotlk-client-data:playerbot-local " in line
+                          for line in probes), probes
+
+
+@pytest.mark.parametrize("facts, shown, absent", [
+    ({}, "the live client data was not touched", "partly switched"),
+    ({"CLIENT_DATA_SWITCH_STARTED": "1"}, "partly switched", "was not touched"),
+])
+def test_g3_a_refused_switch_says_whether_the_live_client_data_was_touched(tmp_path, facts, shown, absent):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_client_data", **CLIENT_FACTS, **facts)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             **{f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": ""})
+    assert r.returncode == 1
+    assert "completion marker" in r.stderr and shown in r.stderr and absent not in r.stderr
+    assert f"-v {LIVE_VOL}:/dst" not in _calls(tmp_path)
+
+
+@pytest.mark.parametrize("env, shown", [
+    ({}, None),
+    ({f"FAKE_TREE_{_key(LIVE_VOL)}": "7 9"}, "7 entries / 9 bytes"),
+    ({f"FAKE_VERSION_{_key(LIVE_VOL)}": "v20.0"}, "v20.0"),
+])
+def test_g4_rollback_verifies_the_restored_client_data_against_the_copy_marker(tmp_path, env, shown):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    state = _cutover_state(tmp_path, stack, _before("switch_client_data"), ADMIN_WAS_RUNNING="true",
+                           CLIENT_DATA_SWITCH_STARTED="1", **CLIENT_FACTS)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes", **env)
+    lines = _calls(tmp_path).splitlines()
+    copy = _index(lines, f"-v {ROLLBACK_VOL}:/src:ro -v {LIVE_VOL}:/dst ")
+    probe = _index(lines, f"-v {LIVE_VOL}:/d:ro ")
+    assert copy < probe
+    text = (state / "state.env").read_text()
+    if shown is None:
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert probe < _index(lines, "restore-azerothcore.sh")
+        return
+    assert r.returncode == 1
+    assert LIVE_VOL in r.stderr and shown in r.stderr and "safe to re-run" in r.stderr
+    calls = _calls(tmp_path)
+    assert "restore-azerothcore.sh" not in calls and "compose up" not in calls
+    assert "ROLLBACK_RESTORED" not in text and "ROLLED_BACK" not in text
+
+
+def test_g5_a_stray_admin_container_without_an_admin_stack_is_stopped_and_left_stopped(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(stack / "backup.sh", "backup.sh")
+    state = _cutover_state(tmp_path, stack, ("snapshot_tooling",), ADMIN_PRESENT="false")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert "pre-upgrade archive not found" in r.stderr, r.stdout + r.stderr  # the stop step finished
+    assert "docker stop azerothcore-admin" in _calls(tmp_path)
+    assert "stray azerothcore-admin container" in r.stdout and "left stopped" in r.stdout
+
+
+def test_g5_the_admin_step_says_a_stray_admin_container_stays_stopped(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "admin", BOOT_STARTED="1", ADMIN_PRESENT="false")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             FAKE_STOPPED="azerothcore-admin")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "nothing to redeploy" in r.stdout and "left stopped" in r.stdout
+    calls = _calls(tmp_path)
+    assert "docker start azerothcore-admin" not in calls and "admin-redeploy" not in calls

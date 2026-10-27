@@ -269,6 +269,24 @@ rollback_copy_problem() {
     fi
 }
 
+# restored_client_data_problem LIVE COPY VERSION IMAGE — after COPY was copied
+# back into LIVE: print why LIVE does not hold VERSION with exactly the entries
+# and bytes COPY's completion marker records (and return 1). Read-only.
+restored_client_data_problem() {
+    local live="$1" copy="$2" want="$3" image="$4" facts found mf mb lf lb
+    facts="$(volume_copy_facts "$copy" "$image")" || { echo "cannot read volume $copy"; return 1; }
+    mf="$(sed -n 's/^MARKER_FILES=//p' <<< "$facts")"; mb="$(sed -n 's/^MARKER_BYTES=//p' <<< "$facts")"
+    facts="$(volume_copy_facts "$live" "$image")" || { echo "cannot read volume $live"; return 1; }
+    found="$(sed -n 's/^INSTALLED_VERSION=//p' <<< "$facts" | head -n 1)"
+    lf="$(sed -n 's/^TREE_FILES=//p' <<< "$facts")"; lb="$(sed -n 's/^TREE_BYTES=//p' <<< "$facts")"
+    if [ -z "$want" ] || [ "$found" != "$want" ]; then
+        echo "$live holds '${found:-no data-version}', not the pre-upgrade version '${want:-unknown}'"; return 1
+    fi
+    if [ -z "$mf" ] || [ -z "$mb" ] || [ "$lf $lb" != "$mf $mb" ]; then
+        echo "$live holds ${lf:-?} entries / ${lb:-?} bytes but the completion marker of $copy says ${mf:-?} / ${mb:-?}"; return 1
+    fi
+}
+
 image_id() { docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true; }
 
 state_set() {
@@ -418,6 +436,25 @@ rollback_exit_hint() {
 refuse_rollback_in_progress() {
     if [ "$(state_get ROLLBACK_STARTED)" = 1 ]; then
         die "a rollback was started for this cutover; finish it: $0 rollback --state $STATE_DIR"
+    fi
+}
+
+# unfinished_current_cutover — print why $UPGRADE_ROOT/current is a cutover that
+# neither completed nor was rolled back, or whose rollback is unfinished (and
+# return 1); prints nothing otherwise. Read-only.
+unfinished_current_cutover() {
+    local previous_state
+    [ -L "$UPGRADE_ROOT/current" ] || return 0
+    previous_state="$(readlink -f "$UPGRADE_ROOT/current")"
+    [ -f "$previous_state/state.env" ] || return 0
+    grep -qx 'ROLLED_BACK=1' "$previous_state/state.env" && return 0
+    if grep -qx 'ROLLBACK_STARTED=1' "$previous_state/state.env"; then
+        echo "a rollback was started for the cutover in $previous_state; finish it: $0 rollback --state $previous_state"
+        return 1
+    fi
+    if ! grep -qx 'CUTOVER_OK=1' "$previous_state/state.env"; then
+        echo "the cutover in $previous_state is incomplete; resume it ($0 cutover --state $previous_state) or roll it back ($0 rollback --state $previous_state)"
+        return 1
     fi
 }
 
@@ -702,6 +739,9 @@ build_fingerprint() { build_inputs | sha256sum | cut -d' ' -f1; }
 cmd_stage() {
     local src label rel url branch rev uid gid svc vol live_ver rollback_vol target_vol live_image problem
     load_versions
+    # Mid-cutover or mid-rollback the live client data may be partial: a stage
+    # copy would replace the only complete pre-upgrade copy with it.
+    problem="$(unfinished_current_cutover)" || die "${problem}; finish or roll back that cutover first (nothing was staged)"
     src="$(staging_src)"
     ensure_root
     run mkdir -p "$UPGRADE_ROOT/staging"
@@ -754,8 +794,13 @@ cmd_stage() {
         fi
         log "Client data changes ${live_ver} -> ${CLIENT_DATA_VERSION}."
         # Only a copy that finished carries the completion marker: an existing
-        # volume without a valid one (an interrupted stage) is emptied and copied again.
-        if problem="$(rollback_copy_problem "$rollback_vol" "$live_ver" "$live_image" "$vol")"; then
+        # volume that is not a complete copy by its own marker (an interrupted
+        # stage) is emptied and copied again. A complete copy is never
+        # overwritten, not even when the live data differs from it: the live
+        # volume may be the partial one (an interrupted switch or rollback copy).
+        if problem="$(rollback_copy_problem "$rollback_vol" "$live_ver" "$live_image")"; then
+            problem="$(rollback_copy_problem "$rollback_vol" "$live_ver" "$live_image" "$vol")" \
+                || die "rollback copy and live client data differ: ${problem}. Inspect both; if the live client data is intact, remove $rollback_vol by hand and re-run stage to copy it again. Nothing was copied"
             log "  rollback volume $rollback_vol already holds a complete copy of the live client data"
         else
             log "  copying live client data to rollback volume $rollback_vol (read-only source; ${problem})"
@@ -937,7 +982,7 @@ PY
 }
 
 cmd_rehearse() {
-    local src mem_gb archive started rc db_pw chars_before chars_after
+    local src mem_gb archive started rc db_pw chars_before chars_after code
     load_versions
     require_stage
     require_stage_matches_pins
@@ -1008,7 +1053,15 @@ cmd_rehearse() {
         chars_after="$(rmysql -e 'SELECT COUNT(*) FROM acore_characters.characters')"
         check_that "character count unchanged (${chars_after})" "character count changed ${chars_before} -> ${chars_after}" \
             [ "$chars_before" = "$chars_after" ]
-        docker stop -t "$STOP_TIMEOUT" acup-rehearsal-world >/dev/null 2>&1 || true
+        # The cutover's stop step requires exit code 0 after SIGTERM (a complete
+        # final saveall): prove the candidate gives it before the window.
+        if [ "$(container_status acup-rehearsal-world)" = running ]; then
+            docker stop -t "$STOP_TIMEOUT" acup-rehearsal-world >/dev/null 2>&1 || true
+            code="$(docker inspect -f '{{.State.ExitCode}}' acup-rehearsal-world 2>/dev/null || echo unknown)"
+            check_that "candidate worldserver exited 0 on SIGTERM" \
+                "candidate worldserver did not exit cleanly on SIGTERM (code ${code}); the cutover's stop step would refuse" \
+                [ "$code" = 0 ]
+        fi
     fi
     rehearsal_cleanup
     trap - EXIT
@@ -1148,8 +1201,8 @@ refuse_realm_started_since_stop() {
 }
 
 cmd_cutover() {
-    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state pin name recorded
-    local problem code oom live_cmp
+    local ts src label rel url branch rev svc vol scale archive key target_vol pin name recorded
+    local problem code oom live_cmp live_note
     load_versions
     if [ -n "$STATE_DIR" ]; then
         resolve_state_dir
@@ -1195,17 +1248,7 @@ cmd_cutover() {
         fi
         log "Resuming cutover in $STATE_DIR"
     else
-        if [ -L "$UPGRADE_ROOT/current" ]; then
-            previous_state="$(readlink -f "$UPGRADE_ROOT/current")"
-            if [ -f "$previous_state/state.env" ] && ! grep -qx 'ROLLED_BACK=1' "$previous_state/state.env"; then
-                if grep -qx 'ROLLBACK_STARTED=1' "$previous_state/state.env"; then
-                    die "a rollback was started for the cutover in $previous_state; finish it: $0 rollback --state $previous_state"
-                fi
-                if ! grep -qx 'CUTOVER_OK=1' "$previous_state/state.env"; then
-                    die "the cutover in $previous_state is incomplete; resume it ($0 cutover --state $previous_state) or roll it back ($0 rollback --state $previous_state)"
-                fi
-            fi
-        fi
+        problem="$(unfinished_current_cutover)" || die "$problem"
         preflight_checks cutover || die "preflight failed; nothing was changed"
         require_stage
         if [ "$SKIP_REHEARSAL" != true ]; then
@@ -1285,7 +1328,12 @@ cmd_cutover() {
             log "The admin app is not installed (no azerothcore-admin:local image or $ADMIN_STACK_DIR/docker-compose.yml): no admin rollback copy"
         fi
         log "Stopping the admin app (no scheduled jobs or console writes during cutover)"
-        if [ "$(container_status azerothcore-admin)" = running ]; then run docker stop azerothcore-admin; fi
+        if [ "$(container_status azerothcore-admin)" = running ]; then
+            run docker stop azerothcore-admin
+            if [ "$ADMIN_PRESENT" != true ]; then
+                log "Stopped a stray azerothcore-admin container (the admin app is not installed): it is left stopped after the cutover"
+            fi
+        fi
         log "Graceful worldserver stop (up to ${STOP_TIMEOUT}s for saveall), then authserver"
         run compose stop -t "$STOP_TIMEOUT" ac-worldserver
         run compose stop ac-authserver
@@ -1386,11 +1434,15 @@ cmd_cutover() {
             # The delete below is undone only from the rollback copy: verify it
             # again right before. Once a switch began the live volume is partly
             # the new data, so only the copy's own marker can vouch for it.
-            live_cmp="$vol"
-            if started CLIENT_DATA_SWITCH_STARTED; then live_cmp=""; fi
+            live_cmp="$vol"; live_note="the live client data was not touched"
+            if started CLIENT_DATA_SWITCH_STARTED; then
+                live_cmp=""; live_note="the live client data is already partly switched (an earlier attempt started the switch)"
+            fi
+            # Probed with the live image, as at stage and before the confirm:
+            # the images switch only after this step.
             problem="$(rollback_copy_problem "$(cutover_fact CLIENT_DATA_ROLLBACK_VOLUME)" "$(cutover_fact CLIENT_DATA_LIVE)" \
-                "acore/ac-wotlk-client-data:${CANDIDATE_TAG}" ${live_cmp:+"$live_cmp"})" \
-                || die "client-data rollback copy: ${problem}; the live client data was not touched"
+                "acore/ac-wotlk-client-data:$(env_value DOCKER_IMAGE_TAG)" ${live_cmp:+"$live_cmp"})" \
+                || die "client-data rollback copy: ${problem}; ${live_note}"
             log "Installing client data $(cutover_fact CLIENT_DATA_TARGET) into $vol"
             mark_started CLIENT_DATA_SWITCH_STARTED
             run docker run --rm --network none --user 0 -v "$target_vol:/src:ro" -v "$vol:/dst" \
@@ -1404,7 +1456,7 @@ cmd_cutover() {
         if [ "$DRY_RUN" != true ]; then
             for svc in "${IMAGES[@]}"; do
                 if [ "$(image_id "acore/ac-wotlk-${svc}:${CANDIDATE_TAG}")" != "$(state_get "CANDIDATE_ID_${svc//-/_}")" ]; then
-                    die "candidate images changed since the cutover started (acore/ac-wotlk-${svc}:${CANDIDATE_TAG}); re-stage and roll back"
+                    die "candidate images changed since the cutover started (acore/ac-wotlk-${svc}:${CANDIDATE_TAG}); roll back, then re-stage"
                 fi
             done
         fi
@@ -1480,6 +1532,9 @@ cmd_cutover() {
             run "$REPO_DIR/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh"
         else
             log "The admin app is not installed; nothing to redeploy"
+            if [ "$(state_get ADMIN_WAS_RUNNING)" = true ]; then
+                log "The stray azerothcore-admin container stopped at the stop step is left stopped"
+            fi
         fi
         mark_done admin
     fi
@@ -1633,7 +1688,7 @@ rollback_verify() {
 }
 
 cmd_rollback() {
-    local ts label rel url branch rev old svc vol archive tag rollback_vol scale admin_was_up name f
+    local ts label rel url branch rev old svc vol archive tag rollback_vol scale admin_was_up name f problem
     resolve_state_dir
     refuse_rolled_back
     load_versions
@@ -1741,6 +1796,13 @@ cmd_rollback() {
         run docker run --rm --network none --user 0 -v "$rollback_vol:/src:ro" -v "$vol:/dst" \
             --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" \
             -c 'test -f /src/data-version || { echo "ERROR: source volume has no data-version; client data left untouched" >&2; exit 1; }; find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && rm -f /dst/.acup-complete'
+        # The copy is only as good as what arrived: the live volume must now
+        # hold the pre-upgrade version with exactly the copy's marked totals.
+        if [ "$DRY_RUN" != true ]; then
+            problem="$(restored_client_data_problem "$vol" "$rollback_vol" "$(state_get CLIENT_DATA_LIVE)" \
+                "acore/ac-wotlk-client-data:preupgrade-$ts")" \
+                || die "the restored client data does not match its rollback copy: ${problem}. $rollback_vol was only read, so it is safe to re-run: $0 rollback --state $STATE_DIR"
+        fi
     else
         log "Client data untouched"
     fi
