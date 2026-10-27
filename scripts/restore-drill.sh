@@ -36,6 +36,7 @@ PASSWORD_FILE=""
 ARCHIVE=""
 WORK=""
 STARTED=false
+SUCCESS=false
 FAILED=0
 
 usage() {
@@ -72,9 +73,15 @@ ok() { echo "  [OK]   $*"; }
 bad() { echo "  [FAIL] $*"; FAILED=1; }
 info() { echo "  [INFO] $*"; }
 
+# The drill container survives only a --keep run that reached "DRILL PASSED";
+# every other exit path (failure, set -e abort, signal) removes it, plus the
+# password file that would otherwise be useless without it.
 cleanup() {
-    if [ "$STARTED" = true ] && { [ "$KEEP" != true ] || [ "$FAILED" -ne 0 ]; }; then
+    if [ "$STARTED" = true ] && ! { [ "$KEEP" = true ] && [ "$SUCCESS" = true ]; }; then
         docker rm -f -v "$NAME" >/dev/null 2>&1 || true
+        if [ "$KEEP" = true ] && [ -n "$PASSWORD_FILE" ]; then
+            rm -f "$PASSWORD_FILE"
+        fi
     fi
     [ -n "$WORK" ] && rm -rf "$WORK"
     return 0
@@ -140,9 +147,11 @@ else
     run_args+=(--network none)
 fi
 log "Starting isolated drill database '$NAME'..."
+# Set before `docker run`: it can create the container and still fail to start
+# it. The name was verified free above, so cleanup can only remove our own.
+STARTED=true
 docker run "${run_args[@]}" "$MYSQL_IMAGE" \
     --innodb-buffer-pool-size=512M --skip-log-bin --max-allowed-packet=256M >/dev/null
-STARTED=true
 
 # Fail closed unless the container is exactly as isolated as intended.
 isolation="$(docker inspect -f '{{.HostConfig.NetworkMode}}|{{json .HostConfig.PortBindings}}|{{range .Mounts}}{{.Type}}:{{.Source}};{{end}}' "$NAME")"
@@ -156,7 +165,11 @@ case "$isolation" in
 esac
 ok "drill container isolated (network=${expected_net}, no ports, no host mounts)"
 
-dmysql() { docker exec -i -e MYSQL_PWD="$PASSWORD" "$NAME" mysql -uroot "$@"; }
+# TCP on loopback, never the socket: the mysql image's entrypoint first runs a
+# socket-only temporary server (--skip-networking) and then restarts, so a
+# socket probe can pass and the import then die. Loopback exists under
+# --network none, and the image's default MYSQL_ROOT_HOST=% provides root@'%'.
+dmysql() { docker exec -i -e MYSQL_PWD="$PASSWORD" "$NAME" mysql -uroot -h127.0.0.1 --protocol=TCP "$@"; }
 for _ in $(seq 1 90); do
     if dmysql -N -e 'SELECT 1' >/dev/null 2>&1; then break; fi
     sleep 2
@@ -229,8 +242,16 @@ done
 
 if [ "$COMPARE_LIVE" = true ]; then
     log "Comparing exact row counts with the live database (read-only)..."
-    dmysql -N -B -e "SELECT CONCAT(table_schema,'.',table_name) FROM information_schema.tables WHERE table_schema LIKE 'acore\\_%' AND table_type='BASE TABLE'" 2>/dev/null > "$WORK/tables.txt"
-    awk -F. '{printf "SELECT '\''%s.%s'\'', COUNT(*) FROM `%s`.`%s`;\n",$1,$2,$1,$2}' "$WORK/tables.txt" > "$WORK/count.sql"
+    dmysql -N -B -e "SELECT CONCAT(table_schema,'.',table_name) FROM information_schema.tables WHERE table_schema LIKE 'acore\\_%' AND table_type='BASE TABLE'" 2>/dev/null > "$WORK/tables.raw"
+    # Table names come from the archive and are sent, unescaped, to the live
+    # database as root: allow only plain identifiers, and make the live session
+    # read-only so only COUNT queries can ever run there.
+    grep -E '^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$' "$WORK/tables.raw" > "$WORK/tables.txt" || true
+    [ -s "$WORK/tables.txt" ] || bad "no comparable tables found in the drill database"
+    {
+        echo 'SET SESSION TRANSACTION READ ONLY;'
+        awk -F. '{printf "SELECT '\''%s.%s'\'', COUNT(*) FROM `%s`.`%s`;\n",$1,$2,$1,$2}' "$WORK/tables.txt"
+    } > "$WORK/count.sql"
     dmysql -N -B < "$WORK/count.sql" 2>/dev/null > "$WORK/drill-counts.tsv"
     docker exec -i "$LIVE_DB_CONTAINER" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B 2>/dev/null' \
         < "$WORK/count.sql" > "$WORK/live-counts.tsv"
@@ -253,4 +274,5 @@ fi
 if [ "$KEEP" = true ]; then
     info "keeping '$NAME' on network '$NETWORK' (password in $PASSWORD_FILE)"
 fi
+SUCCESS=true
 echo "RESULT: DRILL PASSED"

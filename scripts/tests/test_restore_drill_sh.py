@@ -35,7 +35,7 @@ def _archive(tmp_path: Path) -> Path:
     return path
 
 
-def _bin(tmp_path: Path, inspect_output: str) -> Path:
+def _bin(tmp_path: Path, inspect_output: str, extra_tools: tuple[str, ...] = ()) -> Path:
     bind = tmp_path / "bin"
     bind.mkdir()
     _executable(bind / "docker", f"""#!/bin/bash
@@ -43,10 +43,18 @@ echo "$@" >> "$DRILL_CALLS"
 case "$1 $2" in
   "container inspect") exit 1 ;;
   "network inspect") echo true ;;
-  "run "*) echo cid ;;
+  "run "*)
+    if [ -n "${{DRILL_RUN_FAILS:-}}" ]; then exit 1; fi
+    echo cid ;;
   "inspect -f") echo '{inspect_output}' ;;
   "exec "*)
+    if [ -n "${{DRILL_FAIL_ON:-}}" ] && [[ "$*" == *"$DRILL_FAIL_ON"* ]]; then exit 1; fi
     case "$*" in
+      *"ac-database"*)
+        cat > "${{DRILL_LIVE_SQL:-/dev/null}}"
+        printf 'acore_auth.account\\t7\\n' ;;
+      *"table_schema LIKE"*)
+        printf 'acore_auth.account\\nacore_world.creature\\nacore_world.x;DROP TABLE y\\n' ;;
       *"information_schema.tables WHERE table_schema IN"*)
         printf 'acore_auth\\t1\\nacore_characters\\t1\\nacore_playerbots\\t1\\nacore_world\\t1\\n' ;;
       *"SELECT COUNT(*) FROM"*) echo 7 ;;
@@ -58,7 +66,7 @@ exit 0
 """)
     _executable(bind / "sleep", "#!/bin/sh\nexit 0\n")
     for tool in ("bash", "cat", "date", "diff", "grep", "head", "mktemp", "python3", "rm", "sed",
-                 "seq", "sort", "tar", "tr", "base64", "chmod", "gzip"):
+                 "seq", "sort", "tar", "tr", "base64", "chmod", "gzip", *extra_tools):
         real = shutil.which(tool)
         assert real, tool
         (bind / tool).symlink_to(real)
@@ -73,13 +81,15 @@ ROOT_GUARD = (
 )
 
 
-def _run(tmp_path: Path, bind: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run(tmp_path: Path, bind: Path, *args: str,
+         env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     source = DRILL.read_text()
     assert ROOT_GUARD in source
     script = tmp_path / "restore-drill.sh"
     script.write_text(source.replace(ROOT_GUARD, "", 1))
     return subprocess.run(["/bin/bash", str(script), *args], capture_output=True, text=True, timeout=60,
-                          env={"PATH": str(bind), "DRILL_CALLS": str(tmp_path / "calls"), "HOME": str(tmp_path)})
+                          env={"PATH": str(bind), "DRILL_CALLS": str(tmp_path / "calls"), "HOME": str(tmp_path),
+                              "DRILL_LIVE_SQL": str(tmp_path / "live.sql"), **(env_extra or {})})
 
 
 def test_isolated_drill_imports_and_cleans_up(tmp_path):
@@ -110,3 +120,64 @@ def test_drill_refuses_names_outside_the_acup_namespace(tmp_path):
     assert r.returncode == 1
     assert "must start with 'acup-'" in r.stderr
     assert not (tmp_path / "calls").exists()
+
+
+def _docker_rm_calls(calls: str) -> list[str]:
+    return [line for line in calls.splitlines() if line.startswith("rm ")]
+
+
+def test_keep_run_that_aborts_midway_still_removes_container_and_password_file(tmp_path):
+    # A set -e abort (inventory query fails) while FAILED is still 0 must not leak the kept container.
+    bind = _bin(tmp_path, "n|{}|volume:x;")
+    pw = tmp_path / "pw"
+    r = _run(tmp_path, bind, str(_archive(tmp_path)), "--keep", "--name", "acup-keep",
+             "--network", "n", "--password-file", str(pw),
+             env_extra={"DRILL_FAIL_ON": "information_schema.tables WHERE table_schema IN"})
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "RESULT: DRILL PASSED" not in r.stdout
+    assert "rm -f -v acup-keep" in (tmp_path / "calls").read_text()
+    assert not pw.exists(), "the password is useless once the kept container is removed"
+
+
+def test_keep_run_that_passes_keeps_container_and_private_password_file(tmp_path):
+    bind = _bin(tmp_path, "n|{}|volume:x;")
+    pw = tmp_path / "pw"
+    r = _run(tmp_path, bind, str(_archive(tmp_path)), "--keep", "--name", "acup-keep",
+             "--network", "n", "--password-file", str(pw))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "RESULT: DRILL PASSED" in r.stdout
+    assert _docker_rm_calls((tmp_path / "calls").read_text()) == []
+    assert pw.read_text().strip()
+    assert stat.S_IMODE(os.stat(pw).st_mode) == 0o600
+
+
+def test_container_is_removed_even_when_docker_run_fails(tmp_path):
+    # `docker run` can create the container and still exit non-zero (e.g. fail to start it).
+    bind = _bin(tmp_path, "none|{}|volume:x;")
+    r = _run(tmp_path, bind, str(_archive(tmp_path)), env_extra={"DRILL_RUN_FAILS": "1"})
+    assert r.returncode != 0
+    assert "rm -f -v acup-drill-db" in (tmp_path / "calls").read_text()
+
+
+def test_readiness_probe_and_import_use_tcp_not_the_entrypoint_socket(tmp_path):
+    # mysql:8.4's entrypoint runs a socket-only temporary server first; only TCP reaches the final one.
+    bind = _bin(tmp_path, "none|{}|volume:x;")
+    r = _run(tmp_path, bind, str(_archive(tmp_path)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    execs = [line for line in (tmp_path / "calls").read_text().splitlines() if line.startswith("exec ")]
+    assert execs
+    for line in execs:
+        assert " -h127.0.0.1 " in line and "--protocol=TCP" in line, line
+
+
+def test_compare_live_sends_only_read_only_count_queries_to_the_live_db(tmp_path):
+    bind = _bin(tmp_path, "none|{}|volume:x;", extra_tools=("awk",))
+    r = _run(tmp_path, bind, str(_archive(tmp_path)), "--compare-live")
+    assert r.returncode == 0, r.stdout + r.stderr
+    live_sql = (tmp_path / "live.sql").read_text().splitlines()
+    assert live_sql[0] == "SET SESSION TRANSACTION READ ONLY;"
+    queries = [line for line in live_sql[1:] if line.strip()]
+    assert len(queries) == 2, live_sql  # the hostile table name was filtered out
+    for line in queries:
+        assert line.startswith("SELECT '") and "COUNT(*) FROM" in line and line.endswith(";"), line
+    assert "DROP" not in "\n".join(live_sql)
