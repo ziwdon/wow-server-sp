@@ -79,6 +79,19 @@ def test_a_patch_that_no_longer_fits_upstream_fails_loudly(tmp_path):
     assert "refresh the patch" in r.stderr
 
 
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to give the checkout another owner")
+def test_a_checkout_owned_by_another_user_is_still_patched(tmp_path):
+    # Stage/cutover run git on trees another user may own (git's safe.directory
+    # check would refuse them), as the verifier's rev-parse already allows.
+    src, patches = _source_tree(tmp_path), _patches(tmp_path)
+    for path in [src, *src.rglob("*")]:
+        os.lchown(path, 65534, 65534)
+    r = _apply(src, patches)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "int patched;" in (src / "modules" / "mod-playerbots" / "src" / "hook.cpp").read_text()
+    assert _apply(src, patches, "--check").returncode == 0
+
+
 def test_missing_module_checkout_is_an_error(tmp_path):
     patches = _patches(tmp_path)
     (tmp_path / "empty").mkdir()

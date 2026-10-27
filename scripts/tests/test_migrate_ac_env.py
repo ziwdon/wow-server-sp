@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path("/src") if Path("/src/migrate-ac-env.sh").is_file() else Path(__file__).resolve().parents[1]
 MIGRATE = SCRIPTS_DIR / "migrate-ac-env.sh"
 ENV_VAR_PY = Path(os.environ.get(
@@ -46,9 +48,27 @@ def _stack(tmp_path: Path, admin: str | None = ADMIN) -> Path:
     return stack
 
 
+ROOT_GUARD = (
+    'if [ "${EUID:-$(id -u)}" -eq 0 ]; then\n'
+    '    echo "ERROR: do not run as root; the overlays must stay owned by your user." >&2\n'
+    '    exit 1\n'
+    'fi\n'
+)
+
+
+def _script(tmp_path: Path) -> Path:
+    """migrate-ac-env.sh without its root guard (the sandbox runs tests as root)."""
+    text = MIGRATE.read_text()
+    assert ROOT_GUARD in text
+    script = tmp_path / "migrate-ac-env.sh"
+    if not script.exists():
+        script.write_text(text.replace(ROOT_GUARD, "", 1))
+    return script
+
+
 def _run(tmp_path: Path, stack: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(MIGRATE), "--stack-dir", str(stack), *args],
+        ["bash", str(_script(tmp_path)), "--stack-dir", str(stack), *args],
         env={**os.environ, "ENV_VAR_PY": str(ENV_VAR_PY)},
         capture_output=True, text=True, timeout=30,
     )
@@ -133,3 +153,57 @@ def test_rejects_unsafe_pin_values(tmp_path):
     r = _run(tmp_path, stack, "--dry-run", "--pin", "AC_RATE_XP_PET=5'; rm -rf /")
     assert r.returncode == 1
     assert "invalid --pin" in r.stderr
+
+
+def test_refuses_to_run_as_root(tmp_path):
+    stack = _stack(tmp_path)
+    r = subprocess.run(["bash", str(MIGRATE), "--stack-dir", str(stack), "--dry-run"],
+                       env={**os.environ, "ENV_VAR_PY": str(ENV_VAR_PY)}, capture_output=True, text=True, timeout=30)
+    if os.geteuid() == 0:
+        assert r.returncode == 1
+        assert "do not run as root" in r.stderr
+    else:
+        assert "do not run as root" not in r.stderr, r.stderr
+
+
+def test_pin_fills_an_empty_environment_mapping(tmp_path):
+    # yaml.safe_dump (the admin's writer) leaves `environment: {}` once every key is removed.
+    stack = _stack(tmp_path, admin="services:\n  ac-worldserver:\n    environment: {}\n")
+    r = _run(tmp_path, stack, "--backup-dir", str(tmp_path / "bk"), "--pin", "AC_DUNGEON_FINDER_OPTIONS_MASK=5")
+    assert r.returncode == 0, r.stderr
+    assert (stack / "docker-compose.admin.yml").read_text() == (
+        "services:\n  ac-worldserver:\n    environment:\n      AC_DUNGEON_FINDER_OPTIONS_MASK: '5'\n"
+    )
+
+
+@pytest.mark.parametrize("line", [
+    "      - AC_AI_PLAYERBOT_ENABLED=1\n",
+    '      "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "50"\n',
+])
+def test_refuses_a_legacy_name_the_rename_cannot_reach(tmp_path, line):
+    stack = _stack(tmp_path)
+    override = OVERRIDE + line
+    (stack / "docker-compose.override.yml").write_text(override)
+    r = _run(tmp_path, stack, "--backup-dir", str(tmp_path / "bk"))
+    assert r.returncode == 1
+    assert "AC_AI_PLAYERBOT_" in r.stderr and "by hand" in r.stderr
+    assert (stack / "docker-compose.override.yml").read_text() == override, "nothing written"
+    assert (stack / "docker-compose.admin.yml").read_text() == ADMIN, "nothing written"
+
+
+def test_a_commented_legacy_name_is_not_a_leftover(tmp_path):
+    stack = _stack(tmp_path)
+    (stack / "docker-compose.override.yml").write_text(OVERRIDE + "      # AC_AI_PLAYERBOT_ENABLED was renamed\n")
+    r = _run(tmp_path, stack, "--backup-dir", str(tmp_path / "bk"))
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_rerun_never_overwrites_the_first_backup(tmp_path):
+    # After a partial or complete first run the overlays hold migrated content;
+    # the originals in --backup-dir must survive any re-run.
+    stack = _stack(tmp_path)
+    assert _run(tmp_path, stack, "--backup-dir", str(tmp_path / "bk")).returncode == 0
+    r = _run(tmp_path, stack, "--backup-dir", str(tmp_path / "bk"))
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "bk" / "docker-compose.override.yml.pre-migrate").read_text() == OVERRIDE
+    assert (tmp_path / "bk" / "docker-compose.admin.yml.pre-migrate").read_text() == ADMIN

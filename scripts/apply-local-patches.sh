@@ -45,6 +45,8 @@ if [ "$MODE" = --reverse ]; then
     mapfile -t patches < <(printf '%s\n' "${patches[@]}" | sort -r)
 fi
 
+# safe.directory: the checkouts may be owned by another user (as in the
+# verifier's rev-parse); the patch check must not depend on git's owner check.
 status=0
 for patch in "${patches[@]}"; do
     module="$(basename "$(dirname "$patch")")"
@@ -55,16 +57,16 @@ for patch in "${patches[@]}"; do
         status=1
         continue
     fi
-    if git -C "$target" apply --reverse --check "$patch" 2>/dev/null; then
+    if git -c safe.directory='*' -C "$target" apply --reverse --check "$patch" 2>/dev/null; then
         if [ "$MODE" = --reverse ]; then
-            git -C "$target" apply --reverse "$patch"
+            git -c safe.directory='*' -C "$target" apply --reverse "$patch"
             echo "  - ${name} reverted"
         else
             echo "  = ${name} already applied"
         fi
-    elif git -C "$target" apply --check "$patch" 2>/dev/null; then
+    elif git -c safe.directory='*' -C "$target" apply --check "$patch" 2>/dev/null; then
         case "$MODE" in
-            apply) git -C "$target" apply "$patch"; echo "  + ${name} applied" ;;
+            apply) git -c safe.directory='*' -C "$target" apply "$patch"; echo "  + ${name} applied" ;;
             --check) echo "  ! ${name} NOT applied"; status=1 ;;
             --reverse) echo "  = ${name} not applied; nothing to revert" ;;
         esac

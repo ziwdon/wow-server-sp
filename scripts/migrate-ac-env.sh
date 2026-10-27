@@ -15,7 +15,11 @@ set -euo pipefail
 #
 # Files are rewritten IN PLACE (open + truncate). docker-compose.admin.yml is
 # the bind-mount source of the admin container; rename(2) over it would leave
-# the container on the old inode. Originals are copied to --backup-dir first.
+# the container on the old inode. Originals are copied to --backup-dir first;
+# an existing *.pre-migrate copy is never overwritten (a re-run after a partial
+# migration must keep the true originals). Nothing is written when any
+# non-comment line would still name AC_AI_PLAYERBOT_ (a layout the rename
+# cannot reach, e.g. a list-style or quoted entry): migrate those by hand.
 #
 # Usage:
 #   migrate-ac-env.sh --stack-dir DIR --backup-dir DIR [--pin AC_K=V]... \
@@ -23,6 +27,11 @@ set -euo pipefail
 #   migrate-ac-env.sh --override FILE --admin FILE --backup-dir DIR ...
 # Exit: 0 migrated (or nothing to do), 1 refused/failed, 2 usage.
 # ============================================================================
+
+if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    echo "ERROR: do not run as root; the overlays must stay owned by your user." >&2
+    exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_VAR_PY="${ENV_VAR_PY:-${SCRIPT_DIR}/../wow-server-sp-admin/app/services/env_var.py}"
@@ -60,12 +69,22 @@ for dist in ${DISTS[@]+"${DISTS[@]}"}; do
     [ -f "$dist" ] || { echo "ERROR: --validate-against file not found: $dist" >&2; exit 1; }
 done
 
+# backup_once SRC DEST — copy SRC to DEST unless DEST already exists (cp -n
+# semantics, without depending on cp's version-specific -n exit status).
+backup_once() {
+    if [ -e "$2" ]; then
+        echo "Keeping the existing backup $2 (from an earlier run)."
+    else
+        cp -p "$1" "$2"
+    fi
+}
+
 if [ "$DRY_RUN" != true ]; then
     mkdir -p "$BACKUP_DIR"
     chmod 700 "$BACKUP_DIR"
-    cp -p "$OVERRIDE" "$BACKUP_DIR/docker-compose.override.yml.pre-migrate"
+    backup_once "$OVERRIDE" "$BACKUP_DIR/docker-compose.override.yml.pre-migrate"
     if [ -f "$ADMIN" ]; then
-        cp -p "$ADMIN" "$BACKUP_DIR/docker-compose.admin.yml.pre-migrate"
+        backup_once "$ADMIN" "$BACKUP_DIR/docker-compose.admin.yml.pre-migrate"
     fi
 fi
 
@@ -124,6 +143,8 @@ def apply_pins(path: Path, lines: list[str]) -> tuple[list[str], int]:
     text = "".join(lines).strip()
     if text in ("", "services: {}"):
         lines = ["services:\n", "  ac-worldserver:\n", "    environment:\n"]
+    # An emptied mapping (yaml.safe_dump writes `environment: {}`) is an empty block.
+    lines = ["    environment:\n" if line.rstrip() == "    environment: {}" else line for line in lines]
     if "    environment:\n" not in lines:
         fail(f"{path}: no ac-worldserver environment block; refusing to guess its layout")
     start = lines.index("    environment:\n")
@@ -186,6 +207,12 @@ for path in targets:
     print(f"{path}: {renamed} renamed, {pinned} pinned")
 
 validate(targets, new_lines)
+
+for path in targets:
+    for number, line in enumerate(new_lines[path], 1):
+        if OLD in line and not line.lstrip().startswith("#"):
+            fail(f"{path}:{number} still names {OLD}* after the rename (a layout this script does not "
+                 f"rewrite: {line.strip()!r}); migrate it by hand")
 
 for path in targets:
     old = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.is_file() else []
