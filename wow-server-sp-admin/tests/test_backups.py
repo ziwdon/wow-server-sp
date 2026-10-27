@@ -184,3 +184,12 @@ def test_matching_backup_symlink_is_rejected_without_following(tmp_path):
     assert resolve_backup_archive(backups_dir=backups, archive_name=link.name) is None
     with pytest.raises(BackupListingError):
         list_backups(backups_dir=backups)
+
+
+def test_list_backups_includes_preupgrade_label(tmp_path):
+    b = tmp_path / "backups"
+    b.mkdir()
+    _touch(b / "azerothcore-backup-preupgrade-2026-10-28T10-00-00.tar.gz")
+    rows = list_backups(backups_dir=b)
+    assert len(rows) == 1
+    assert rows[0].label == "preupgrade"
