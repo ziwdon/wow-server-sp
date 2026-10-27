@@ -210,7 +210,7 @@ Stop bots from ever auto-selecting a flight by zeroing the RPG flight weight:
 - Env var: `AC_PLAYERBOTS_RPG_STATUS_PROB_WEIGHT_TRAVEL_FLIGHT=0`
 - Apply via the admin app (Settings → set the key → Apply), or add the env var to `docker-compose.override.yml` / `docker-compose.admin.yml` and restart the worldserver.
 
-These eight RPG-status weights are **relative**, not absolute percentages (they sum to 150, not 100). Setting `TravelFlight` to `0` simply drops it from the weighted lottery — the other statuses keep their relative proportions automatically, so there is **no need to redistribute the 15** to the other weights.
+The nine `Playerbots.RpgStatusProbWeight.*` weights (WanderRandom, WanderNpc, GoGrind, GoCamp, DoQuest, TravelFlight, Rest, OutdoorPvp, DoGather) are **relative**, not absolute percentages (the pinned dist's defaults sum to 165, not 100). Setting `TravelFlight` to `0` simply drops it from the weighted lottery — the other statuses keep their relative proportions automatically, so there is **no need to redistribute the 15** to the other weights.
 
 Trade-off: disables **all** bot RPG flights, including the same-continent ones that work fine, so bots no longer ride gryphons at all. They still relocate across continents via the independent `RandomPlayerbotMgr` teleport system (direct teleport, no flight), so zone population and redistribution are unaffected — the loss is purely cosmetic.
 

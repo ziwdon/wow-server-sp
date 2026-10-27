@@ -5,7 +5,7 @@
 >
 > **Renamed prefix.** mod-playerbots #2854 renamed every `AiPlayerbot.X` key to `Playerbots.X` (no fallback; old keys are silently ignored). Keys below use the new prefix, and env vars are `AC_PLAYERBOTS_<X>` (was `AC_AI_PLAYERBOT_<X>`).
 >
-> **Snapshot caveat.** The defaults and descriptions in this file were written against the pre-rename `playerbots.conf.dist`; only the prefix was updated mechanically. Against the pinned dist, 10 keys listed here no longer exist (flagged "not in the pinned dist" below) and roughly a hundred newer keys are not listed (e.g. `Playerbots.LevelBrackets.*`, `Playerbots.AutoPartyBuffs`, `Playerbots.AutoGreaterBlessings`, `Playerbots.EquipAndSpecPersistence[Level]`, `Playerbots.BotSendMailEnabled`). For anything that matters, read the pinned dist or the Settings page rather than trusting a default quoted here.
+> **Snapshot caveat.** The defaults and descriptions in this file were written against the pre-rename `playerbots.conf.dist`; only the prefix was updated mechanically. This file was never exhaustive: it covers about 346 of the 891 `Playerbots.*` keys in the pinned dist (e.g. it omits `Playerbots.LevelBrackets.*`, `Playerbots.AutoPartyBuffs`, `Playerbots.AutoGreaterBlessings`, `Playerbots.EquipAndSpecPersistence[Level]`, `Playerbots.BotSendMailEnabled`). Ten keys listed here no longer exist in the pinned dist (flagged "not in the pinned dist" below), and two rows have a different default there (flagged "default changed": `AutoLearnQuestSpells`, `UnobtainableItems`). For anything that matters, read the pinned dist or the Settings page rather than trusting a default quoted here.
 
 ---
 
@@ -301,7 +301,7 @@ All distances are in yards.
 | Playerbots.LimitEnchantExpansion | 1 | Bots do not use TBC enchants before level 61 or WotLK enchants/gems before level 71 |
 | Playerbots.LimitGearExpansion | 1 | Bots do not equip TBC gear before level 61 or WotLK gear before level 71 |
 | Playerbots.RandomGearLoweringChance | 0 | Chance (0–1) a randombot receives suboptimal gear on initialization |
-| Playerbots.UnobtainableItems | 12468,46978 | Comma-separated item IDs excluded from bot gear generation |
+| Playerbots.UnobtainableItems | 12468,46978 | Comma-separated item IDs excluded from bot gear generation (default changed: now `12468,44869,44870,46978`) |
 | Playerbots.GearScoreCheck | 0 | Randombots deny group invitations from players with too-low gear score |
 | Playerbots.EquipmentPersistence | 0 | Stop random gear re-initialization after EquipmentPersistenceLevel (not in the pinned dist; superseded by `Playerbots.EquipAndSpecPersistence`, default 1) |
 | Playerbots.EquipmentPersistenceLevel | 80 | Level at which equipment persistence kicks in (not in the pinned dist; superseded by `Playerbots.EquipAndSpecPersistenceLevel`, default 1) |
@@ -347,7 +347,7 @@ All distances are in yards.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| Playerbots.AutoLearnQuestSpells | 0 | Randombots automatically learn class quest reward spells on level-up |
+| Playerbots.AutoLearnQuestSpells | 0 | Randombots automatically learn class quest reward spells on level-up (default changed: now 1) |
 | Playerbots.AutoLearnTrainerSpells | 1 | Randombots automatically learn trainable spells on level-up |
 | Playerbots.AutoPickTalents | 1 | Randombots automatically spend talent points on level-up |
 | Playerbots.RandomBotSpellIds | "54197" | Comma-separated spell IDs every randombot learns automatically (default: Cold Weather Flying) |
@@ -381,6 +381,7 @@ All distances are in yards.
 | Playerbots.RpgStatusProbWeight.TravelFlight | 15 | Weight for "fly to level-appropriate area" RPG status |
 | Playerbots.RpgStatusProbWeight.Rest | 5 | Weight for "do nothing for a while" RPG status |
 | Playerbots.RpgStatusProbWeight.OutdoorPvp | 10 | Weight for "participate in outdoor PvP capture points" RPG status |
+| Playerbots.RpgStatusProbWeight.DoGather | 15 | Weight for "roam the current zone harvesting herb/ore nodes" RPG status (requires Herbalism or Mining) |
 
 ### ZoneBracket entries
 
