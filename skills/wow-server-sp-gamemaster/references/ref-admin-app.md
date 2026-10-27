@@ -56,7 +56,7 @@ Shows online real players with basic info.
 The Settings page allows browsing and modifying AzerothCore configuration via `AC_*` env vars.
 
 ### How it works
-1. Browse ~1874 config keys from all `.conf.dist` files
+1. Browse ~1996 config keys from all `.conf.dist` files (built from the AC source tree the server was built from, so the list matches the deployed version; falls back to `docs/configs/` if a file is missing)
 2. Filter by "Show only modified" (default) or show all
 3. Click a key to see its description, default value, current value
 4. Edit the value and add to pending changes
@@ -64,7 +64,7 @@ The Settings page allows browsing and modifying AzerothCore configuration via `A
 
 ### Filters
 - **Show only modified** (default) — shows keys with `source: admin` or `source: installer`
-- When unchecked — shows all ~1874 keys
+- When unchecked — shows all ~1996 keys
 - Pending-count badge and Apply button always reflect true pending state
 
 ### Apply Flow
@@ -109,7 +109,7 @@ The Progression page (`/progression`) lets you advance individual characters thr
 
 The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first. It refuses an archive taken on different AzerothCore/module source revisions than the running server (or one whose revisions are unknown); cross-version restores are host-only (`scripts/restore-azerothcore.sh`).
 
-Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers every label (daily, manual, prerestore, preclear) except `preupgrade`, which is never pruned (finalize the upgrade, then delete those archives by hand). To keep a backup longer, copy the archive off the server from `/opt/stacks/azerothcore/backups/`.
+Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers every label (daily, manual, prerestore, preclear) except `preupgrade` and `prerollback` (an upgrade rollback's copy of the upgraded state), which are never pruned (delete those archives by hand once no longer needed). To keep a backup longer, copy the archive off the server from `/opt/stacks/azerothcore/backups/`.
 
 For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: reinstall AzerothCore first, copy the chosen archive to the new host, then run `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz`. The script refuses an archive whose manifest `git_revisions` differ from the stack's checkouts: check out those revisions and rebuild first, or pass `--allow-version-mismatch` knowingly.
 
@@ -144,7 +144,7 @@ For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: r
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime vars (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
-| `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade) |
+| `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade, prerollback) |
 
 ## Backup Format
 

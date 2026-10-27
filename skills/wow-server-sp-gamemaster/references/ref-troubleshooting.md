@@ -75,6 +75,7 @@ Live stdout (not written to any file on disk):
 - `MoveSplineInitArgs::Validate: expression 'velocity > 0.01f' failed for GUID…` — upstream world-DB data quirk, cosmetic
 - `>> The file 'YYYY_MM_DD_NN.sql' was applied to the database, but is missing in your update directory now!` — high volume (~2500+ lines per boot); DB still concludes "up-to-date", informational only
 - **Frozen `Server.log` mtime after `WORLD: World Initialized`** — **NORMAL**, not a stall; runtime traffic goes to `Playerbots.log` and `docker logs ac-worldserver`
+- **NOT benign** (these also land only in `Server.log`/console, leaving `Errors.log` at 0 bytes — verifier Check 25 catches both): `Missing property …` means a `.conf` file lacks a key the core now reads (stale file, or an `AC_*` var that maps to nothing); `… built with generator …` means the mmaps do not match the core (client data from another generator version than the core expects — the core rejects those tiles, so there is no pathfinding)
 
 ### Playerbots.log
 - `<BotName> A:<action> - FAILED` (e.g., `A:follow - FAILED`) — action-retry traces, **expected high volume**
@@ -82,7 +83,7 @@ Live stdout (not written to any file on disk):
 - `Random teleporting bot <Name>…` — normal periodic relocation, not an error
 
 ### docker logs ac-worldserver
-- `Random Bots Stats: 0 online` with all zeros — **NORMAL when no real player is logged in** (due to `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1`)
+- `Random Bots Stats: 0 online` with all zeros — **NORMAL when no real player is logged in** (due to `AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER=1`)
 
 ### Errors.log
 - `Table \`graveyard_zone\` incomplete: Zone <id> Team <0|1> does not have a linked graveyard` — an upstream **data gap**, functionally benign (the server falls back to the default graveyard). Triggered by playerbot deaths in zones AzerothCore ships no graveyard for, so it surfaces only after hours of uptime. Does break the "0 bytes = clean" signal. See **"`graveyard_zone` incomplete errors"** under Common Issues for the root cause and the exact fix SQL.
@@ -205,11 +206,11 @@ A persistent population of online characters with a non-empty `taxi_path` (often
 
 Stop bots from ever auto-selecting a flight by zeroing the RPG flight weight:
 
-- Key: `AiPlayerbot.RpgStatusProbWeight.TravelFlight = 0` (default `15`)
-- Env var: `AC_AI_PLAYERBOT_RPG_STATUS_PROB_WEIGHT_TRAVEL_FLIGHT=0`
+- Key: `Playerbots.RpgStatusProbWeight.TravelFlight = 0` (default `15`)
+- Env var: `AC_PLAYERBOTS_RPG_STATUS_PROB_WEIGHT_TRAVEL_FLIGHT=0`
 - Apply via the admin app (Settings → set the key → Apply), or add the env var to `docker-compose.override.yml` / `docker-compose.admin.yml` and restart the worldserver.
 
-These eight RPG-status weights are **relative**, not absolute percentages (they sum to 150, not 100). Setting `TravelFlight` to `0` simply drops it from the weighted lottery — the other statuses keep their relative proportions automatically, so there is **no need to redistribute the 15** to the other weights.
+The nine `Playerbots.RpgStatusProbWeight.*` weights (WanderRandom, WanderNpc, GoGrind, GoCamp, DoQuest, TravelFlight, Rest, OutdoorPvp, DoGather) are **relative**, not absolute percentages (the pinned dist's defaults sum to 165, not 100). Setting `TravelFlight` to `0` simply drops it from the weighted lottery — the other statuses keep their relative proportions automatically, so there is **no need to redistribute the 15** to the other weights.
 
 Trade-off: disables **all** bot RPG flights, including the same-continent ones that work fine, so bots no longer ride gryphons at all. They still relocate across continents via the independent `RandomPlayerbotMgr` teleport system (direct teleport, no flight), so zone population and redistribution are unaffected — the loss is purely cosmetic.
 
@@ -221,7 +222,7 @@ Deploy with the isolated redeploy script (**not** the installer — `install-aze
 ```bash
 ./scripts/redeploy-azerothcore.sh
 ```
-No DB impact — characters, progression and items are untouched; only the worldserver image is rebuilt and the container recreated. Because the module source lives in the gitignored stack dir, carry the change as a repo patch applied right after the Phase-1 module clone so it survives a fresh install.
+No DB impact — characters, progression and items are untouched; only the worldserver image is rebuilt and the container recreated. Because the module source lives in the gitignored stack dir, carry the change as a numbered patch under `scripts/patches/mod-playerbots/` (applied by `scripts/apply-local-patches.sh`, which installer Phase 1 runs after pinning the checkouts; verifier Check 24 fails if a patch is not applied) so it survives a fresh install and an upgrade.
 
 #### Cleanup — unstick the bots already frozen
 
@@ -321,8 +322,8 @@ docker exec -it ac-database mysql -uroot -p<DOCKER_DB_ROOT_PASSWORD>
 ```
 
 ### "Random Bots Stats: 0 online" when player is logged in
-- Check `AC_AI_PLAYERBOT_ENABLED=1` in override.yml
-- Check `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1` (bots should activate when you log in)
+- Check `AC_PLAYERBOTS_ENABLED=1` in override.yml
+- Check `AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER=1` (bots should activate when you log in)
 - Give it a few minutes — bots ramp up gradually
 - Run `playerbot rndbot stats` in worldserver console to check state
 
@@ -334,7 +335,7 @@ docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
         WHERE a.username LIKE 'RNDBOT%'"
 # Expected count = configured_accounts × chars_per_account
 # Check your configured bot count:
-grep -E "AC_AI_PLAYERBOT_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
+grep -E "AC_PLAYERBOTS_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
 ```
 
 ### Cannot connect with WoW client
@@ -392,6 +393,7 @@ cat /opt/stacks/azerothcore/logs/install-<ts>.log | tail -50
 # Resume from last good phase:
 ./scripts/install-azerothcore.sh --resume-from=<phase>
 ```
+On a server that is already running, never resume from phase `1` or earlier — Phase 1 moves the git checkouts (pinned revisions) under the running worldserver. Use `scripts/upgrade-azerothcore.sh` for upstream changes.
 
 ---
 

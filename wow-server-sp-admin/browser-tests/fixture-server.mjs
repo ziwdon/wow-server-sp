@@ -14,8 +14,8 @@ let status = 'running';
 
 const keys = [
   {
-    key: 'AiPlayerbot.MinRandomBots', default: '50',
-    comment: 'Target number of random playerbots', env_var: 'AC_PLAYERBOT_MIN_RANDOM_BOTS',
+    key: 'Playerbots.MinRandomBots', default: '50',
+    comment: 'Target number of random playerbots', env_var: 'AC_PLAYERBOTS_MIN_RANDOM_BOTS',
     effective_value: '50', source: 'admin', source_file: 'playerbots.conf.dist', read_only: false,
   },
   {

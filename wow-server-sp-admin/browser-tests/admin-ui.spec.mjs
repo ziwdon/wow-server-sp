@@ -32,7 +32,7 @@ test('keyboard settings selection, mobile dialog focus, and filters work togethe
 
   const search = page.getByRole('textbox', { name: 'Search settings' });
   await search.fill('MinRandom');
-  const detailButton = page.getByRole('button', { name: /AiPlayerbot\.MinRandomBots/ });
+  const detailButton = page.getByRole('button', { name: /Playerbots\.MinRandomBots/ });
   await expect(detailButton).toBeVisible();
   await detailButton.focus();
   await page.keyboard.press('Enter');
@@ -131,7 +131,7 @@ for (const action of ['apply', 'rollback']) {
     await page.goto('/settings');
 
     if (action === 'apply') {
-      const input = page.locator('.key-input[data-key="AiPlayerbot.MinRandomBots"]');
+      const input = page.locator('.key-input[data-key="Playerbots.MinRandomBots"]');
       await input.fill('75');
       await expect(page.getByRole('button', { name: /^Apply/ })).toBeEnabled();
       await page.getByRole('button', { name: /^Apply/ }).click();

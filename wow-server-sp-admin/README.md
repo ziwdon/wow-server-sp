@@ -88,7 +88,7 @@ After install, verify these flows work end-to-end:
 5. **Restart**: click Restart; full stop + start sequence runs.
 6. **Settings search**: open `/settings`; type "innodb buffer" — the
    `Database.WorkerThreads` row (or similar comment match) appears.
-7. **Settings edit + apply**: change `AiPlayerbot.MinRandomBots` to a
+7. **Settings edit + apply**: change `Playerbots.MinRandomBots` to a
    small value (e.g. 50), Apply. Confirm the apply POST returns an
    action id immediately, the SSE action log streams restart progress,
    and post-apply verification reports the env var bound (no red

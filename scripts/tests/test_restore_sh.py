@@ -111,7 +111,7 @@ def _stack(tmp_path: Path) -> Path:
     return stack
 
 
-def _run(stack, archive, bind, logf, extra_env=None, guard=False):
+def _run(stack, archive, bind, logf, extra_env=None, guard=False, extra_args=()):
     if os.geteuid() == 0:
         _allow_parent_traversal(bind.parent)
         _allow_unprivileged(stack)
@@ -130,7 +130,7 @@ def _run(stack, archive, bind, logf, extra_env=None, guard=False):
     }
     return subprocess.run(
         ["bash", str(RESTORE_SH), str(archive), "--stack-dir", str(stack), "--yes",
-         *(() if guard else ("--allow-version-mismatch",))],
+         *(() if guard else ("--allow-version-mismatch",)), *extra_args],
         env=env, capture_output=True, text=True, preexec_fn=preexec_fn,
     )
 
@@ -232,7 +232,7 @@ def _failure_injection_stubs(path: Path) -> None:
     ))
 
 
-def _failure_run(tmp_path, monkeypatch, *, archive=None, **extra_env):
+def _failure_run(tmp_path, monkeypatch, *, archive=None, extra_args=(), **extra_env):
     stack = _stack(tmp_path)
     archive = archive or _make_archive(tmp_path)
     bind = tmp_path / "bin"; bind.mkdir()
@@ -244,6 +244,7 @@ def _failure_run(tmp_path, monkeypatch, *, archive=None, **extra_env):
     return stack, _run(
         stack, archive, bind, logf,
         {"MUTATION_LOG": str(mutation_log), **{key: str(value) for key, value in extra_env.items()}},
+        extra_args=extra_args,
     ), mutation_log, logf
 
 
@@ -978,3 +979,15 @@ def test_dr_restore_logs_when_the_admin_data_dir_is_missing(tmp_path):
     r = _run(stack, archive, bind, logf, extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state")})
     assert r.returncode == 0, r.stderr
     assert f"Skipping admin settings; {tmp_path / 'no-admin-data'} not found." in r.stdout
+
+
+def test_dr_restore_keep_archive_realmlist_neither_reads_nor_rewrites_the_realmlist(tmp_path, monkeypatch):
+    # Upgrade rollback: the archive's realmlist is the right one, and a re-run after the
+    # databases were dropped (or re-created empty by a reboot) has no fresh one to read.
+    _, result, mutations, logf = _failure_run(tmp_path, monkeypatch, extra_args=("--keep-archive-realmlist",))
+    assert result.returncode == 0, result.stderr
+    assert _mutations(mutations) == [
+        "stop", "copy:1", "copy:2", "copy:3", "copy:4", *_successful_database_mutations(), "recreate",
+    ]
+    calls = logf.read_text()
+    assert "SELECT address" not in calls and "UPDATE acore_auth.realmlist" not in calls

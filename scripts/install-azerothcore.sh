@@ -24,6 +24,8 @@ fi
 
 STACK_DIR="/opt/stacks/azerothcore"
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_SOURCE_DIR}/lib/upstream-versions.sh"
 STATE_FILE="${HOME}/.azerothcore-install-state"
 CONFIG_FILE="${HOME}/.azerothcore-install-config"
 INSTALL_LOCK_FILE="${HOME}/.azerothcore-install.lock"
@@ -972,16 +974,16 @@ verify_managed_env_vars_bound_in_worldserver() {
     local log="/azerothcore/env/dist/logs/Server.log"
     local missing=0
     local managed_vars=(
-        AC_AI_PLAYERBOT_ENABLED
-        AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN
+        AC_PLAYERBOTS_ENABLED
+        AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN
         AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES
-        AC_AI_PLAYERBOT_MIN_RANDOM_BOTS
-        AC_AI_PLAYERBOT_MAX_RANDOM_BOTS
-        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE
-        AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER
-        AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE
-        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
-        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
+        AC_PLAYERBOTS_MIN_RANDOM_BOTS
+        AC_PLAYERBOTS_MAX_RANDOM_BOTS
+        AC_PLAYERBOTS_BOT_ACTIVE_ALONE
+        AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER
+        AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE
+        AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
+        AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
         AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
         AC_AUCTION_HOUSE_BOT_ENABLE_SELLER
         AC_AUCTION_HOUSE_BOT_BUYER_ENABLED
@@ -1200,6 +1202,18 @@ clone_or_verify_repo() {
 
     mkdir -p "$(dirname "$dest")"
     git clone "$url" --branch="$branch" --depth 1 "$dest"
+}
+
+# Pin every checkout to the exact revisions this repository is written
+# against (scripts/upstream-versions.env), then apply the local patches.
+pin_upstream_checkouts() {
+    local label rel url branch rev
+    load_upstream_versions "${SCRIPT_SOURCE_DIR}/upstream-versions.env"
+    while IFS='|' read -r label rel url branch rev <&3; do
+        echo "Pinning ${label} to ${rev:0:12}..."
+        checkout_pinned_rev "${STACK_DIR}/${rel}" "$url" "$branch" "$rev"
+    done 3< <(upstream_repo_specs)
+    "${SCRIPT_SOURCE_DIR}/apply-local-patches.sh" "$STACK_DIR"
 }
 
 clone_or_verify_core_repo() {
@@ -1922,7 +1936,7 @@ elif [ "$ADOPT" = false ] && [ "${RESUME_FROM:-}" = "8" ] && [ -f "${STACK_DIR}/
     GM_USERNAME="UNUSED"
     GM_PASSWORD="UnusedPass123"
     AHBOT_PASSWORD="UnusedPass123"
-    PLAYERBOT_COUNT="${AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1500}"
+    PLAYERBOT_COUNT="${AC_PLAYERBOTS_MIN_RANDOM_BOTS:-1500}"
     SERVER_XP_RATE="x5"
     SERVER_PVP="y"
     INNODB_BUFFER_POOL_SIZE="6G"
@@ -2222,11 +2236,11 @@ adopt_existing_install() {
     # plan 2026-05-19-install-script-option-a-env-vars.md.
     if [ -f "$STACK_DIR/docker-compose.override.yml" ]; then
         for var in \
-            AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE \
-            AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER \
-            AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE \
-            AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND \
-            AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD \
+            AC_PLAYERBOTS_BOT_ACTIVE_ALONE \
+            AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER \
+            AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE \
+            AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND \
+            AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD \
             AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
         do
             if grep -qE "^[[:space:]]*${var}:" "$STACK_DIR/docker-compose.override.yml"; then
@@ -2648,6 +2662,8 @@ if should_run_phase "1"; then
         "mod-individual-progression" \
         "ZhengPeiRu21/mod-individual-progression"
 
+    pin_upstream_checkouts
+
     # VERIFY Phase 1
     echo ""
     echo "VERIFY Phase 1:"
@@ -2877,8 +2893,8 @@ services:
     environment:
       # ----- mod-playerbots -----
       AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DOCKER_DB_ROOT_PASSWORD:-password};acore_playerbots"
-      AC_AI_PLAYERBOT_ENABLED: "1"
-      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
+      AC_PLAYERBOTS_ENABLED: "1"
+      AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN: "1"
 
       # Required for mod-playerbots to initialize and update its own
       # acore_playerbots schema on worldserver startup. Do not disable this:
@@ -2889,19 +2905,19 @@ services:
       # Random bot pool size — the "200" below is a placeholder; the installer
       # substitutes the user's PLAYERBOT_COUNT prompt value into both MIN and MAX
       # immediately after this heredoc is written, then greps to verify.
-      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "200"
-      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "200"
+      AC_PLAYERBOTS_MIN_RANDOM_BOTS: "200"
+      AC_PLAYERBOTS_MAX_RANDOM_BOTS: "200"
 
       # Playerbot activation profile (formerly written into playerbots.conf):
       # BotActiveAlone = 0 turns off background AI when no real player is nearby;
       # ForceWhenIsFriend = 1 activates a bot when a real player is on its friend list;
       # DisabledWithoutRealPlayer = 1 keeps the realm cheap when nobody is online;
       # EnablePeriodicOnlineOffline = 1 rotates which bots are logged in over time.
-      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"
-      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"
-      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"
-      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"
-      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"
+      AC_PLAYERBOTS_BOT_ACTIVE_ALONE: "0"
+      AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER: "1"
+      AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"
+      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"
+      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"
       AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"
 
       # Conservative worldserver/playerbots performance settings for 6 physical cores / 12 threads.
@@ -2988,8 +3004,8 @@ services:
 EOF
 
     # Substitutions (anchored both sides; confirmed sed lines from prior round)
-    sed -i -E "s|^(      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: \")200(\")$|\1${PLAYERBOT_COUNT}\2|" docker-compose.override.yml
-    sed -i -E "s|^(      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: \")200(\")$|\1${PLAYERBOT_COUNT}\2|" docker-compose.override.yml
+    sed -i -E "s|^(      AC_PLAYERBOTS_MIN_RANDOM_BOTS: \")200(\")$|\1${PLAYERBOT_COUNT}\2|" docker-compose.override.yml
+    sed -i -E "s|^(      AC_PLAYERBOTS_MAX_RANDOM_BOTS: \")200(\")$|\1${PLAYERBOT_COUNT}\2|" docker-compose.override.yml
     sed -i -E "s|^(      AC_MAP_UPDATE_THREADS: \")4(\")$|\1${MAP_UPDATE_THREADS}\2|" docker-compose.override.yml
     GAME_TYPE_VALUE=0
     [ "${SERVER_PVP}" = "y" ] && GAME_TYPE_VALUE=1
@@ -3001,11 +3017,11 @@ EOF
     done
 
     # Verification greps (per spec refinement #1 — disambiguated messages)
-    if ! grep -qE "^      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: \"${PLAYERBOT_COUNT}\"$" docker-compose.override.yml; then
+    if ! grep -qE "^      AC_PLAYERBOTS_MIN_RANDOM_BOTS: \"${PLAYERBOT_COUNT}\"$" docker-compose.override.yml; then
         echo "ERROR: MIN_RANDOM_BOTS substitution did not match (expected ${PLAYERBOT_COUNT})"
         exit 1
     fi
-    if ! grep -qE "^      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: \"${PLAYERBOT_COUNT}\"$" docker-compose.override.yml; then
+    if ! grep -qE "^      AC_PLAYERBOTS_MAX_RANDOM_BOTS: \"${PLAYERBOT_COUNT}\"$" docker-compose.override.yml; then
         echo "ERROR: MAX_RANDOM_BOTS substitution did not match (expected ${PLAYERBOT_COUNT})"
         exit 1
     fi
@@ -3035,14 +3051,14 @@ EOF
 
     for expected in \
         "      AC_PLAYERBOTS_DATABASE_INFO: \"ac-database;3306;root;\${DOCKER_DB_ROOT_PASSWORD:-password};acore_playerbots\"" \
-        '      AC_AI_PLAYERBOT_ENABLED: "1"' \
-        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"' \
+        '      AC_PLAYERBOTS_ENABLED: "1"' \
+        '      AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN: "1"' \
         '      AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"' \
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"' \
-        '      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"' \
-        '      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"' \
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"' \
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"' \
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE: "0"' \
+        '      AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER: "1"' \
+        '      AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"' \
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"' \
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"' \
         '      AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"' \
         '      AC_AUCTION_HOUSE_BOT_ENABLE_SELLER: "true"' \
         '      AC_AUCTION_HOUSE_BOT_BUYER_ENABLED: "true"' \
@@ -3150,16 +3166,16 @@ if should_run_phase "2.6"; then
     # Worldserver overrides must be present in the effective config.
     for var in \
         AC_PLAYERBOTS_DATABASE_INFO \
-        AC_AI_PLAYERBOT_ENABLED \
-        AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN \
+        AC_PLAYERBOTS_ENABLED \
+        AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN \
         AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES \
-        AC_AI_PLAYERBOT_MIN_RANDOM_BOTS \
-        AC_AI_PLAYERBOT_MAX_RANDOM_BOTS \
-        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE \
-        AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER \
-        AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE \
-        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND \
-        AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD \
+        AC_PLAYERBOTS_MIN_RANDOM_BOTS \
+        AC_PLAYERBOTS_MAX_RANDOM_BOTS \
+        AC_PLAYERBOTS_BOT_ACTIVE_ALONE \
+        AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER \
+        AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE \
+        AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND \
+        AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD \
         AC_PLAYERBOTS_DATABASE_SYNCH_THREADS \
         AC_AUCTION_HOUSE_BOT_ENABLE_SELLER \
         AC_AUCTION_HOUSE_BOT_BUYER_ENABLED \
@@ -3433,10 +3449,10 @@ if should_run_phase "4"; then
 
     # Wait for short-lived init containers with timeout. We deliberately avoid
     # `docker wait` here: it blocks indefinitely if the container is wedged
-    # (network stall during the ~600 MB client-data download, DB lock during
+    # (network stall during the ~1.2 GB client-data download, DB lock during
     # import). wait_for_init_container polls docker inspect and bails out with
     # a useful log dump if the wait exceeds the timeout.
-    echo "Waiting for ac-client-data-init (downloads ~600 MB; up to 30 min)..."
+    echo "Waiting for ac-client-data-init (downloads ~1.2 GB; up to 30 min)..."
     if ! wait_for_init_container ac-client-data-init 1800 "client data init"; then
         exit 1
     fi

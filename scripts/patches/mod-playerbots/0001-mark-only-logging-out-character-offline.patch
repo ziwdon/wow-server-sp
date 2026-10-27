@@ -1,0 +1,27 @@
+diff --git a/src/Script/Playerbots.cpp b/src/Script/Playerbots.cpp
+index 57dfce3f..75327163 100644
+--- a/src/Script/Playerbots.cpp
++++ b/src/Script/Playerbots.cpp
+@@ -140,9 +140,21 @@ public:
+         PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
+         PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
+         PLAYERHOOK_ON_GIVE_EXP,
+-        PLAYERHOOK_ON_BEFORE_TELEPORT
++        PLAYERHOOK_ON_BEFORE_TELEPORT,
++        PLAYERHOOK_CAN_MARK_ACCOUNT_OFFLINE
+     }) {}
+ 
++    // wow-server-sp local patch: mark only the logging-out character offline.
++    // The core marks every character of the account offline at logout, but a
++    // playerbots account can have several characters in the world at once
++    // (random bots; alt bots on a real player's account), so one logout would
++    // flag its still-online siblings offline until their next save.
++    bool OnPlayerCanMarkAccountOffline(ObjectGuid guid, uint32 /*accountId*/) override
++    {
++        CharacterDatabase.Execute("UPDATE characters SET online = 0 WHERE guid = {}", guid.GetCounter());
++        return false;
++    }
++
+     void OnPlayerLogin(Player* player) override
+     {
+         if (!player->GetSession()->IsHeadless())

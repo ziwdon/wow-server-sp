@@ -6,7 +6,7 @@ One connection, ~15 read-only queries. Cohorts:
   player = username NOT LIKE 'RNDBOT%' AND username <> 'ahbot'
 
 playerbots_account_type values:
-  1 = RNDbot  (random roaming bots, driven by AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS)
+  1 = RNDbot  (random roaming bots, driven by AC_PLAYERBOTS_MIN/MAX_RANDOM_BOTS)
   2 = AddClass (summon reserve — only spawned via .playerbots bot addclass)
 """
 

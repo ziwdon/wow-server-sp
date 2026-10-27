@@ -9,10 +9,32 @@ fi
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore-admin}"
+AC_STACK_DIR="${AC_STACK_DIR:-/opt/stacks/azerothcore}"
 VERIFY_SCRIPT="${VERIFY_SCRIPT:-${SCRIPT_DIR}/verify-azerothcore-admin.sh}"
 CANDIDATE_IMAGE=""
 STAGE_DIR=""
 PREVIOUS_COMPOSE=""
+
+# Stage the .conf.dist files the Settings key index is built from. Prefer the
+# AzerothCore source tree the running server was built from, so the index
+# always matches the deployed version; fall back to the offline docs copy.
+stage_conf_dists() {
+    local dest="$1" f
+    local -a sources=(
+        "$AC_STACK_DIR/src/server/apps/worldserver/worldserver.conf.dist"
+        "$AC_STACK_DIR/modules/mod-playerbots/conf/playerbots.conf.dist"
+        "$AC_STACK_DIR/modules/mod-ah-bot-plus/conf/mod_ahbot.conf.dist"
+        "$AC_STACK_DIR/modules/mod-individual-progression/conf/individualProgression.conf.dist"
+    )
+    for f in "${sources[@]}"; do
+        if [ ! -f "$f" ]; then
+            echo "WARNING: $f not found; using docs/configs copies for the key index." >&2
+            cp "$REPO_DIR/../docs/configs/"*.conf.dist "$dest/"
+            return 0
+        fi
+    done
+    cp "${sources[@]}" "$dest/"
+}
 
 cleanup() {
     # An if-statement (not "[ ... ] && rm ...") is required here: the EXIT
@@ -120,7 +142,7 @@ for vendor in htmx.min.js htmx-sse.js; do
 done
 
 cp "$REPO_DIR/../scripts/backup.sh" "$STAGE_DIR/build/backup.sh"
-cp "$REPO_DIR/../docs/configs/"*.conf.dist "$STAGE_DIR/build/dist/"
+stage_conf_dists "$STAGE_DIR/build/dist"
 cp "$REPO_DIR/docker-compose.yml" "$STAGE_DIR/docker-compose.yml"
 
 echo "==> Building candidate image $CANDIDATE_IMAGE..."
@@ -129,8 +151,12 @@ ADMIN_IMAGE="$CANDIDATE_IMAGE" docker compose -f "$STAGE_DIR/docker-compose.yml"
 
 # Everything above is fallible but non-disruptive. Only now replace the
 # running app, retaining the old compose file/image for automatic rollback.
-sudo mkdir -p "$STACK_DIR/data"
-sudo chown "$(id -u):$(id -g)" "$STACK_DIR/data"
+# sudo is skipped when data/ is already correct: non-interactive callers (e.g.
+# the upgrade cutover) have no TTY for a password prompt.
+if ! { [ -d "$STACK_DIR/data" ] && [ "$(stat -c '%u:%g' "$STACK_DIR/data")" = "$(id -u):$(id -g)" ]; }; then
+    sudo mkdir -p "$STACK_DIR/data"
+    sudo chown "$(id -u):$(id -g)" "$STACK_DIR/data"
+fi
 cp "$STAGE_DIR/docker-compose.yml" "$STACK_DIR/docker-compose.yml"
 
 echo "==> Starting candidate admin container..."

@@ -10,13 +10,13 @@ Two types of bots:
 
 The rndbot pool size is configured at install time and varies per installation. Check the actual configured values:
 ```bash
-grep -E "AC_AI_PLAYERBOT_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
+grep -E "AC_PLAYERBOTS_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
 ```
 Pool = `RNDBOT*` accounts × up to 10 characters each (one per class). The installer default is 250 accounts (≈2500 characters), but the user may have chosen a different number.
 
-**Key default behavior:** `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1` — rndbots are disabled when no real player is logged in. When you log in, the engine ramps bots toward `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS`.
+**Key default behavior:** `AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER=1` — rndbots are disabled when no real player is logged in. When you log in, the engine ramps bots toward `AC_PLAYERBOTS_MIN_RANDOM_BOTS`.
 
-**Pool inflation from disabled classes:** If a class is blocked from logging in (e.g. `AC_AI_PLAYERBOT_DISABLE_DEATH_KNIGHT_LOGIN=1`), the module compensates by creating more accounts so it can still reach `MaxRandomBots` online. Each account effectively contributes only 9 usable characters instead of 10, so the module needs `ceil(MaxRandomBots / 9)` accounts rather than `ceil(MaxRandomBots / 10)`. The disabled-class characters (one per account) are created in the DB but remain permanently offline. This means the total character count in the DB will exceed `MaxRandomBots` by more than just the AddClass pool — the gap includes one permanently offline DK per rndbot account plus a small rounding slack. For example, with `MaxRandomBots=1500` and DKs disabled: 167 accounts are created (vs 150 without the restriction), yielding 167 offline DKs + 3 non-DK rounding slack = 170 offline rndbot chars, for a rndbot pool total of 1,670.
+**Pool inflation from disabled classes:** If a class is blocked from logging in (e.g. `AC_PLAYERBOTS_DISABLE_DEATH_KNIGHT_LOGIN=1`), the module compensates by creating more accounts so it can still reach `MaxRandomBots` online. Each account effectively contributes only 9 usable characters instead of 10, so the module needs `ceil(MaxRandomBots / 9)` accounts rather than `ceil(MaxRandomBots / 10)`. The disabled-class characters (one per account) are created in the DB but remain permanently offline. This means the total character count in the DB will exceed `MaxRandomBots` by more than just the AddClass pool — the gap includes one permanently offline DK per rndbot account plus a small rounding slack. For example, with `MaxRandomBots=1500` and DKs disabled: 167 accounts are created (vs 150 without the restriction), yielding 167 offline DKs + 3 non-DK rounding slack = 170 offline rndbot chars, for a rndbot pool total of 1,670.
 
 ---
 
@@ -351,29 +351,29 @@ playerbot pmon reset            # Reset performance monitor
 
 | Env Var | Recommended | Description |
 |---------|-------------|-------------|
-| `AC_AI_PLAYERBOT_ENABLED` | `1` | Enable playerbots |
-| `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` | installer-set | Min rndbots to maintain (check override.yml) |
-| `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | installer-set | Max rndbots (check override.yml) |
-| `AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER` | `1` | Disable rndbots when no real player online |
-| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE` | `10` | % chance idle bots become active (10=best for performance) |
-| `AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_SMART_SCALE` | `1` | Auto-scale activity based on latency |
+| `AC_PLAYERBOTS_ENABLED` | `1` | Enable playerbots |
+| `AC_PLAYERBOTS_MIN_RANDOM_BOTS` | installer-set | Min rndbots to maintain (check override.yml) |
+| `AC_PLAYERBOTS_MAX_RANDOM_BOTS` | installer-set | Max rndbots (check override.yml) |
+| `AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER` | `1` | Disable rndbots when no real player online |
+| `AC_PLAYERBOTS_BOT_ACTIVE_ALONE` | `10` | % chance idle bots become active (10=best for performance) |
+| `AC_PLAYERBOTS_BOT_ACTIVE_ALONE_SMART_SCALE` | `1` | Auto-scale activity based on latency |
 | `AC_MAP_UPDATE_THREADS` | `4` | Map update threads |
 
 ### Performance Profiles
 
 **Profile 1 — Best performance (recommended for this server):**
 ```
-AiPlayerbot.BotActiveAlone = 10
-AiPlayerbot.botActiveAloneSmartScale = 1
-AiPlayerbot.botActiveAloneSmartScaleWhenMinLevel = 1
-AiPlayerbot.botActiveAloneSmartScaleWhenMaxLevel = 80
+Playerbots.BotActiveAlone = 10
+Playerbots.botActiveAloneSmartScale = 1
+Playerbots.botActiveAloneSmartScaleWhenMinLevel = 1
+Playerbots.botActiveAloneSmartScaleWhenMaxLevel = 80
 ```
 Bots stay idle when not in the same zone. Best choice for performance with any bot count when you don't need bots active everywhere.
 
 **Profile 2 — 100% activity with auto-scale:**
 ```
-AiPlayerbot.BotActiveAlone = 100
-AiPlayerbot.botActiveAloneSmartScale = 1
+Playerbots.BotActiveAlone = 100
+Playerbots.botActiveAloneSmartScale = 1
 ```
 Good if you want bots everywhere at all times (more CPU/RAM).
 
@@ -403,7 +403,7 @@ Regardless of `BotActiveAlone`, bots are **always active** when:
 ## Expected Bot States
 
 ### "Random Bots Stats: 0 online" — **This is normal** when no real player is logged in.
-`AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER=1` keeps bots offline when no real player is connected. Characters are **not deleted** — they're just `online=0` in the DB. When you log in, the engine ramps bots toward `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS`.
+`AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER=1` keeps bots offline when no real player is connected. Characters are **not deleted** — they're just `online=0` in the DB. When you log in, the engine ramps bots toward `AC_PLAYERBOTS_MIN_RANDOM_BOTS`.
 
 ### Verify bot pool integrity
 ```bash
@@ -413,7 +413,7 @@ docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
         WHERE a.username LIKE 'RNDBOT%'"
 # Expected: configured_accounts × chars_per_account (installer default = 250 accounts × 10 chars = ~2500)
 # Your actual configured bot count:
-grep -E "AC_AI_PLAYERBOT_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
+grep -E "AC_PLAYERBOTS_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-compose.override.yml
 ```
 
 ---
@@ -421,13 +421,13 @@ grep -E "AC_AI_PLAYERBOT_(MIN|MAX)_RANDOM_BOTS" /opt/stacks/azerothcore/docker-c
 ## Troubleshooting Playerbots
 
 **Bots don't respond to commands:**
-- Check `AiPlayerbot.Enabled = 1` is set
+- Check `Playerbots.Enabled = 1` is set
 - Module must be compiled (check `.playerbots bot list`)
 - EnUS DBC files required server-side
 
 **Bots stuck at level 1:**
 - Let server run a full cycle (check update intervals in playerbots.conf)
-- Check `AiPlayerbot.RandomBotAutologin = 1`
+- Check `Playerbots.RandomBotAutologin = 1`
 - Check server logs for SQL or pathfinding errors
 
 **Server becomes laggy with bots:**

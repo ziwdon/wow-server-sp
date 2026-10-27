@@ -782,6 +782,7 @@ pre.logview {
 .badge-prerestore { background: #63482d; }
 .badge-preclear { background: #6a2d2d; }
 .badge-preupgrade { background: #4a2d63; }
+.badge-prerollback { background: #2d5a63; }
 .badge-available { background: #3a5a3a; }
 .backups-disclaimer {
   font-size: 0.8rem; color: var(--text-muted);

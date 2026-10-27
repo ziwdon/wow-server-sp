@@ -17,6 +17,7 @@ DATABASES=(
 )
 YES=false
 ALLOW_VERSION_MISMATCH=false
+KEEP_ARCHIVE_REALMLIST=false
 ARCHIVE=""
 STOP_TIMEOUT_SECONDS="${RESTORE_STOP_TIMEOUT_SECONDS:-60}"
 STOP_POLL_SECONDS="${RESTORE_STOP_POLL_SECONDS:-2}"
@@ -32,11 +33,14 @@ fi
 usage() {
     cat <<USAGE
 Usage: ./scripts/restore-azerothcore.sh <archive.tar.gz> [--stack-dir DIR] [--yes] [--allow-version-mismatch]
+                                        [--keep-archive-realmlist]
 
 Options:
   --stack-dir DIR           AzerothCore stack directory (default: /opt/stacks/azerothcore)
   --yes                     Do not prompt for confirmation
   --allow-version-mismatch  Restore even if the archive's source revisions differ from this stack's
+  --keep-archive-realmlist  Keep the archive's realmlist address instead of re-applying this
+                            stack's current one (same-machine rollback; used by upgrade-azerothcore.sh)
   -h, --help                Show this help
 
 Run against a freshly reinstalled stack as your normal user, not with sudo.
@@ -62,6 +66,10 @@ while [ $# -gt 0 ]; do
             ;;
         --allow-version-mismatch)
             ALLOW_VERSION_MISMATCH=true
+            shift
+            ;;
+        --keep-archive-realmlist)
+            KEEP_ARCHIVE_REALMLIST=true
             shift
             ;;
         -h|--help)
@@ -532,16 +540,23 @@ if [ "$YES" != true ]; then
     fi
 fi
 
-if ! fresh_realmlist="$(
-    docker exec "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" -N -B \
-        -e "SELECT address FROM acore_auth.realmlist LIMIT 1;" | head -n1
-)"; then
-    echo "ERROR: Unable to read fresh realmlist address from ${DB_CONTAINER}." >&2
-    exit 1
-fi
-if [ -z "$fresh_realmlist" ]; then
-    echo "ERROR: Fresh realmlist address is empty; aborting before restore." >&2
-    exit 1
+fresh_realmlist=""
+if [ "$KEEP_ARCHIVE_REALMLIST" = true ]; then
+    # Same machine, same network: the archive's realmlist is the right one. A
+    # re-run after the databases were dropped has no fresh one to read anyway.
+    log "Keeping the archive's realmlist address (--keep-archive-realmlist)."
+else
+    if ! fresh_realmlist="$(
+        docker exec "${DB_CONTAINER}" mysql -uroot -p"${DOCKER_DB_ROOT_PASSWORD}" -N -B \
+            -e "SELECT address FROM acore_auth.realmlist LIMIT 1;" | head -n1
+    )"; then
+        echo "ERROR: Unable to read fresh realmlist address from ${DB_CONTAINER}." >&2
+        exit 1
+    fi
+    if [ -z "$fresh_realmlist" ]; then
+        echo "ERROR: Fresh realmlist address is empty; aborting before restore." >&2
+        exit 1
+    fi
 fi
 
 stop_worldserver_for_restore

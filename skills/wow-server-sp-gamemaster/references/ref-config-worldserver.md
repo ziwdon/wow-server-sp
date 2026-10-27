@@ -25,14 +25,16 @@ AzerothCore converts config keys to env var names by:
 **Examples:**
 | Config Key | Env Var |
 |-----------|---------|
-| `AiPlayerbot.Enabled` | `AC_AI_PLAYERBOT_ENABLED` |
-| `AiPlayerbot.MinRandomBots` | `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` |
+| `Playerbots.Enabled` | `AC_PLAYERBOTS_ENABLED` |
+| `Playerbots.MinRandomBots` | `AC_PLAYERBOTS_MIN_RANDOM_BOTS` |
 | `MapUpdate.Threads` | `AC_MAP_UPDATE_THREADS` |
 | `SkillGain.Crafting` | `AC_SKILL_GAIN_CRAFTING` |
 | `Respawn.DynamicRateGameObject` | `AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT` |
 | `GM.InGMList.Level` | `AC_GM_IN_GMLIST_LEVEL` |
 
-**Unknown env vars are silently ignored** — always verify the key exists in the relevant `.conf.dist` under `docs/configs/`.
+**Unknown env vars are silently ignored** — always verify the key exists in the relevant `.conf.dist`: the pinned checkout's copy (`/opt/stacks/azerothcore/modules/mod-playerbots/conf/playerbots.conf.dist`, `…/src/server/apps/worldserver/worldserver.conf.dist`, …) is authoritative; the `docs/configs/` copies go stale at every upstream bump.
+
+**Playerbots rename (mod-playerbots #2854).** Every `AiPlayerbot.X` key became `Playerbots.X` (suffix unchanged, no fallback), so every `AC_AI_PLAYERBOT_X` became `AC_PLAYERBOTS_X`. A stack still on the old names runs its bots on defaults — the old env vars and old `playerbots.conf` keys are silently ignored. `scripts/migrate-ac-env.sh` converts both Compose overlays in place; the verifier fails on leftovers (Check 11's legacy-key test, Check 23 for `docker-compose.admin.yml`, Check 25 for `Missing property` this boot).
 
 ### Checking if an env var is loaded
 
@@ -41,7 +43,7 @@ AzerothCore converts config keys to env var names by:
 docker exec ac-worldserver env | grep AC_
 
 # Check a specific key:
-docker exec ac-worldserver env | grep AC_AI_PLAYERBOT
+docker exec ac-worldserver env | grep AC_PLAYERBOTS
 ```
 
 ## Where to Edit Config
@@ -140,7 +142,7 @@ The installer creates this file in Phase 2.5 with a heredoc. It contains:
 - All prompt-substituted values (playerbot count, map threads, PvP, XP rates)
 - Only managed env vars (unknown keys are silently dropped by AC)
 
-**Never edit this file to add env vars that don't map to real AC config keys.** Verify new keys in `docs/configs/*.conf.dist`.
+**Never edit this file to add env vars that don't map to real AC config keys.** Verify new keys in the pinned checkout's `.conf.dist` files (`docs/configs/*.conf.dist` may be stale).
 
 ## docker-compose.admin.yml
 

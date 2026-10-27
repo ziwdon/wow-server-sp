@@ -50,7 +50,12 @@ printf 'docker %s\\n' "$*" >> "${VERIFY_CALL_LOG:-/dev/null}"
 case "$1" in
   inspect)
     case "$*" in *ExitCode*) echo 0 ;; *StartedAt*) echo 2026-07-12T00:00:00Z ;; *) echo running ;; esac ;;
-  exec) case "$*" in *localAddress*) echo "${FAKE_REALM_LOCAL:-}" ;; esac; exit 0 ;;
+  exec) case "$*" in
+    *localAddress*) echo "${FAKE_REALM_LOCAL:-}" ;;
+    *data-version*) echo "INSTALLED_VERSION=${FAKE_CLIENT_DATA:-v20.0}" ;;
+    *worldserver.conf*) printf '%s\\n' "${FAKE_LOADED_CONF-Playerbots.Enabled = 1}" ;;
+  esac; exit 0 ;;
+  logs) printf '%b' "${FAKE_BOOT_LOG:-WORLD: World Initialized\\n}" ;;
   compose) exit 0 ;;
   images) exit 0 ;;
 esac
@@ -282,3 +287,39 @@ def test_verifier_without_a_repository_backup_script_says_it_cannot_compare(tmp_
     result = _run(stack, bind, lonely)
     assert "[INFO] cannot compare deployed backup.sh (no scripts/backup.sh next to the verifier)" in result.stdout
     assert "deployed backup.sh differs" not in result.stdout
+
+
+def test_legacy_playerbots_conf_keys_fail(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    (stack / "configs" / "modules" / "playerbots.conf").write_text("AiPlayerbot.Enabled = 1\n")
+    r = _run(stack, bind)
+    assert "still uses the pre-rename AiPlayerbot.* keys" in r.stdout
+
+
+def test_admin_overlay_var_without_a_loaded_key_fails(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    (stack / "docker-compose.admin.yml").write_text(
+        "services:\n  ac-worldserver:\n    environment:\n      AC_AI_PLAYERBOT_ENABLED: '1'\n")
+    r = _run(stack, bind)
+    assert "docker-compose.admin.yml sets AC_AI_PLAYERBOT_ENABLED, which no loaded config key reads" in r.stdout
+
+
+def test_missing_property_and_stale_mmaps_in_the_current_boot_fail(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    r = _run(stack, bind, FAKE_BOOT_LOG=(
+        "> Config: Missing property Playerbots.Enabled in config file\\n"
+        "mmap tile 0001 was built with generator v19, expected v20\\nWORLD: World Initialized\\n"))
+    assert "[FAIL] 1 'Missing property' warning(s) this boot" in r.stdout
+    assert "[FAIL] 1 mmap generator-version error(s) this boot" in r.stdout
+
+
+def test_client_data_version_must_match_the_pin(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    r = _run(stack, bind, FAKE_CLIENT_DATA="v19")
+    assert "client data is v19, pinned v20.0" in r.stdout
+
+
+def test_unpinned_checkouts_fail(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    r = _run(stack, bind)
+    assert "pinned 3f2969ddb0da" in r.stdout

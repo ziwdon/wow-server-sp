@@ -253,7 +253,7 @@ done
 
 # ============================================================================
 # Check 4 — acore_playerbots schema has every required table
-# AiPlayerbot.Enabled=1 alone is not enough: if the mod-playerbots updater
+# Playerbots.Enabled=1 alone is not enough: if the mod-playerbots updater
 # never ran (because AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES was 0), the
 # database exists but core tables are missing and bots silently fail to
 # persist. Mirror the install's eight-table required list.
@@ -420,14 +420,14 @@ if [ ! -f "$OVERRIDE" ]; then
     fail "docker-compose.override.yml missing at $OVERRIDE"
 else
     OVERRIDE_EXPECTED=(
-        '      AC_AI_PLAYERBOT_ENABLED: "1"'
-        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"'
+        '      AC_PLAYERBOTS_ENABLED: "1"'
+        '      AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN: "1"'
         '      AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"'
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"'
-        '      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"'
-        '      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"'
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"'
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"'
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE: "0"'
+        '      AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER: "1"'
+        '      AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"'
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"'
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"'
         '      AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"'
         '      AC_MAP_UPDATE_INTERVAL: "10"'
         '      AC_MIN_WORLD_UPDATE_TIME: "1"'
@@ -465,18 +465,18 @@ else
 
     # Substituted lines — values come from install-time prompts, so check
     # only the shape and that MIN/MAX agree (install always writes them equal).
-    if grep -qE '^      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
-        ok "docker-compose.override.yml AC_AI_PLAYERBOT_MIN_RANDOM_BOTS is numeric"
+    if grep -qE '^      AC_PLAYERBOTS_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
+        ok "docker-compose.override.yml AC_PLAYERBOTS_MIN_RANDOM_BOTS is numeric"
     else
-        fail "docker-compose.override.yml AC_AI_PLAYERBOT_MIN_RANDOM_BOTS missing or non-numeric"
+        fail "docker-compose.override.yml AC_PLAYERBOTS_MIN_RANDOM_BOTS missing or non-numeric"
     fi
-    if grep -qE '^      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
-        ok "docker-compose.override.yml AC_AI_PLAYERBOT_MAX_RANDOM_BOTS is numeric"
+    if grep -qE '^      AC_PLAYERBOTS_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
+        ok "docker-compose.override.yml AC_PLAYERBOTS_MAX_RANDOM_BOTS is numeric"
     else
-        fail "docker-compose.override.yml AC_AI_PLAYERBOT_MAX_RANDOM_BOTS missing or non-numeric"
+        fail "docker-compose.override.yml AC_PLAYERBOTS_MAX_RANDOM_BOTS missing or non-numeric"
     fi
-    pb_min="$(grep -E '^      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
-    pb_max="$(grep -E '^      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
+    pb_min="$(grep -E '^      AC_PLAYERBOTS_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
+    pb_max="$(grep -E '^      AC_PLAYERBOTS_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
     if [ -n "$pb_min" ] && [ -n "$pb_max" ] && [ "$pb_min" = "$pb_max" ]; then
         ok "Playerbot MIN/MAX_RANDOM_BOTS agree ($pb_min)"
     elif [ -n "$pb_min" ] || [ -n "$pb_max" ]; then
@@ -598,7 +598,7 @@ fi
 
 # ============================================================================
 # Check 11 — playerbots.conf exists on the host (seeded by install Phase 3.1).
-# Content is no longer asserted; AiPlayerbot.Enabled and friends are sourced
+# Content is no longer asserted; Playerbots.Enabled and friends are sourced
 # from AC_* env vars (verified by Check 8 and Check 12).
 # ============================================================================
 PB_CONF=""
@@ -615,20 +615,28 @@ else
     fail "no playerbots.conf or mod_playerbots.conf under ${STACK_DIR}/configs/modules"
 fi
 
+# The old prefix is assembled at runtime so the static rename guard
+# (test_no_pre_rename_playerbots_names_remain) can keep forbidding the literal
+# anywhere in this file; the printed message is unchanged.
+legacy_pb_prefix="AiPlayerbot"
+if [ -n "$PB_CONF" ] && grep -qE '^[[:space:]]*A[Ii]Playerbot\.' "$PB_CONF"; then
+    fail "$PB_CONF still uses the pre-rename ${legacy_pb_prefix}.* keys (mod-playerbots reads Playerbots.* since #2854) — replace it with the new playerbots.conf.dist"
+fi
+
 # ============================================================================
 # Check 12 — managed AC_* env vars map to loaded worldserver config keys
 # ============================================================================
 managed_vars=(
-    AC_AI_PLAYERBOT_ENABLED
-    AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN
+    AC_PLAYERBOTS_ENABLED
+    AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN
     AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES
-    AC_AI_PLAYERBOT_MIN_RANDOM_BOTS
-    AC_AI_PLAYERBOT_MAX_RANDOM_BOTS
-    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE
-    AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER
-    AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE
-    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
-    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
+    AC_PLAYERBOTS_MIN_RANDOM_BOTS
+    AC_PLAYERBOTS_MAX_RANDOM_BOTS
+    AC_PLAYERBOTS_BOT_ACTIVE_ALONE
+    AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER
+    AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE
+    AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
+    AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
     AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
     AC_AUCTION_HOUSE_BOT_ENABLE_SELLER
     AC_AUCTION_HOUSE_BOT_BUYER_ENABLED
@@ -675,6 +683,10 @@ if [ "${xp_present:-0}" -eq 12 ]; then
         AC_SKILL_GAIN_DEFENSE
     )
 fi
+
+# Declared here, not inside the branch below, so Check 23 can rely on them even
+# when Check 12 could not read the loaded config / container environment.
+declare -A env_to_key=() container_env=()
 
 if ! config_content="$(docker exec -i ac-worldserver sh -c '
     cat /azerothcore/env/dist/etc/worldserver.conf 2>/dev/null
@@ -909,6 +921,93 @@ elif [ -n "$ws_age_secs" ]; then
     info "auctions_count = $auc_count (worldserver uptime ${ws_age_secs}s)"
 else
     info "auctions_count = $auc_count"
+fi
+
+# ============================================================================
+# Check 23 — every docker-compose.admin.yml AC_* var maps to a loaded key
+# (catches overlay entries orphaned by an upstream config rename)
+# ============================================================================
+ADMIN_YML="${STACK_DIR}/docker-compose.admin.yml"
+if [ -f "$ADMIN_YML" ] && [ "${#env_to_key[@]}" -gt 0 ]; then
+    admin_vars="$(grep -oE '^[[:space:]]+AC_[A-Z0-9_]+:' "$ADMIN_YML" | tr -d ' :' || true)"
+    admin_bad=0
+    for var in $admin_vars; do
+        if [ -z "${env_to_key[$var]+x}" ]; then
+            fail "docker-compose.admin.yml sets ${var}, which no loaded config key reads (renamed upstream?)"
+            admin_bad=1
+        elif [ -z "${container_env[$var]+x}" ]; then
+            fail "docker-compose.admin.yml sets ${var}, but ac-worldserver's environment lacks it (recreate the container)"
+            admin_bad=1
+        fi
+    done
+    if [ "$admin_bad" -eq 0 ]; then
+        ok "every docker-compose.admin.yml AC_* var maps to a loaded config key"
+    fi
+elif [ -f "$ADMIN_YML" ]; then
+    info "admin overlay mapping skipped (loaded config unavailable; see Check 12)"
+fi
+
+# ============================================================================
+# Check 24 — checkouts at the pinned revisions; local patches applied
+# ============================================================================
+if [ -f "${VERIFY_SCRIPT_DIR}/upstream-versions.env" ] && [ -f "${VERIFY_SCRIPT_DIR}/lib/upstream-versions.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${VERIFY_SCRIPT_DIR}/lib/upstream-versions.sh"
+    if load_upstream_versions "${VERIFY_SCRIPT_DIR}/upstream-versions.env"; then
+        while IFS='|' read -r label rel _url _branch rev <&3; do
+            head_rev="$(git -C "${STACK_DIR}/${rel}" -c safe.directory='*' rev-parse HEAD 2>/dev/null || echo unknown)"
+            if [ "$head_rev" = "$rev" ]; then
+                ok "${label} at pinned revision ${rev:0:12}"
+            else
+                fail "${label} is at ${head_rev:0:12}, pinned ${rev:0:12} (scripts/upstream-versions.env)"
+            fi
+        done 3< <(upstream_repo_specs)
+        if "${VERIFY_SCRIPT_DIR}/apply-local-patches.sh" "$STACK_DIR" --check >/dev/null 2>&1; then
+            ok "local source patches applied"
+        else
+            fail "local source patches not applied: ${VERIFY_SCRIPT_DIR}/apply-local-patches.sh ${STACK_DIR} --check"
+        fi
+    else
+        fail "scripts/upstream-versions.env is invalid"
+    fi
+fi
+
+# ============================================================================
+# Check 25 — current boot: no 'Missing property', no stale-mmap errors
+# ac-worldserver logs through Docker's json-file driver with no size limit, so
+# after days of uptime `docker logs --since` can be gigabytes. Stream it once
+# through grep and keep only the two relevant line kinds — never capture the
+# whole log in a variable. (-a: a stray non-UTF-8 byte must not turn grep's
+# output into "Binary file matches".)
+# ============================================================================
+ws_started_at="$(docker inspect -f '{{.State.StartedAt}}' ac-worldserver 2>/dev/null || true)"
+if [ -n "$ws_started_at" ]; then
+    boot_hits="$(grep -aE 'Missing property|built with generator' < <(docker logs --since "$ws_started_at" ac-worldserver 2>&1) || true)"
+    n_missing="$(grep -c 'Missing property' <<<"$boot_hits" || true)"
+    if [ "${n_missing:-0}" -eq 0 ]; then
+        ok "no 'Missing property' config warnings this boot"
+    else
+        fail "${n_missing} 'Missing property' warning(s) this boot (stale .conf or unmapped key): $(grep -o 'Missing property [^ ]*' <<<"$boot_hits" | sort -u | head -3 | tr '\n' ' ')"
+    fi
+    n_mmap="$(grep -c 'built with generator' <<<"$boot_hits" || true)"
+    if [ "${n_mmap:-0}" -eq 0 ]; then
+        ok "no mmap generator-version errors this boot"
+    else
+        fail "${n_mmap} mmap generator-version error(s) this boot (client data does not match the core)"
+    fi
+fi
+
+# ============================================================================
+# Check 26 — client data version matches the pin
+# (CLIENT_DATA_VERSION is set by Check 24's load_upstream_versions)
+# ============================================================================
+if [ -n "${CLIENT_DATA_VERSION:-}" ]; then
+    cd_ver="$(docker exec ac-worldserver sh -c 'cat /azerothcore/env/dist/data/data-version' 2>/dev/null | sed -n 's/^INSTALLED_VERSION=//p')"
+    if [ "$cd_ver" = "$CLIENT_DATA_VERSION" ]; then
+        ok "client data ${cd_ver} matches the pin"
+    else
+        fail "client data is ${cd_ver:-unknown}, pinned ${CLIENT_DATA_VERSION}"
+    fi
 fi
 
 echo ""

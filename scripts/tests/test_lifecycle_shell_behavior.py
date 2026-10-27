@@ -185,6 +185,12 @@ def _installer_through_force_fresh(tmp_path: Path) -> tuple[Path, Path, Path, Pa
     logging_call = 'start_logging_to "$LOG_FILE"\n'
     assert logging_call in source
     source = source.replace(logging_call, ': # test fixture keeps stdio attached\n', 1)
+    # The installer sources lib/upstream-versions.sh relative to itself, so the
+    # copied fixture needs the library beside it (plumbing only).
+    (tmp_path / "lib").mkdir(exist_ok=True)
+    (tmp_path / "lib" / "upstream-versions.sh").write_text(
+        (ROOT / "lib" / "upstream-versions.sh").read_text()
+    )
     script = tmp_path / "install-force-fresh.sh"; _executable(script, source)
     bindir = tmp_path / "bin"; bindir.mkdir()
     calls = tmp_path / "calls.log"
