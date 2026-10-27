@@ -3449,10 +3449,10 @@ if should_run_phase "4"; then
 
     # Wait for short-lived init containers with timeout. We deliberately avoid
     # `docker wait` here: it blocks indefinitely if the container is wedged
-    # (network stall during the ~600 MB client-data download, DB lock during
+    # (network stall during the ~1.2 GB client-data download, DB lock during
     # import). wait_for_init_container polls docker inspect and bails out with
     # a useful log dump if the wait exceeds the timeout.
-    echo "Waiting for ac-client-data-init (downloads ~600 MB; up to 30 min)..."
+    echo "Waiting for ac-client-data-init (downloads ~1.2 GB; up to 30 min)..."
     if ! wait_for_init_container ac-client-data-init 1800 "client data init"; then
         exit 1
     fi

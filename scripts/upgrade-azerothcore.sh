@@ -19,7 +19,7 @@ set -euo pipefail
 # Usage:
 #   upgrade-azerothcore.sh preflight --previous-repo-rev REV
 #   upgrade-azerothcore.sh stage
-#   upgrade-azerothcore.sh rehearse [--archive FILE]
+#   upgrade-azerothcore.sh rehearse [--archive FILE] [--pin AC_K=V]...   (the cutover's --pin set)
 #   upgrade-azerothcore.sh cutover --previous-repo-rev REV [--pin AC_K=V]... [--yes]
 #                                  [--state DIR] [--skip-rehearsal] [--allow-online-players]
 #   upgrade-azerothcore.sh rollback [--state DIR] [--yes] [--no-safety-backup]

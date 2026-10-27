@@ -257,9 +257,10 @@ transaction), and staged configs under `config/` (including the generated `etc/*
 and the admin app's `maintenance.json`/`presence.json`).
 Labels: `daily` (cron), `manual` (Backups page), `prerestore` (auto-taken before an
 in-app restore), `preclear` (auto-taken by Clear bots), `preupgrade` (rollback point
-before an upgrade). The nightly daily run prunes every archive older than 7 days
-except `preupgrade`, which is never pruned (delete those by hand once the upgrade is
-final). A missing DB or an incomplete dump fails the backup; no partial archive is written.
+before an upgrade), `prerollback` (the upgraded state, saved by an upgrade rollback
+before it restores the old one). The nightly daily run prunes every archive older
+than 7 days except `preupgrade` and `prerollback`, which are never pruned (delete
+those by hand once they are no longer needed). A missing DB or an incomplete dump fails the backup; no partial archive is written.
 
 ### Create a backup
 ```bash
