@@ -7,7 +7,7 @@ INSTALLER = (SCRIPTS_DIR / "install-azerothcore.sh").read_text()
 def test_phase7_copies_canonical_script_not_heredoc():
     # The old heredoc marker must be gone; the install script copies backup.sh.
     assert "cat > \"${STACK_DIR}/backup.sh\" <<'SCRIPT'" not in INSTALLER
-    assert 'cp "${SCRIPT_SOURCE_DIR}/backup.sh" "${STACK_DIR}/backup.sh"' in INSTALLER
+    assert 'install -m 0755 "${SCRIPT_SOURCE_DIR}/backup.sh" "${STACK_DIR}/backup.sh"' in INSTALLER
 
 
 def test_phase7_cron_line_is_argument_free():

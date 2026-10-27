@@ -65,6 +65,11 @@ esac
         assert target, f"test prerequisite missing: {command}"
         if not (bind / command).exists():
             (bind / command).symlink_to(target)
+    # Tools added for the deployed-backup.sh comparison; git may be absent.
+    for command in ("cmp", "sha256sum", "git", "dirname"):
+        target = shutil.which(command)
+        if target and not (bind / command).exists():
+            (bind / command).symlink_to(target)
     return bind
 
 
@@ -258,3 +263,12 @@ def test_lan_play_off_placeholder_allows_loopback_listener_without_realm_check(t
     assert "Port 3724 (authserver) listening only on expected scope: 100.64.0.5 127.0.0.1" in result.stdout
     assert "Realmlist localAddress" not in result.stdout
     assert "LAN IP" not in result.stdout
+
+
+def test_deployed_backup_script_must_match_the_repository(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    stale = _run(stack, bind)
+    assert "[FAIL] deployed backup.sh differs from scripts/backup.sh" in stale.stdout
+    shutil.copy(SCRIPTS_DIR / "backup.sh", stack / "backup.sh")
+    fresh = _run(stack, bind)
+    assert "[OK] deployed backup.sh matches scripts/backup.sh" in fresh.stdout

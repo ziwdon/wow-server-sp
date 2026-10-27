@@ -3989,9 +3989,9 @@ if should_run_phase "7"; then
         echo "ERROR: canonical backup.sh not found at ${SCRIPT_SOURCE_DIR}/backup.sh" >&2
         exit 1
     fi
-    cp "${SCRIPT_SOURCE_DIR}/backup.sh" "${STACK_DIR}/backup.sh"
-
-    chmod +x "${STACK_DIR}/backup.sh"
+    # install(1) unlinks the destination first, so this also replaces a copy
+    # that an earlier manual `sudo cp` left owned by root.
+    install -m 0755 "${SCRIPT_SOURCE_DIR}/backup.sh" "${STACK_DIR}/backup.sh"
 
     # Cron entry — idempotent and canonicalized. Avoid piping directly into
     # `crontab -` under `set -euo pipefail`; using temp files gives clearer
