@@ -56,7 +56,7 @@ Shows online real players with basic info.
 The Settings page allows browsing and modifying AzerothCore configuration via `AC_*` env vars.
 
 ### How it works
-1. Browse ~1874 config keys from all `.conf.dist` files
+1. Browse ~1996 config keys from all `.conf.dist` files (built from the AC source tree the server was built from, so the list matches the deployed version; falls back to `docs/configs/` if a file is missing)
 2. Filter by "Show only modified" (default) or show all
 3. Click a key to see its description, default value, current value
 4. Edit the value and add to pending changes
@@ -64,7 +64,7 @@ The Settings page allows browsing and modifying AzerothCore configuration via `A
 
 ### Filters
 - **Show only modified** (default) — shows keys with `source: admin` or `source: installer`
-- When unchecked — shows all ~1874 keys
+- When unchecked — shows all ~1996 keys
 - Pending-count badge and Apply button always reflect true pending state
 
 ### Apply Flow

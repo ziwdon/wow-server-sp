@@ -36,7 +36,7 @@ admin web app.
 
 | Topic | Reference File |
 |-------|---------------|
-| Installation script, phases, resume, fresh install, adopt | `references/ref-installation.md` |
+| Installation script, phases, resume, fresh install, adopt, pinned upstream revisions, local patches, upgrades | `references/ref-installation.md` |
 | WoW client setup, Tailscale realmlist, account creation | `references/ref-client-setup.md` |
 | GM commands (in-game or console) | `references/ref-gm-commands.md` |
 | worldserver.conf, AC_* env vars, cross-faction, rates, instances | `references/ref-config-worldserver.md` |
@@ -75,6 +75,7 @@ docker attach ac-worldserver
 ./scripts/install-azerothcore.sh --resume-from=<phase>
 # Example phases: 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 2.1–2.6, 3, 3.1, 4, pause-2, 5, 5.1, pause-3, 6.1.4, 6.1.5, 7, 8
 ```
+**Never resume from phase `1` or earlier on a live server.** Phase 1 pins the git checkouts to `scripts/upstream-versions.env` and would move the host-mounted `./modules` the running worldserver reads its DB-update SQL from. Upstream version changes on a live stack go only through `scripts/upgrade-azerothcore.sh` (see `references/ref-installation.md`).
 
 ### Key paths
 | Path | Purpose |

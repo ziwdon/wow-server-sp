@@ -53,7 +53,7 @@ FROM acore_characters.characters c
 JOIN acore_auth.account a ON a.id = c.account
 WHERE a.username LIKE 'RNDBOT%';
 -- Expected: configured_accounts × chars_per_account
--- Check configured bot count: grep AC_AI_PLAYERBOT_MIN_RANDOM_BOTS /opt/stacks/azerothcore/docker-compose.override.yml
+-- Check configured bot count: grep AC_PLAYERBOTS_MIN_RANDOM_BOTS /opt/stacks/azerothcore/docker-compose.override.yml
 ```
 
 ### Check random bots by class and level
