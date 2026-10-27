@@ -107,11 +107,11 @@ The Progression page (`/progression`) lets you advance individual characters thr
 
 ## Backups & Restore
 
-The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first.
+The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first. It refuses an archive taken on different AzerothCore/module source revisions than the running server (or one whose revisions are unknown); cross-version restores are host-only (`scripts/restore-azerothcore.sh`).
 
-Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers daily, manual, and prerestore archives. To keep a backup longer, copy the archive off the server from `/opt/stacks/azerothcore/backups/`.
+Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers every label (daily, manual, prerestore, preclear) except `preupgrade`, which is never pruned (finalize the upgrade, then delete those archives by hand). To keep a backup longer, copy the archive off the server from `/opt/stacks/azerothcore/backups/`.
 
-For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: reinstall AzerothCore first, copy the chosen archive to the new host, then run `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz`.
+For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: reinstall AzerothCore first, copy the chosen archive to the new host, then run `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz`. The script refuses an archive whose manifest `git_revisions` differ from the stack's checkouts: check out those revisions and rebuild first, or pass `--allow-version-mismatch` knowingly.
 
 ### Blocked Keys
 `AuctionHouseBot.GUIDs` is blocked — it's installer-managed and cannot be set via the admin UI.
@@ -144,15 +144,15 @@ For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: r
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime vars (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
-| `/opt/stacks/azerothcore/backups/` | Consolidated daily, manual, and prerestore backup archives |
+| `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade) |
 
 ## Backup Format
 
 Admin-created backups and nightly cron backups use the same single-archive format:
 - `azerothcore-backup-<label>-<stamp>.tar.gz` — consolidated archive
-- `manifest.json` — format version, label, database list, git revisions, image tag
-- `sql/*.sql` — mysqldump output for each backed-up database
-- `config/` — staged config files included for restore/DR workflows
+- `manifest.json` — format version, label, database list, git revisions, image tag, image IDs, `client_data_version`, `backup_script_sha256`
+- `sql/azerothcore.sql` — one mysqldump transaction covering all four databases
+- `config/` — staged config files included for restore/DR workflows: `.env`, the compose overlays, `configs/`, the generated `etc/*.conf` from `env/dist/etc/`, and `admin-data/{maintenance,presence}.json`
 
 ## Viewing Admin Logs
 

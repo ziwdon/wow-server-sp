@@ -54,12 +54,13 @@ can remove, stop, restart, or reconfigure services:
 shellcheck scripts/*.sh wow-server-sp-admin/scripts/*.sh
 ```
 
-Root shell-script test suite (157 tests, sandboxed — no Docker socket, no `/opt/stacks` mount):
+Root shell-script test suite (186 tests, sandboxed — no Docker socket, no `/opt/stacks` mount):
 
 ```bash
 docker run --rm -v "$(pwd):/repo:ro" -w /repo python:3.12-slim bash -c \
     "test ! -S /var/run/docker.sock && test ! -e /opt/stacks/azerothcore && \
-     pip install pytest -q && python -m pytest -q scripts/tests/"
+     apt-get -qq update >/dev/null && apt-get -qq install -y git >/dev/null && \
+     pip install pytest -q && python -m pytest -q -p no:cacheprovider scripts/tests/"
 ```
 
 Admin Python tests run under Docker (no local venv):
@@ -69,6 +70,8 @@ docker run --rm -v "$(pwd)/wow-server-sp-admin:/src:ro" -w /src python:3.12-slim
     "test ! -S /var/run/docker.sock && test ! -e /opt/stacks/azerothcore && \
      pip install -r requirements-dev.txt -q && python -m pytest -q"
 ```
+
+The admin sandbox has no `git`, so the two real-git revision-lookup tests in `tests/test_restore_action.py` skip there; add `apt-get -qq update && apt-get -qq install -y git` to the command (or a long-lived sandbox) to run them.
 
 For an iterative TDD loop, start one long-lived sandbox (`docker run -d --name <x> -v "$(pwd)/wow-server-sp-admin:/src:ro" -w /src python:3.12-slim sleep infinity`, `pip install` once, then `docker exec <x> python -m pytest -q -p no:cacheprovider …`) instead of re-installing per run; `-p no:cacheprovider` silences the read-only-mount cache warnings. For a visual check of a template change, run uvicorn + `playwright` (`pip install playwright && playwright install --with-deps chromium`) inside a second sandbox container with the port published on `127.0.0.1` only, `init_state()` pointed at `/tmp` fixtures, and screenshot at 1400px and 390px. Neither container may mount `/var/run/docker.sock` or `/opt/stacks`; `docker rm -f` both when done and re-check `docker ps` for the `ac-*`/`azerothcore-admin` containers.
 
@@ -93,6 +96,7 @@ chmod +x scripts/*.sh
 
 ./scripts/verify-azerothcore.sh                      # post-install verification (0=pass, 1=fail)
 ./scripts/redeploy-azerothcore.sh                    # recompile + redeploy ONLY ac-worldserver after a source/module edit (preserves .env/override.yml/admin.yml/DBs)
+./scripts/restore-drill.sh ARCHIVE [--compare-live]  # prove an archive restores, in an isolated throwaway MySQL container (starts a container on the host daemon)
 ./scripts/uninstall-azerothcore.sh --dry-run         # preview cleanup
 ./scripts/uninstall-azerothcore.sh                   # full teardown
 ./scripts/uninstall-azerothcore.sh --yes             # skip confirmation
@@ -145,7 +149,7 @@ Paths are under the two stack roots `/opt/stacks/azerothcore/` (AC) and `/opt/st
 | `azerothcore/logs/Server.log` | Worldserver boot/init log — chatty at startup then mostly silent; goes quiet after `World Initialized` (normal). Runtime traffic → `Playerbots.log` + `docker logs ac-worldserver`. Benign init noise (see below) |
 | `azerothcore/logs/Playerbots.log` | mod-playerbots action log (chatty; benign "FAILED" retries + periodic `Random Bots Stats:` block — see below) |
 | `docker logs ac-worldserver` | Live worldserver stdout; authoritative for the periodic `Random Bots Stats:`/`Bots status:` block (not in `Server.log`) |
-| `azerothcore/backups/` | Consolidated `azerothcore-backup-<label>-<stamp>.tar.gz` (daily cron, manual, pre-restore) |
+| `azerothcore/backups/` | Consolidated `azerothcore-backup-<label>-<stamp>.tar.gz` (daily cron, manual, pre-restore, pre-clear, pre-upgrade) |
 | `~/.azerothcore-install-state` | Phase checkpoint |
 | `~/.azerothcore-install-config` | Persisted prompt answers (shredded on success) |
 | `azerothcore/docker-compose.admin.yml` | Admin-authored Compose overlay (LAST precedence, after `override.yml`). Created empty by the admin installer; populated only via admin UI Apply. AC installer never touches it |
@@ -239,13 +243,19 @@ Invariants of `wow-server-sp-admin/` to know before touching admin code — or b
 
 **Admin console attach must use a raw PTY, not `subprocess.PIPE`.** The worldserver container has `Tty=true`/`OpenStdin=true`; from the non-interactive admin container, `docker attach` with a pipe dies (`cannot attach stdin to a TTY-enabled container …`), breaking Restart and Apply. `wow-server-sp-admin/app/services/console.py` opens a PTY, sets the slave raw, passes the slave FD as Docker's stdin, writes commands + `\x10\x11` via the master, waits for Docker to consume the detach, then closes. On clean raw-mode detach Docker may exit 1 with stderr `read escape sequence` — that's the detach ack, not a failure.
 
-**Backup architecture is one shared script.** `scripts/backup.sh` is canonical. Phase 7 copies it to `/opt/stacks/azerothcore/backup.sh` for host cron; admin install/redeploy bundle the same file as `/app/scripts/backup.sh` with `STACK_DIR=/ac`. It produces one consolidated `azerothcore-backup-<label>-<stamp>.tar.gz` (manifest.json + SQL dumps + staged configs). No `backup_runner.py`, no per-DB/config-tarball multi-file format.
+**Backup architecture is one shared script.** `scripts/backup.sh` is canonical. Phase 7 deploys it to `/opt/stacks/azerothcore/backup.sh` for host cron with `install -m 0755` (it unlinks the destination first, so it also replaces a root-owned copy left by a manual `sudo cp`); `verify-azerothcore.sh` Check 15 `cmp`s the deployed copy against `scripts/backup.sh` and FAILs on drift (INFO "cannot compare" when no `backup.sh` sits next to the verifier). Admin install/redeploy bundle the same file as `/app/scripts/backup.sh` with `STACK_DIR=/ac`. It produces one consolidated `azerothcore-backup-<label>-<stamp>.tar.gz`: `manifest.json` + `sql/azerothcore.sql` (one `mysqldump` transaction spanning all four DBs) + staged `config/` (`.env`, both compose overlays, `configs/`, the generated `etc/*.conf` from `env/dist/etc/`, and `admin-data/{maintenance,presence}.json`). The v2 manifest records `git_revisions` (core + 3 modules), `ac_image`, `images` (worldserver/authserver/db-import/client-data image IDs), `client_data_version` (first line, `A-Za-z0-9._-` only, since it is interpolated into the JSON) and `backup_script_sha256` (`unknown` if hashing fails — never fatal). `ADMIN_DATA_DIR` defaults to `$(dirname "$STACK_DIR")/azerothcore-admin/data` in both `backup.sh` and `restore-azerothcore.sh` (the admin container sets `/admin-data` explicitly), so a sandboxed stack dir never reaches live admin data; both scripts log what they captured/skipped when a dir is absent. No `backup_runner.py`, no per-DB/config-tarball multi-file format.
 
 **`${STACK_DIR}/backups/.backup.lock` is one shared cross-process lock**, non-blocking `flock`. Three call sites hold it: `backup.sh` itself, host `restore-azerothcore.sh`, and the admin's in-app restore (`actions.py`'s `_backup_mutation_lock`). The admin acquires it only *after* its own pre-restore safety backup completes — that safety backup shells out to `backup.sh`, which takes/releases the same lock itself, so acquiring earlier would self-deadlock. Contention → busy failure, no mutation, not a wait.
 
 **Admin redeploy uses its own `${STACK_DIR}/.redeploy.lock`** (non-blocking `flock`, disjoint from `.backup.lock`) and only promotes the built candidate to `azerothcore-admin:local` — the tag the installed systemd unit and future `docker compose` recreation actually use — after the candidate's health check and full verifier both succeed. Don't add a step that promotes earlier or skips the lock.
 
-**Backups are daily-cron, manual, and pre-restore only.** Stop/Restart/Apply take no backup. Manual archives use label `manual`; in-app Restore first takes a `prerestore` archive; nightly cron runs `daily` mode. Pruning is 7 days, owned by `backup.sh` daily mode (deletes old archives of every label plus old legacy artifacts). A missing DB is never a successful backup: if at least one dump succeeds, write a `-partial-` archive, exit 1, and skip pruning; if every DB is unavailable, write no archive and exit 1.
+**Backup labels, pruning, and failure.** Labels: `daily` (nightly cron), `manual`, `prerestore` (in-app Restore's safety archive), `preclear` (Clear bots), `preupgrade`. Stop/Restart/Apply take no backup. Pruning is 7 days, owned by `backup.sh` daily mode: it deletes archives of every label **except `preupgrade`** plus old legacy artifacts. `preupgrade` archives are rollback points and are never pruned — finalize the upgrade, then delete them by hand. A missing DB or a bad dump is never a successful backup: `backup.sh` probes all four DBs first, then validates the single dump (four canonical `-- Current Database` sections in order, `-- Dump completed` footer); any failure exits non-zero without publishing an archive or pruning, leaving existing archives untouched. v2 writes no `-partial-` archive, and both restore paths reject a manifest with `skipped_databases`.
+
+**Restore refuses other source revisions.** A dump restores safely only onto binaries built from the revisions that wrote it (newer ones re-run migrations against it, older ones cannot read a migrated schema). Host `restore-azerothcore.sh` compares the manifest's `git_revisions` (core + 3 modules) with each checkout's `HEAD` before anything is stopped or dropped. A checkout with no `.git` of its own (git would walk up to a parent repo) or a failing lookup counts as `unknown`, and `unknown` on either side fails closed. `--allow-version-mismatch` overrides it with a WARNING; for fresh-machine DR, check out the archive's revisions and rebuild first, or pass the flag knowingly. In-app restore (`actions.revision_mismatch` / `current_stack_revisions`) applies the same rule with no override: cross-version restores are host-only. The core/module dir mapping is duplicated in `restore-azerothcore.sh` (`dirs`), `actions.py` (`REVISION_DIRS`) and `backup.sh` (`git_rev` calls) — keep them in sync. The host restore also writes back `config/etc/*.conf` and `config/admin-data/*`.
+
+**`scripts/restore-drill.sh ARCHIVE [--compare-live]` proves an archive restores without touching the live stack.** It streams the archive's SQL over stdin into a throwaway `acup-drill-db` MySQL container (resource-capped; `--network none` or an `--internal` network; no published ports or bind mounts — it fails closed and removes the container if `docker inspect` shows otherwise; names must start with `acup-`), then checks the table inventory against the dump's own `CREATE TABLE` counts, the `-- Dump completed` footer on every SQL member, and that key tables are non-empty. `--compare-live` also reads exact `COUNT(*)`s from `ac-database` through a `READ ONLY` session using identifier-filtered table names; differences are advisory and a table absent live is reported `live=missing`. The container (and, in `--keep` rehearsal mode, its password file) is removed on every exit path except a passed `--keep` run. It starts a container on the host daemon, so run it only when the user asks (see the live-stack safety rules); tests drive it with a stub-only `PATH`.
+
+**Never pipe `docker logs` (or a captured log) into `grep -q` under `pipefail`.** `grep -q` exits at the first match, the writer dies of SIGPIPE (141) once the log is long, and `pipefail` turns a real match into "no match" — readiness waits, the playerbots fatal-log check and the startup binding-log lookup all had this. Use `grep -q … < <(docker logs …)` or a here-string (`grep -qF … <<<"$log_content"`). `test_lifecycle_shell_behavior.py` has a static test over `scripts/*.sh` plus long-log tests whose docker stub `exec`s `cat`, so the stub itself takes the SIGPIPE as real `docker logs` does.
 
 **Restore validates before it becomes destructive.** Both restore paths preflight every selected SQL dump (present, non-empty, completed) before stopping the server or dropping a database. For in-app restore, an import failure after the `prerestore` safety archive leaves the server stopped and reports that archive; do not auto-restore or restart into an uncertain state.
 
