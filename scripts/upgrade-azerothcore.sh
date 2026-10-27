@@ -222,7 +222,7 @@ volume_copy_facts() {
         cat /d/data-version 2>/dev/null; echo
         if [ -f /d/.acup-complete ]; then sed "s/^/MARKER_/" /d/.acup-complete; fi
         echo "TREE_FILES=$(find /d -mindepth 1 ! -path /d/.acup-complete | wc -l)"
-        echo "TREE_BYTES=$(find /d -type f ! -path /d/.acup-complete -printf "%s\n" | awk "{s+=\$1} END {print s+0}")"'
+        echo "TREE_BYTES=$(find /d -type f ! -path /d/.acup-complete -printf "%s\n" | awk "{s+=\$1} END {printf \"%.0f\\n\", s}")"'
 }
 
 # COPY_WITH_MARKER_CMD — container command for `-v SRC:/src:ro -v DST:/dst`:
@@ -233,8 +233,15 @@ volume_copy_facts() {
 {
     COPY_WITH_MARKER_CMD='find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
     COPY_WITH_MARKER_CMD+=' && files=$(find /src -mindepth 1 ! -path /src/.acup-complete | wc -l)'
-    COPY_WITH_MARKER_CMD+=' && bytes=$(find /src -type f ! -path /src/.acup-complete -printf "%s\n" | awk "{s+=\$1} END {print s+0}")'
+    COPY_WITH_MARKER_CMD+=' && bytes=$(find /src -type f ! -path /src/.acup-complete -printf "%s\n" | awk "{s+=\$1} END {printf \"%.0f\\n\", s}")'
     COPY_WITH_MARKER_CMD+=' && printf "FILES=%s\nBYTES=%s\n" "$files" "$bytes" > /dst/.acup-complete'
+}
+
+# is_exact_integer VALUE — true for digits only. A byte total in a copy marker
+# is compared as a string, so a rounded one (an older script's awk printed
+# BYTES=3.23188e+09 through %.6g) must never count as a number to match.
+is_exact_integer() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
 }
 
 # rollback_copy_problem VOLUME VERSION IMAGE [LIVE_VOLUME] — print why VOLUME
@@ -256,6 +263,9 @@ rollback_copy_problem() {
     fi
     if [ -z "$mf" ] || [ -z "$mb" ]; then
         echo "$vol has no completion marker (.acup-complete): its copy never finished"; return 1
+    fi
+    if ! is_exact_integer "$mb"; then
+        echo "$vol has a completion marker with an inexact byte total (BYTES=$mb, written by an older version of this script): its copy cannot be verified"; return 1
     fi
     if [ "$tf $tb" != "$mf $mb" ]; then
         echo "$vol holds ${tf:-?} entries / ${tb:-?} bytes but its completion marker says $mf / $mb"; return 1
@@ -282,7 +292,7 @@ restored_client_data_problem() {
     if [ -z "$want" ] || [ "$found" != "$want" ]; then
         echo "$live holds '${found:-no data-version}', not the pre-upgrade version '${want:-unknown}'"; return 1
     fi
-    if [ -z "$mf" ] || [ -z "$mb" ] || [ "$lf $lb" != "$mf $mb" ]; then
+    if [ -z "$mf" ] || ! is_exact_integer "$mb" || [ "$lf $lb" != "$mf $mb" ]; then
         echo "$live holds ${lf:-?} entries / ${lb:-?} bytes but the completion marker of $copy says ${mf:-?} / ${mb:-?}"; return 1
     fi
 }

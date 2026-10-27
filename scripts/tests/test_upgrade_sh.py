@@ -2023,3 +2023,60 @@ def test_g5_the_admin_step_says_a_stray_admin_container_stays_stopped(tmp_path):
     assert "nothing to redeploy" in r.stdout and "left stopped" in r.stdout
     calls = _calls(tmp_path)
     assert "docker start azerothcore-admin" not in calls and "admin-redeploy" not in calls
+
+
+# D4 fix: exact byte totals in the client-data copy marker -----------------------
+
+def _awk_sum_programs() -> list[str]:
+    """Every awk byte-sum word in upgrade-azerothcore.sh, exactly as the
+    container's shell receives it: the double-quoted `awk "..."` argument."""
+    text = (SCRIPTS_DIR / "upgrade-azerothcore.sh").read_text()
+    return [word for word in re.findall(r'awk ("(?:\\.|[^"\\])*")', text) if "s+=" in word]
+
+
+def test_d4_the_script_has_the_two_byte_sum_programs():
+    # The tree probe and the copy marker; a third sum added later must be covered below too.
+    assert len(_awk_sum_programs()) == 2, _awk_sum_programs()
+
+
+@pytest.mark.parametrize("sizes, total", [
+    (["1500000000", "1731879999", "124"], "3231880123"),  # the real client data: mawk printed 3.23188e+09
+    (["20000000000000000000"], "20000000000000000000"),   # past 2^64 even this sandbox's newer mawk prints %.6g
+    (["4096", "0", "7"], "4103"),
+    ([], "0"),
+])
+def test_d4_the_awk_byte_sum_prints_an_exact_integer(sizes, total):
+    # The client-data image's mawk prints sums above 2^31 through OFMT (%.6g); the
+    # marker and the tree sum are compared as strings, so every byte must show.
+    assert shutil.which("awk"), "awk is required"
+    for word in _awk_sum_programs():
+        r = subprocess.run(["sh", "-c", f"awk {word}"], input="".join(f"{s}\n" for s in sizes),
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == f"{total}\n", (word, r.stdout)
+
+
+def test_d4_stage_recopies_a_rollback_volume_whose_marker_bytes_are_not_an_exact_integer(tmp_path):
+    # A marker written by the old code (BYTES=3.23188e+09) cannot vouch for a copy,
+    # even when the tree probe prints the same rounded figure.
+    tools, stack, bind, staging = _stage_fixture(tmp_path)
+    real = bind / "docker-stub"
+    (bind / "docker").rename(real)
+    rollback, live = _key(ROLLBACK_VOL), _key(LIVE_VOL)
+    # Once the copy ran, the fixed probe reports exact totals for both volumes.
+    _executable(bind / "docker", "#!/bin/bash\n"
+                f'if grep -qx {ROLLBACK_VOL} "$UPGRADE_CALLS.copied" 2>/dev/null; then\n'
+                f'    export FAKE_TREE_{rollback}="100 3231880123" FAKE_TREE_{live}="100 3231880123"\n'
+                f'fi\nexec "{real}" "$@"\n')
+    r = _run(tmp_path, tools, stack, bind, "stage", **{
+        f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0",
+        f"FAKE_MARKER_{rollback}": "100 3.23188e+09", f"FAKE_TREE_{rollback}": "100 3.23188e+09",
+        f"FAKE_TREE_{live}": "100 3.23188e+09"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    copies = [line for line in _calls(tmp_path).splitlines() if f"-v {ROLLBACK_VOL}:/dst " in line]
+    assert len(copies) == 1, copies
+    assert f"-v {LIVE_VOL}:/src:ro" in copies[0]
+    assert "find /dst -mindepth 1 -delete" in copies[0] and ".acup-complete" in copies[0]
+    assert "differ" not in r.stderr and "3.23188e+09" in r.stdout + r.stderr  # the log says why it copies
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    assert f"CLIENT_DATA_ROLLBACK_VOLUME={ROLLBACK_VOL}" in (staging.parent / f"stage-{core12}.env").read_text()
