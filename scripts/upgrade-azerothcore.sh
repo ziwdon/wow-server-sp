@@ -45,12 +45,15 @@ STOP_TIMEOUT="${STOP_TIMEOUT:-120}"
 WORLD_INIT_TIMEOUT="${WORLD_INIT_TIMEOUT:-1800}"
 REHEARSAL_BOTS="${REHEARSAL_BOTS:-50}"
 MIN_FREE_GB="${MIN_FREE_GB:-30}"
-MIN_REHEARSAL_MEM_GB="${MIN_REHEARSAL_MEM_GB:-5}"
+# Rehearsal containers are capped at 5g (worldserver) + 1536m (drill DB); the
+# gate covers both so a rehearsal cannot push the live host into swap/OOM.
+MIN_REHEARSAL_MEM_GB="${MIN_REHEARSAL_MEM_GB:-7}"
 IMAGES=(worldserver authserver db-import client-data)
 BUILD_SERVICES=(ac-worldserver ac-authserver ac-db-import ac-client-data-init)
 MODULE_CONFS=("mod-playerbots:playerbots" "mod-individual-progression:individualProgression" "mod-ah-bot-plus:mod_ahbot")
 ETC_CONFS=(worldserver authserver dbimport)
 REHEARSAL_NET="acup-rehearsal-net"
+CLIENT_DATA_FACTS=(CLIENT_DATA_LIVE CLIENT_DATA_TARGET CLIENT_DATA_ROLLBACK_VOLUME CLIENT_DATA_TARGET_VOLUME)
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/upstream-versions.sh"
@@ -203,6 +206,22 @@ state_get() {
 }
 step_done() { [ "$(state_get "STEP_$1")" = 1 ]; }
 mark_done() { state_set "STEP_$1" 1; }
+# Started markers (CLIENT_DATA_SWITCH_STARTED, IMAGES_SWITCH_STARTED,
+# BOOT_STARTED, ADMIN_STEP_STARTED) are written immediately BEFORE a step's
+# first mutation, so rollback knows what may have changed even when the step
+# died before its STEP_ marker.
+mark_started() { state_set "$1" 1; }
+started() { [ "$(state_get "$1")" = 1 ]; }
+
+# cutover_fact KEY — a staging fact recorded in the cutover state (the staging
+# file itself during a dry run, which records no state).
+cutover_fact() {
+    if [ "$DRY_RUN" = true ] && [ ! -f "$STATE_DIR/state.env" ]; then
+        stage_get "$1"
+    else
+        state_get "$1"
+    fi
+}
 
 resolve_state_dir() {
     if [ -z "$STATE_DIR" ]; then
@@ -215,6 +234,37 @@ resolve_state_dir() {
 ensure_root() {
     run mkdir -p "$UPGRADE_ROOT"
     run chmod 700 "$UPGRADE_ROOT"
+}
+
+# take_lock — one state-changing run at a time: a rollback racing a resumed
+# cutover would restore the databases under a booting worldserver.
+take_lock() {
+    [ "$DRY_RUN" = true ] && return 0
+    ensure_root
+    exec 9>>"$UPGRADE_ROOT/.lock"
+    flock -n 9 || die "another upgrade-azerothcore.sh run holds $UPGRADE_ROOT/.lock"
+}
+
+# refuse_rolled_back — a rolled-back cutover is closed: resuming it would boot a
+# half-switched stack, rolling it back again would restore the pre-upgrade dump
+# over everything played since the first rollback.
+refuse_rolled_back() {
+    if [ "$(state_get ROLLED_BACK)" = 1 ]; then
+        die "the upgrade in $STATE_DIR was already rolled back; start a new cutover (without --state) to upgrade again"
+    fi
+}
+
+# cutover_exit_hint — on any failed exit after the state exists, say how to go on.
+cutover_exit_hint() {
+    local rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    [ -n "$STATE_DIR" ] && [ -f "$STATE_DIR/state.env" ] || return 0
+    {
+        echo ""
+        echo "Cutover stopped (exit $rc); the server may be down. State: $STATE_DIR"
+        echo "  Fix the cause, then resume:  $0 cutover --state $STATE_DIR"
+        echo "  Or return to the old version: $0 rollback --state $STATE_DIR"
+    } >&2
 }
 
 # module_conf_matches_dist_except_guids CONF DIST — mod_ahbot.conf may only
@@ -671,12 +721,22 @@ refresh_module_confs() {
 
 # ---------------------------------------------------------------- cutover ---
 cmd_cutover() {
-    local ts src label rel url branch rev svc vol scale admin_was_running archive
+    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state
     load_versions
     if [ -n "$STATE_DIR" ]; then
         resolve_state_dir
+        refuse_rolled_back
+        if [ "$(state_get CANDIDATE_TAG)" != "$CANDIDATE_TAG" ]; then
+            die "pinned versions changed since this cutover started ($(state_get CANDIDATE_TAG) -> ${CANDIDATE_TAG}); resume with the tooling revision it started with"
+        fi
         log "Resuming cutover in $STATE_DIR"
     else
+        if [ -L "$UPGRADE_ROOT/current" ]; then
+            previous_state="$(readlink -f "$UPGRADE_ROOT/current")"
+            if [ -f "$previous_state/state.env" ] && ! grep -qxE '(CUTOVER_OK|ROLLED_BACK)=1' "$previous_state/state.env"; then
+                die "the cutover in $previous_state is incomplete; resume it ($0 cutover --state $previous_state) or roll it back ($0 rollback --state $previous_state)"
+            fi
+        fi
         preflight_checks cutover || die "preflight failed; nothing was changed"
         require_stage
         if [ "$SKIP_REHEARSAL" != true ]; then
@@ -699,8 +759,14 @@ cmd_cutover() {
         while IFS='|' read -r label rel url branch rev; do
             state_set "OLD_REV_${label//-/_}" "$(git -C "$STACK_DIR/$rel" rev-parse HEAD)"
         done < <(upstream_repo_specs)
+        # Rollback and finalize read these from the state, never from the
+        # staging file (a later 'stage' may rewrite or remove it).
+        for key in "${CLIENT_DATA_FACTS[@]}"; do
+            state_set "$key" "$(stage_get "$key")"
+        done
         run ln -sfn "$STATE_DIR" "$UPGRADE_ROOT/current"
     fi
+    trap cutover_exit_hint EXIT
     ts="$(state_get TS)"; ts="${ts:-dry-run}"
     src="$(staging_src)"
 
@@ -714,14 +780,15 @@ cmd_cutover() {
     fi
 
     if ! step_done stop; then
-        admin_was_running=false
-        [ "$(container_status azerothcore-admin)" = running ] && admin_was_running=true
-        state_set ADMIN_WAS_RUNNING "$admin_was_running"
-        state_set ADMIN_IMAGE_ID "$(image_id azerothcore-admin:local)"
+        # First attempt only: a resumed stop step finds the admin already stopped.
+        if [ -z "$(state_get ADMIN_WAS_RUNNING)" ]; then
+            state_set ADMIN_WAS_RUNNING "$([ "$(container_status azerothcore-admin)" = running ] && echo true || echo false)"
+            state_set ADMIN_IMAGE_ID "$(image_id azerothcore-admin:local)"
+        fi
         run docker tag azerothcore-admin:local "azerothcore-admin:preupgrade-$ts"
         run cp -p "$ADMIN_STACK_DIR/docker-compose.yml" "$STATE_DIR/admin-stack/docker-compose.yml"
         log "Stopping the admin app (no scheduled jobs or console writes during cutover)"
-        if [ "$admin_was_running" = true ]; then run docker stop azerothcore-admin; fi
+        if [ "$(container_status azerothcore-admin)" = running ]; then run docker stop azerothcore-admin; fi
         log "Graceful worldserver stop (up to ${STOP_TIMEOUT}s for saveall), then authserver"
         run compose stop -t "$STOP_TIMEOUT" ac-worldserver
         run compose stop ac-authserver
@@ -804,9 +871,11 @@ cmd_cutover() {
 
     if ! step_done switch_client_data; then
         vol="$(client_data_volume)"
-        if [ -n "$(stage_get CLIENT_DATA_TARGET_VOLUME)" ]; then
-            log "Installing client data $(stage_get CLIENT_DATA_TARGET) into $vol"
-            run docker run --rm --network none --user 0 -v "$(stage_get CLIENT_DATA_TARGET_VOLUME):/src:ro" -v "$vol:/dst" \
+        target_vol="$(cutover_fact CLIENT_DATA_TARGET_VOLUME)"
+        if [ -n "$target_vol" ]; then
+            log "Installing client data $(cutover_fact CLIENT_DATA_TARGET) into $vol"
+            mark_started CLIENT_DATA_SWITCH_STARTED
+            run docker run --rm --network none --user 0 -v "$target_vol:/src:ro" -v "$vol:/dst" \
                 --entrypoint sh "acore/ac-wotlk-client-data:${CANDIDATE_TAG}" \
                 -c "find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && chown -R $(env_value DOCKER_USER_ID):$(env_value DOCKER_GROUP_ID) /dst"
         fi
@@ -814,6 +883,7 @@ cmd_cutover() {
     fi
 
     if ! step_done switch_images; then
+        mark_started IMAGES_SWITCH_STARTED
         for svc in "${IMAGES[@]}"; do
             run docker tag "acore/ac-wotlk-${svc}:${CANDIDATE_TAG}" "acore/ac-wotlk-${svc}:$(env_value DOCKER_IMAGE_TAG)"
         done
@@ -825,6 +895,8 @@ cmd_cutover() {
         run compose config -q
         mapfile -t scale < <(compose_scale_args)
         log "Starting the stack (db-import applies all pending database updates first)"
+        # From here on db-import may migrate the databases: rollback must restore them.
+        mark_started BOOT_STARTED
         if ! run compose up -d --no-build ${scale[@]+"${scale[@]}"}; then
             docker logs ac-db-import > "$STATE_DIR/logs/db-import.log" 2>&1 || true
             run compose stop ac-worldserver ac-authserver || true
@@ -860,6 +932,7 @@ cmd_cutover() {
 
     if ! step_done admin; then
         log "Redeploying the admin app against the upgraded server"
+        mark_started ADMIN_STEP_STARTED
         run docker start azerothcore-admin
         run "$REPO_DIR/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh"
         mark_done admin
@@ -870,80 +943,154 @@ cmd_cutover() {
 }
 
 # --------------------------------------------------------------- rollback ---
+# Rollback undoes only what the cutover did. The STEP_ markers and the started
+# markers (set before each step's first mutation) say what may have changed;
+# every artifact the undo needs is checked before the first mutation.
+# rollback_preconditions TS
+rollback_preconditions() {
+    local ts="$1" label rel url branch rev svc
+    while IFS='|' read -r label rel url branch rev; do
+        [ -n "$(state_get "OLD_REV_${label//-/_}")" ] || die "no recorded pre-upgrade revision for $label in $STATE_DIR"
+    done < <(upstream_repo_specs)
+    if step_done snapshot_state; then
+        if [ ! -f "$STATE_DIR/docker-compose.override.yml" ] || [ ! -d "$STATE_DIR/configs" ]; then
+            die "configuration copies missing from $STATE_DIR"
+        fi
+        for svc in "${IMAGES[@]}"; do
+            [ -n "$(image_id "acore/ac-wotlk-${svc}:preupgrade-$ts")" ] \
+                || die "rollback image acore/ac-wotlk-${svc}:preupgrade-$ts is missing"
+        done
+    fi
+    if started CLIENT_DATA_SWITCH_STARTED && [ -z "$(state_get CLIENT_DATA_ROLLBACK_VOLUME)" ]; then
+        die "client data was switched but no rollback volume is recorded in $STATE_DIR"
+    fi
+    if started ADMIN_STEP_STARTED; then
+        [ -f "$STATE_DIR/admin-stack/docker-compose.yml" ] || die "admin compose file copy missing from $STATE_DIR"
+        [ -n "$(image_id "azerothcore-admin:preupgrade-$ts")" ] || die "rollback image azerothcore-admin:preupgrade-$ts is missing"
+    fi
+}
+
 cmd_rollback() {
-    local ts label rel url branch rev old svc vol archive tag
+    local ts label rel url branch rev old svc vol archive tag rollback_vol verifier scale admin_was_up
     resolve_state_dir
+    refuse_rolled_back
     load_versions
     ts="$(state_get TS)"
-    archive="$(state_get PREUPGRADE_ARCHIVE)"
     tag="$(env_value DOCKER_IMAGE_TAG)"
-    if [ -z "$archive" ] || [ ! -f "$archive" ]; then
-        die "pre-upgrade archive missing from $STATE_DIR; cannot roll back the databases"
+    archive="$(state_get PREUPGRADE_ARCHIVE)"
+    if [ -n "$archive" ]; then
+        # Verify the recorded rollback point before any mutation, and restore
+        # exactly the file that was verified.
+        archive="$STATE_DIR/$(basename "$archive")"
+        [ -f "$archive" ] || die "pre-upgrade archive $archive is missing"
+        (cd "$STATE_DIR" && sha256sum -c --quiet "$(basename "$archive").sha256") || die "pre-upgrade archive checksum mismatch"
+    elif started BOOT_STARTED; then
+        die "databases may have been migrated but no pre-upgrade archive was recorded in $STATE_DIR; restore a backup by hand"
     fi
-    (cd "$STATE_DIR" && sha256sum -c --quiet "$(basename "$archive").sha256") || die "pre-upgrade archive checksum mismatch"
+    rollback_preconditions "$ts"
     echo "Rolling back to the pre-upgrade state captured in $STATE_DIR."
-    echo "Everything players did after the cutover's backup ($(basename "$archive")) is lost."
+    if started BOOT_STARTED; then
+        echo "The databases are restored from $(basename "$archive"): everything players did after the cutover's backup is lost."
+    else
+        echo "The new version never booted: the databases were not touched and are kept."
+    fi
     confirm ROLLBACK
 
     log "Stopping the admin app and the realm"
-    if [ "$(container_status azerothcore-admin)" = running ]; then run docker stop azerothcore-admin; fi
+    admin_was_up=false
+    if [ "$(container_status azerothcore-admin)" = running ]; then
+        admin_was_up=true
+        run docker stop azerothcore-admin
+    fi
     run compose stop -t "$STOP_TIMEOUT" ac-worldserver
     run compose stop ac-authserver
 
     log "Restoring source checkouts"
     while IFS='|' read -r label rel url branch rev; do
         old="$(state_get "OLD_REV_${label//-/_}")"
-        [ -n "$old" ] || die "no recorded pre-upgrade revision for $label"
-        if [ "$label" != core ]; then run git -C "$STACK_DIR/$rel" checkout -q -- .; fi
+        # Tracked module changes are discarded only once snapshot_state saved
+        # them (patches-live/); before that the code was never switched.
+        if [ "$label" != core ] && step_done snapshot_state; then run git -C "$STACK_DIR/$rel" checkout -q -- .; fi
         run git -C "$STACK_DIR/$rel" -c advice.detachedHead=false checkout -q -B "$branch" "$old"
         if [ -s "$STATE_DIR/patches-live/${label}.diff" ]; then
             run git -C "$STACK_DIR/$rel" apply "$STATE_DIR/patches-live/${label}.diff"
         fi
     done < <(upstream_repo_specs)
 
-    log "Restoring configuration files"
-    run cp -p "$STATE_DIR/docker-compose.override.yml" "$STACK_DIR/docker-compose.override.yml"
-    if [ -f "$STATE_DIR/docker-compose.admin.yml" ]; then
-        # In place: the admin container bind-mounts this file.
-        if [ "$DRY_RUN" = true ]; then run cat "$STATE_DIR/docker-compose.admin.yml"; else cat "$STATE_DIR/docker-compose.admin.yml" > "$STACK_DIR/docker-compose.admin.yml"; fi
-    fi
-    run cp -a "$STATE_DIR/configs/." "$STACK_DIR/configs/"
-    for name in "${ETC_CONFS[@]}"; do
-        for f in "$STATE_DIR/etc/$name.conf" "$STATE_DIR/etc/$name.conf.dist"; do
-            if [ -f "$f" ]; then run cp -p "$f" "$STACK_DIR/env/dist/etc/"; fi
+    if step_done snapshot_state; then
+        log "Restoring configuration files"
+        run cp -p "$STATE_DIR/docker-compose.override.yml" "$STACK_DIR/docker-compose.override.yml"
+        if [ -f "$STATE_DIR/docker-compose.admin.yml" ]; then
+            # In place: the admin container bind-mounts this file.
+            if [ "$DRY_RUN" = true ]; then run cat "$STATE_DIR/docker-compose.admin.yml"; else cat "$STATE_DIR/docker-compose.admin.yml" > "$STACK_DIR/docker-compose.admin.yml"; fi
+        fi
+        run cp -a "$STATE_DIR/configs/." "$STACK_DIR/configs/"
+        for name in "${ETC_CONFS[@]}"; do
+            for f in "$STATE_DIR/etc/$name.conf" "$STATE_DIR/etc/$name.conf.dist"; do
+                if [ -f "$f" ]; then run cp -p "$f" "$STACK_DIR/env/dist/etc/"; fi
+            done
         done
-    done
+    else
+        log "Configs untouched (cutover stopped before snapshot_state)"
+    fi
 
     vol="$(client_data_volume)"
-    if [ -n "$(stage_get CLIENT_DATA_ROLLBACK_VOLUME)" ]; then
-        log "Restoring client data $(stage_get CLIENT_DATA_LIVE)"
-        run docker run --rm --network none --user 0 -v "$(stage_get CLIENT_DATA_ROLLBACK_VOLUME):/src:ro" -v "$vol:/dst" \
+    rollback_vol="$(state_get CLIENT_DATA_ROLLBACK_VOLUME)"
+    if started CLIENT_DATA_SWITCH_STARTED && [ -n "$rollback_vol" ]; then
+        log "Restoring client data $(state_get CLIENT_DATA_LIVE) from $rollback_vol"
+        run docker run --rm --network none --user 0 -v "$rollback_vol:/src:ro" -v "$vol:/dst" \
             --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" -c 'find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
+    else
+        log "Client data untouched"
     fi
 
-    log "Restoring pre-upgrade images"
-    for svc in "${IMAGES[@]}"; do
-        run docker tag "acore/ac-wotlk-${svc}:preupgrade-$ts" "acore/ac-wotlk-${svc}:${tag}"
-    done
+    if step_done snapshot_state; then
+        log "Restoring pre-upgrade images"
+        for svc in "${IMAGES[@]}"; do
+            run docker tag "acore/ac-wotlk-${svc}:preupgrade-$ts" "acore/ac-wotlk-${svc}:${tag}"
+            if [ "$DRY_RUN" != true ] && [ "$(image_id "acore/ac-wotlk-${svc}:${tag}")" != "$(state_get "OLD_ID_${svc//-/_}")" ]; then
+                die "acore/ac-wotlk-${svc}:${tag} is not the recorded pre-upgrade image after retagging"
+            fi
+        done
+    else
+        log "Images untouched (cutover stopped before snapshot_state)"
+    fi
 
-    log "Restoring the databases from $(basename "$archive")"
-    run "$SCRIPT_DIR/restore-azerothcore.sh" "$archive" --stack-dir "$STACK_DIR" --yes
+    if started BOOT_STARTED; then
+        log "Restoring the databases from $(basename "$archive")"
+        run "$SCRIPT_DIR/restore-azerothcore.sh" "$archive" --stack-dir "$STACK_DIR" --yes
+    else
+        log "Databases untouched (the new version never booted)"
+    fi
     mapfile -t scale < <(compose_scale_args)
     run compose up -d --no-build ${scale[@]+"${scale[@]}"}
 
-    log "Restoring the previous admin app image"
-    run docker tag "azerothcore-admin:preupgrade-$ts" azerothcore-admin:local
-    run cp -p "$STATE_DIR/admin-stack/docker-compose.yml" "$ADMIN_STACK_DIR/docker-compose.yml"
-    if [ "$DRY_RUN" = true ]; then
-        run docker compose --env-file "$ADMIN_STACK_DIR/.env" up -d --force-recreate
+    if started ADMIN_STEP_STARTED; then
+        log "Restoring the previous admin app image"
+        run docker tag "azerothcore-admin:preupgrade-$ts" azerothcore-admin:local
+        run cp -p "$STATE_DIR/admin-stack/docker-compose.yml" "$ADMIN_STACK_DIR/docker-compose.yml"
+        if [ "$DRY_RUN" = true ]; then
+            run docker compose --env-file "$ADMIN_STACK_DIR/.env" up -d --force-recreate
+        else
+            (cd "$ADMIN_STACK_DIR" && docker compose --env-file .env up -d --force-recreate)
+        fi
+    elif [ "$(state_get ADMIN_WAS_RUNNING)" = true ] || [ "$admin_was_up" = true ]; then
+        log "Starting the admin app again (it was only stopped)"
+        run docker start azerothcore-admin
     else
-        (cd "$ADMIN_STACK_DIR" && docker compose --env-file .env up -d --force-recreate)
+        log "Admin app left as it was"
     fi
 
-    log "Verifying with the previous repository's verifier"
-    if [ "$DRY_RUN" != true ]; then
-        "$STATE_DIR/repo-snapshot/scripts/verify-azerothcore.sh" | tee "$STATE_DIR/logs/rollback-verify.log" \
-            || die "rollback verification failed; see $STATE_DIR/logs/rollback-verify.log"
+    verifier="$STATE_DIR/repo-snapshot/scripts/verify-azerothcore.sh"
+    if [ -f "$verifier" ]; then
+        log "Verifying with the previous repository's verifier"
+        if [ "$DRY_RUN" != true ]; then
+            "$verifier" | tee "$STATE_DIR/logs/rollback-verify.log" \
+                || die "rollback verification failed; see $STATE_DIR/logs/rollback-verify.log"
+        fi
+    else
+        echo "WARNING: no tooling snapshot in $STATE_DIR (the cutover stopped before snapshot_tooling);" \
+            "verify by hand with verify-azerothcore.sh from $(state_get PREVIOUS_REPO_REV)." >&2
     fi
     state_set ROLLED_BACK 1
     log "Rollback complete. The repository checkout still holds the new tooling: check out ${PREVIOUS_REPO_REV:-$(state_get PREVIOUS_REPO_REV)} before using the installer or redeploy scripts."
@@ -965,8 +1112,9 @@ cmd_finalize() {
         run docker image rm "acore/ac-wotlk-${svc}:$(state_get CANDIDATE_TAG)" || true
     done
     run docker image rm "azerothcore-admin:preupgrade-$ts" || true
-    for vol in "$(stage_get CLIENT_DATA_ROLLBACK_VOLUME)" "$(stage_get CLIENT_DATA_TARGET_VOLUME)"; do
-        if [ -n "$vol" ]; then run docker volume rm "$vol"; fi
+    for vol in "$(state_get CLIENT_DATA_ROLLBACK_VOLUME)" "$(state_get CLIENT_DATA_TARGET_VOLUME)"; do
+        # Re-runnable: a volume a previous finalize already removed is skipped.
+        if [ -n "$vol" ] && docker volume inspect "$vol" >/dev/null 2>&1; then run docker volume rm "$vol"; fi
     done
     while IFS='|' read -r label rel url branch rev; do
         run git -C "$STACK_DIR/$rel" tag -d "preupgrade-$ts" || true
@@ -984,7 +1132,7 @@ cmd_status() {
     if [ -L "$UPGRADE_ROOT/current" ]; then
         STATE_DIR="$(readlink -f "$UPGRADE_ROOT/current")"
         echo "Cutover: $STATE_DIR"
-        grep -E '^(STEP_|CUTOVER_OK|ROLLED_BACK|FINALIZED)' "$STATE_DIR/state.env" | sed 's/^/  /'
+        { grep -E '^(STEP_|[A-Z_]+_STARTED=|CUTOVER_OK|ROLLED_BACK|FINALIZED)' "$STATE_DIR/state.env" || true; } | sed 's/^/  /'
     else
         echo "Cutover: none"
     fi
@@ -992,11 +1140,11 @@ cmd_status() {
 
 case "$CMD" in
     preflight) cmd_preflight ;;
-    stage) cmd_stage ;;
-    rehearse) cmd_rehearse ;;
-    cutover) cmd_cutover ;;
-    rollback) cmd_rollback ;;
-    finalize) cmd_finalize ;;
+    stage) take_lock; cmd_stage ;;
+    rehearse) take_lock; cmd_rehearse ;;
+    cutover) take_lock; cmd_cutover ;;
+    rollback) take_lock; cmd_rollback ;;
+    finalize) take_lock; cmd_finalize ;;
     status) cmd_status ;;
     *) usage ;;
 esac
