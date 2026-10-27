@@ -598,6 +598,57 @@ def run_clear_bots(*, on_progress: ProgressCb) -> ActionResult:
     return ActionResult.OK
 
 
+REVISION_DIRS = {
+    "core": ".",
+    "mod-playerbots": "modules/mod-playerbots",
+    "mod-ah-bot-plus": "modules/mod-ah-bot-plus",
+    "mod-individual-progression": "modules/mod-individual-progression",
+}
+
+
+def current_stack_revisions(ac_stack: Path) -> dict[str, str]:
+    """HEAD of the core and each module checkout; "unknown" when unreadable."""
+    out: dict[str, str] = {}
+    for key, rel in REVISION_DIRS.items():
+        repo = ac_stack / rel
+        rev = ""
+        # Only a checkout with its own .git (file or dir) counts: git would
+        # otherwise walk up and report a parent repo's HEAD for a plain directory.
+        if (repo / ".git").exists():
+            try:
+                r = subprocess.run(
+                    ["git", "-C", str(repo), "-c", "safe.directory=*", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=QUICK_TIMEOUT,
+                )
+                rev = r.stdout.strip() if r.returncode == 0 else ""
+            except (OSError, subprocess.TimeoutExpired):
+                rev = ""
+        out[key] = rev or "unknown"
+    return out
+
+
+def revision_mismatch(manifest: dict, current: dict[str, str]) -> str | None:
+    """Refuse a dump taken on other source revisions than the running stack.
+
+    Newer binaries would re-run their migrations against an old dump; older
+    binaries cannot read a migrated schema. Unknown revisions fail closed.
+    Cross-version recovery is a host-side operation (scripts/restore-azerothcore.sh).
+    """
+    archived = manifest.get("git_revisions")
+    if not isinstance(archived, dict):
+        archived = {}
+    for key in REVISION_DIRS:
+        want, have = archived.get(key), current.get(key)
+        if not isinstance(want, str) or want in ("", "unknown") or have in (None, "", "unknown"):
+            return (f"cannot confirm the {key} revision of this archive; restore it with "
+                    "scripts/restore-azerothcore.sh (--allow-version-mismatch accepts unknown revisions)")
+        if want != have:
+            return (f"archive was taken on a different {key} revision ({want[:12]}; "
+                    f"the server runs {have[:12]}); cross-version restores are host-only: "
+                    "scripts/restore-azerothcore.sh after checking out the archive's revisions")
+    return None
+
+
 def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
     """In-app restore: DB(s) + admin.yml. Same-machine rollback. See spec §9."""
     from app.services.backup import run_backup as create_backup
@@ -626,6 +677,12 @@ def run_restore(archive_name: str, *, on_progress: ProgressCb) -> ActionResult:
     # validate_canonical_backup's return path).
     with tarfile.open(archive, "r:gz") as tf:
         manifest = _load_manifest_member(tf)
+    # Refuse a dump from other source revisions before anything is stopped,
+    # extracted, or dropped (see revision_mismatch).
+    revision_error = revision_mismatch(manifest, current_stack_revisions(ac_stack))
+    if revision_error is not None:
+        on_progress("validate", revision_error)
+        return ActionResult.ERROR
     v2 = manifest["format_version"] == 2
     selected = list(KNOWN_DBS)
     on_progress("validate", f"will restore: {selected} ({'v2 consistent snapshot' if v2 else 'v1'})")

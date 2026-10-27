@@ -135,7 +135,9 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         docker compose logs --tail 50 "$SERVICE" || true
         exit 1
     fi
-    if docker logs --since "$started_at" "$SERVICE" 2>&1 | grep -q "World Initialized"; then
+    # Process substitution, not a pipe: with pipefail, grep -q closing the pipe
+    # early kills `docker logs` with SIGPIPE (141) once the log is long.
+    if grep -q "World Initialized" < <(docker logs --since "$started_at" "$SERVICE" 2>&1); then
         init_ok=1
         break
     fi

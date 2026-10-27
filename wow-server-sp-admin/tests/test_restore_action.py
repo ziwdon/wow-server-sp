@@ -2,6 +2,7 @@ import fcntl
 import io
 import json
 import os
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -13,6 +14,17 @@ from app.services import actions
 from app.services.actions import ActionResult, KNOWN_DBS, SQL_FOOTER_TAIL_BYTES
 from app.services.compose_admin import validate_restored_overlay
 from app.services.config_index import KeyEntry
+
+# Captured before the autouse fixture below replaces it.
+REAL_CURRENT_STACK_REVISIONS = actions.current_stack_revisions
+
+TEST_REVS = {"core": "a" * 40, "mod-playerbots": "b" * 40, "mod-ah-bot-plus": "c" * 40,
+             "mod-individual-progression": "d" * 40}
+
+
+@pytest.fixture(autouse=True)
+def _matching_stack_revisions(monkeypatch):
+    monkeypatch.setattr(actions, "current_stack_revisions", lambda ac_stack: dict(TEST_REVS))
 
 INT_ENTRY = KeyEntry(
     key="AiPlayerbot.MinRandomBots",
@@ -45,7 +57,7 @@ def _make_archive(
         (stage / "config" / "docker-compose.admin.yml").write_text(admin_yml_text)
     (stage / "manifest.json").write_text(json.dumps({
         "format_version": 1, "label": "manual", "databases": list(dbs),
-        "skipped_databases": list(skipped), "git_revisions": {}, "ac_image": "x", "stack_dir": "/x",
+        "skipped_databases": list(skipped), "git_revisions": dict(TEST_REVS), "ac_image": "x", "stack_dir": "/x",
     }))
     archive = backups / name
     with tarfile.open(archive, "w:gz") as tf:
@@ -114,6 +126,7 @@ def _make_v2_archive(
             "databases": list(KNOWN_DBS),
             "skipped_databases": [],
             "dump_layout": "single-multi-database",
+            "git_revisions": dict(TEST_REVS),
         }).encode()
     overlay = b"services: {}\n"
     with tarfile.open(archive, "w:gz") as tf:
@@ -880,3 +893,77 @@ def test_v2_create_statement_extraction_does_not_read_the_entire_dump(tmp_path):
         create_sql = actions._v2_create_database_statements(sql_path)
 
     assert "DEFAULT CHARACTER SET utf8mb4" in create_sql
+
+
+def test_revision_mismatch_accepts_identical_revisions():
+    assert actions.revision_mismatch({"git_revisions": dict(TEST_REVS)}, dict(TEST_REVS)) is None
+
+
+@pytest.mark.parametrize("archived, current", [
+    ({**TEST_REVS, "mod-playerbots": "e" * 40}, TEST_REVS),
+    ({**TEST_REVS, "core": "unknown"}, TEST_REVS),
+    (TEST_REVS, {**TEST_REVS, "core": "unknown"}),
+    (None, TEST_REVS),
+])
+def test_revision_mismatch_fails_closed(archived, current):
+    manifest = {} if archived is None else {"git_revisions": archived}
+    assert actions.revision_mismatch(manifest, dict(current)) is not None
+
+
+def test_revision_mismatch_messages_point_at_the_host_restore_script():
+    different = actions.revision_mismatch(
+        {"git_revisions": {**TEST_REVS, "mod-playerbots": "e" * 40}}, dict(TEST_REVS))
+    assert f"different mod-playerbots revision ({'e' * 12}; the server runs {'b' * 12})" in different
+    assert "scripts/restore-azerothcore.sh" in different
+    unknown = actions.revision_mismatch({}, dict(TEST_REVS))
+    assert "scripts/restore-azerothcore.sh" in unknown and "--allow-version-mismatch" in unknown
+    assert "upgrade-azerothcore" not in different + unknown
+
+
+@patch("app.services.actions.run_stop")
+def test_run_restore_refuses_other_source_revisions_before_stop(mock_stop, tmp_path, monkeypatch):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    manifest = json.dumps({
+        "format_version": 2, "databases": list(KNOWN_DBS), "skipped_databases": [],
+        "dump_layout": "single-multi-database", "git_revisions": {**TEST_REVS, "core": "f" * 40},
+    }).encode()
+    _make_v2_archive(tmp_path / "backups", "azerothcore-backup-preupgrade-x.tar.gz", manifest=manifest)
+    progress = []
+    result = actions.run_restore("azerothcore-backup-preupgrade-x.tar.gz",
+                                 on_progress=lambda *a: progress.append(a))
+    assert result == ActionResult.ERROR
+    mock_stop.assert_not_called()
+    assert any("revision" in " ".join(map(str, a)) for a in progress)
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_current_stack_revisions_reads_real_checkouts_and_ignores_dirs_without_their_own_git(tmp_path):
+    for rel in (".", "modules/mod-playerbots", "modules/mod-individual-progression"):
+        repo = tmp_path / rel
+        repo.mkdir(parents=True, exist_ok=True)
+        _git(repo, "init", "-q")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", rel)
+    # Inside the core checkout but not a repo of its own: git would answer with the core's HEAD.
+    (tmp_path / "modules" / "mod-ah-bot-plus").mkdir()
+
+    revs = REAL_CURRENT_STACK_REVISIONS(tmp_path)
+
+    assert revs["core"] == _git(tmp_path, "rev-parse", "HEAD")
+    assert revs["mod-playerbots"] == _git(tmp_path / "modules" / "mod-playerbots", "rev-parse", "HEAD")
+    assert revs["mod-individual-progression"] == _git(
+        tmp_path / "modules" / "mod-individual-progression", "rev-parse", "HEAD")
+    assert revs["mod-ah-bot-plus"] == "unknown"
+    assert revs["core"] != revs["mod-playerbots"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_current_stack_revisions_is_unknown_for_a_repo_without_commits(tmp_path):
+    _git(tmp_path, "init", "-q")
+    assert set(REAL_CURRENT_STACK_REVISIONS(tmp_path).values()) == {"unknown"}

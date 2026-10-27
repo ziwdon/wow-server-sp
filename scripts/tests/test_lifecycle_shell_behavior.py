@@ -487,3 +487,55 @@ def test_root_systemd_heredoc_contains_daemon_restart_and_graceful_stop_contract
     assert "TimeoutStopSec=75" in rendered
     assert "--scale phpmyadmin=0 --scale ac-eluna-ts-dev=0" in rendered
     assert "REPLACE_WITH" not in rendered
+
+
+def test_root_redeploy_detects_readiness_in_a_long_log(tmp_path: Path) -> None:
+    stack, bindir, calls, script = _root_redeploy_fixture(tmp_path)
+    log = tmp_path / "long.log"
+    log.write_text("WORLD: World Initialized\n" + "bot spam line\n" * 200000)
+    result = _run(script, env={
+        "PATH": f"{bindir}:{os.environ['PATH']}", "STACK_DIR": str(stack), "LIFECYCLE_CALLS": str(calls),
+        "REDEPLOY_SERVER_LOG": str(log), "WORLD_INIT_TIMEOUT": "2", "SKIP_BUILD": "1",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "World Initialized — worldserver is up." in result.stdout
+
+
+def test_installer_playerbots_fatal_log_check_survives_a_long_log(tmp_path: Path) -> None:
+    # Under pipefail, `docker logs | grep -q` returns 141 (SIGPIPE) once grep
+    # matches early in a long log, turning a real fatal match into "no match".
+    source = INSTALLER.read_text()
+    functions = ""
+    for name in ("worldserver_playerbots_fatal_pattern", "worldserver_has_playerbots_fatal_logs"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.S | re.M)
+        assert match, name
+        functions += match.group(0)
+    big = tmp_path / "big.log"
+    big.write_text("Unknown database 'acore_playerbots'\n" + "bot spam line\n" * 200000)
+    bindir = tmp_path / "bin"; bindir.mkdir()
+    # exec: the stub itself must be the writer that dies of SIGPIPE, as real
+    # `docker logs` does; a child `cat` would let the stub exit 0.
+    _executable(bindir / "docker", f"#!/bin/sh\nexec cat {shlex.quote(str(big))}\n")
+    script = tmp_path / "fatal_check.sh"
+    _executable(
+        script,
+        "#!/bin/bash\nset -euo pipefail\n" + functions +
+        "if worldserver_has_playerbots_fatal_logs; then echo FATAL_DETECTED; else echo NOT_DETECTED; fi\n",
+    )
+    result = _run(script, env={"PATH": f"{bindir}:{os.environ['PATH']}"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FATAL_DETECTED" in result.stdout
+
+
+def test_no_script_pipes_docker_logs_or_a_log_capture_into_grep_q() -> None:
+    # Under pipefail, `grep -q` closing the pipe early SIGPIPEs the writer once
+    # the log is long. Use `grep -q … < <(docker logs …)` or a here-string.
+    sigpipe_prone = re.compile(
+        r"docker\s+logs\b[^\n]*\|\s*grep\s+-\w*q|\"\$log_content\"\s*\|\s*grep\s+-\w*q"
+    )
+    offenders = []
+    for script in sorted(ROOT.glob("*.sh")):
+        joined = script.read_text().replace("\\\n", " ")  # fold line continuations
+        offenders += [f"{script.name}: {line.strip()}" for line in joined.splitlines()
+                      if sigpipe_prone.search(line)]
+    assert not offenders, offenders

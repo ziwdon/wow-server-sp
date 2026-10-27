@@ -252,9 +252,14 @@ ORDER BY bandate DESC;
 The canonical backup mechanism is the shared `scripts/backup.sh` (run by the nightly
 cron and bundled into the admin image for the **Backups** page). Each run produces ONE
 consolidated archive: `azerothcore-backup-<label>-<stamp>.tar.gz` containing
-`manifest.json`, all four DB dumps under `sql/`, and staged configs under `config/`.
+`manifest.json`, one multi-database dump `sql/azerothcore.sql` (all four DBs, one
+transaction), and staged configs under `config/` (including the generated `etc/*.conf`
+and the admin app's `maintenance.json`/`presence.json`).
 Labels: `daily` (cron), `manual` (Backups page), `prerestore` (auto-taken before an
-in-app restore). The nightly daily run prunes every archive older than 7 days.
+in-app restore), `preclear` (auto-taken by Clear bots), `preupgrade` (rollback point
+before an upgrade). The nightly daily run prunes every archive older than 7 days
+except `preupgrade`, which is never pruned (delete those by hand once the upgrade is
+final). A missing DB or an incomplete dump fails the backup; no partial archive is written.
 
 ### Create a backup
 ```bash
@@ -266,11 +271,18 @@ in-app restore). The nightly daily run prunes every archive older than 7 days.
 ### Restore a backup
 - **Same machine (rollback):** admin **Backups** page -> select an archive -> "Restore
   selected". Imports the DBs via `docker exec`, restores `docker-compose.admin.yml`, and
-  takes a `prerestore` safety backup first.
+  takes a `prerestore` safety backup first. Refuses archives taken on other
+  AzerothCore/module source revisions.
 - **Fresh machine (disaster recovery):** reinstall AzerothCore, copy the archive over,
   then `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz` (preserves the fresh
   `.env` + `configs/mysql/custom.cnf` and re-fixes realmlist; see
-  `docs/runbooks/disaster-recovery.md`).
+  `docs/runbooks/disaster-recovery.md`). It refuses an archive whose manifest
+  `git_revisions` differ from the stack's checkouts: check those revisions out and
+  rebuild first, or pass `--allow-version-mismatch` knowingly.
+- **Prove an archive restores (no live changes):** `./scripts/restore-drill.sh
+  /path/to/archive.tar.gz [--compare-live]` imports it into an isolated throwaway MySQL
+  container and checks table inventory, the dump footer, and key tables; `--compare-live`
+  adds a read-only row-count comparison against `ac-database`.
 
 ### Ad-hoc single-database dump (one-off — NOT the cron/admin format)
 For a quick throwaway dump of a single DB (e.g. before a destructive query below), not a

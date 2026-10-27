@@ -13,7 +13,7 @@ from app.services import logs as logs_svc
 
 
 _ARCHIVE_RE = re.compile(
-    r"^azerothcore-backup-(daily|manual|prerestore|preclear|imported)-(.+)\.tar\.gz$"
+    r"^azerothcore-backup-(daily|manual|prerestore|preclear|preupgrade|imported)-(.+)\.tar\.gz$"
 )
 
 

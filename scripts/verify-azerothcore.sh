@@ -26,6 +26,8 @@ info() {
     echo "[INFO] $1"
 }
 
+VERIFY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [ ! -f "${STACK_DIR}/.env" ]; then
     fail "Cannot find ${STACK_DIR}/.env — install not complete"
     echo ""
@@ -720,7 +722,7 @@ else
         fi
 
         mapped_key="${env_to_key[$var]}"
-        if printf '%s\n' "$log_content" | grep -qF "from environment variable '${var}'"; then
+        if grep -qF "from environment variable '${var}'" <<<"$log_content"; then
             ok "AC env var maps to ${mapped_key}: ${var} (startup binding log observed)"
         else
             ok "AC env var maps to ${mapped_key}: ${var} (no startup binding log required)"
@@ -766,13 +768,22 @@ else
 fi
 
 # ============================================================================
-# Check 15 — backup.sh exists and is executable
+# Check 15 — backup.sh exists, is executable, and matches scripts/backup.sh
 # ============================================================================
 BACKUP_SCRIPT="${STACK_DIR}/backup.sh"
 if [ -x "$BACKUP_SCRIPT" ]; then
     ok "backup.sh exists and is executable"
 else
     fail "backup.sh missing or not executable at $BACKUP_SCRIPT"
+fi
+if [ ! -f "${VERIFY_SCRIPT_DIR}/backup.sh" ]; then
+    info "cannot compare deployed backup.sh (no scripts/backup.sh next to the verifier)"
+elif [ -f "$BACKUP_SCRIPT" ]; then
+    if cmp -s "$BACKUP_SCRIPT" "${VERIFY_SCRIPT_DIR}/backup.sh"; then
+        ok "deployed backup.sh matches scripts/backup.sh"
+    else
+        fail "deployed backup.sh differs from scripts/backup.sh — redeploy: install -m 0755 ${VERIFY_SCRIPT_DIR}/backup.sh ${BACKUP_SCRIPT}"
+    fi
 fi
 
 # ==========================================================================
