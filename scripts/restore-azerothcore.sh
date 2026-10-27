@@ -14,6 +14,7 @@ DATABASES=(
     acore_playerbots
 )
 YES=false
+ALLOW_VERSION_MISMATCH=false
 ARCHIVE=""
 STOP_TIMEOUT_SECONDS="${RESTORE_STOP_TIMEOUT_SECONDS:-60}"
 STOP_POLL_SECONDS="${RESTORE_STOP_POLL_SECONDS:-2}"
@@ -28,12 +29,13 @@ fi
 
 usage() {
     cat <<USAGE
-Usage: ./scripts/restore-azerothcore.sh <archive.tar.gz> [--stack-dir DIR] [--yes]
+Usage: ./scripts/restore-azerothcore.sh <archive.tar.gz> [--stack-dir DIR] [--yes] [--allow-version-mismatch]
 
 Options:
-  --stack-dir DIR  AzerothCore stack directory (default: /opt/stacks/azerothcore)
-  --yes            Do not prompt for confirmation
-  -h, --help       Show this help
+  --stack-dir DIR           AzerothCore stack directory (default: /opt/stacks/azerothcore)
+  --yes                     Do not prompt for confirmation
+  --allow-version-mismatch  Restore even if the archive's source revisions differ from this stack's
+  -h, --help                Show this help
 
 Run against a freshly reinstalled stack as your normal user, not with sudo.
 USAGE
@@ -51,6 +53,10 @@ while [ $# -gt 0 ]; do
             ;;
         --yes)
             YES=true
+            shift
+            ;;
+        --allow-version-mismatch)
+            ALLOW_VERSION_MISMATCH=true
             shift
             ;;
         -h|--help)
@@ -419,7 +425,9 @@ recreate_and_verify_worldserver() {
         fi
         case "$status" in
             running)
-                if docker logs --since "$started_at" "${WORLD_CONTAINER}" 2>&1 | grep -q 'WORLD: World Initialized'; then
+                # Process substitution, not a pipe: with pipefail, grep -q closing
+                # the pipe early kills `docker logs` with SIGPIPE on a long log.
+                if grep -q 'WORLD: World Initialized' < <(docker logs --since "$started_at" "${WORLD_CONTAINER}" 2>&1); then
                     log "${WORLD_CONTAINER} initialized after ${elapsed}s."
                     return 0
                 fi
@@ -444,6 +452,54 @@ recreate_and_verify_worldserver() {
 # Validate all destructive inputs before stopping the server or replacing data.
 validate_manifest
 validate_dump_set
+
+# A dump only restores safely onto binaries built from the same source
+# revisions: newer binaries re-run their migrations against it, older ones
+# cannot read a migrated schema. Unknown revisions fail closed.
+check_source_revisions() {
+    python3 - "${STAGE}/manifest.json" "$STACK_DIR" <<'PY'
+import json
+import subprocess
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+stack = sys.argv[2]
+dirs = {
+    "core": ".",
+    "mod-playerbots": "modules/mod-playerbots",
+    "mod-ah-bot-plus": "modules/mod-ah-bot-plus",
+    "mod-individual-progression": "modules/mod-individual-progression",
+}
+archived = manifest.get("git_revisions") or {}
+problems = []
+for key, rel in dirs.items():
+    try:
+        current = subprocess.run(
+            ["git", "-C", f"{stack}/{rel}", "-c", "safe.directory=*", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip() or "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        current = "unknown"
+    wanted = archived.get(key) or "unknown"
+    if "unknown" in (wanted, current) or wanted != current:
+        problems.append(f"{key}: archive {wanted[:12]} / stack {current[:12]}")
+print("\n".join(problems))
+raise SystemExit(1 if problems else 0)
+PY
+}
+if ! revision_report="$(check_source_revisions)"; then
+    if [ "$ALLOW_VERSION_MISMATCH" = true ]; then
+        echo "WARNING: restoring across source revisions (--allow-version-mismatch):"
+        printf '%s\n' "$revision_report" | sed 's/^/  /'
+    else
+        echo "ERROR: archive was taken on different AzerothCore/module revisions than this stack runs:" >&2
+        printf '%s\n' "$revision_report" | sed 's/^/  /' >&2
+        echo "Check out the archive's revisions (manifest git_revisions) and rebuild, use" >&2
+        echo "scripts/upgrade-azerothcore.sh rollback, or pass --allow-version-mismatch." >&2
+        exit 1
+    fi
+fi
+
 rm -f "${STAGE}/config/configs/mysql/custom.cnf"
 
 echo "AzerothCore restore preview"
@@ -453,7 +509,7 @@ echo "  Manifest:  ${STAGE}/manifest.json"
 echo ""
 sed -n '1,80p' "${STAGE}/manifest.json"
 echo ""
-echo "This will overwrite restored configs except ${STACK_DIR}/.env and configs/mysql/custom.cnf."
+echo "This will overwrite restored configs (override, admin overlay, configs/, env/dist/etc, admin settings) except ${STACK_DIR}/.env and configs/mysql/custom.cnf."
 echo "This will drop and recreate any backed-up AzerothCore databases found in the archive."
 
 if [ "$YES" != true ]; then
@@ -513,6 +569,20 @@ fi
 if [ -f "${STAGE}/config/docker-compose.admin.yml" ]; then
     if ! cp -a "${STAGE}/config/docker-compose.admin.yml" "${STACK_DIR}/docker-compose.admin.yml"; then
         echo "ERROR: Could not copy restored configuration files. The server remains stopped; re-run restore with a known-good archive." >&2
+        exit 1
+    fi
+fi
+if [ -d "${STAGE}/config/etc" ]; then
+    mkdir -p "${STACK_DIR}/env/dist/etc"
+    if ! cp -a "${STAGE}/config/etc/." "${STACK_DIR}/env/dist/etc/"; then
+        echo "ERROR: Could not copy restored configuration files. The server remains stopped; re-run restore with a known-good archive." >&2
+        exit 1
+    fi
+fi
+ADMIN_DATA_DIR="${ADMIN_DATA_DIR:-/opt/stacks/azerothcore-admin/data}"
+if [ -d "${STAGE}/config/admin-data" ] && [ -d "${ADMIN_DATA_DIR}" ]; then
+    if ! cp -a "${STAGE}/config/admin-data/." "${ADMIN_DATA_DIR}/"; then
+        echo "ERROR: Could not copy restored admin settings. The server remains stopped; re-run restore with a known-good archive." >&2
         exit 1
     fi
 fi

@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -110,7 +111,7 @@ def _stack(tmp_path: Path) -> Path:
     return stack
 
 
-def _run(stack, archive, bind, logf, extra_env=None):
+def _run(stack, archive, bind, logf, extra_env=None, guard=False):
     if os.geteuid() == 0:
         _allow_parent_traversal(bind.parent)
         _allow_unprivileged(stack)
@@ -126,7 +127,8 @@ def _run(stack, archive, bind, logf, extra_env=None):
         **(extra_env or {}),
     }
     return subprocess.run(
-        ["bash", str(RESTORE_SH), str(archive), "--stack-dir", str(stack), "--yes"],
+        ["bash", str(RESTORE_SH), str(archive), "--stack-dir", str(stack), "--yes",
+         *(() if guard else ("--allow-version-mismatch",))],
         env=env, capture_output=True, text=True, preexec_fn=preexec_fn,
     )
 
@@ -796,3 +798,93 @@ def test_dr_restore_refuses_backup_lock_contention_before_mutation(tmp_path):
     assert "backup or restore is already running" in result.stderr
     assert not logf.exists()
     assert "from: fresh" in (stack / "docker-compose.override.yml").read_text()
+
+
+REVS = {"core": "1" * 40, "mod-playerbots": "2" * 40, "mod-ah-bot-plus": "3" * 40,
+        "mod-individual-progression": "4" * 40}
+
+
+def _git_stub(bind: Path) -> None:
+    _make_stub(bind / "git", (
+        '#!/bin/bash\n'
+        'case "$2" in\n'
+        '  */modules/mod-playerbots) echo 2222222222222222222222222222222222222222 ;;\n'
+        '  */modules/mod-ah-bot-plus) echo 3333333333333333333333333333333333333333 ;;\n'
+        '  */modules/mod-individual-progression) echo 4444444444444444444444444444444444444444 ;;\n'
+        '  *) echo 1111111111111111111111111111111111111111 ;;\n'
+        'esac\n'
+    ))
+
+
+def _guard_manifest(**revs):
+    return {"format_version": 1, "label": "manual", "databases": list(DATABASES),
+            "skipped_databases": [], "git_revisions": {**REVS, **revs}}
+
+
+def test_dr_restore_refuses_archives_from_other_source_revisions(tmp_path):
+    stack = _stack(tmp_path)
+    archive = _make_archive(tmp_path, manifest=_guard_manifest(**{"mod-playerbots": "9" * 40}))
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    _git_stub(bind)
+    r = _run(stack, archive, bind, logf, extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state")}, guard=True)
+    assert r.returncode == 1
+    assert "different AzerothCore/module revisions" in r.stderr
+    assert "mod-playerbots" in r.stderr
+    calls = logf.read_text() if logf.exists() else ""
+    assert "stop" not in calls and "DROP DATABASE" not in calls
+
+
+def test_dr_restore_accepts_matching_revisions_and_restores_etc_and_admin_data(tmp_path):
+    stack = _stack(tmp_path)
+    (stack / "env" / "dist" / "etc").mkdir(parents=True)
+    admin_data = tmp_path / "admin-data"; admin_data.mkdir()
+    archive = _make_archive(tmp_path, manifest=_guard_manifest())
+    extra = tmp_path / "extra"
+    (extra / "config" / "etc").mkdir(parents=True)
+    (extra / "config" / "etc" / "worldserver.conf").write_text("Restored = 1\n")
+    (extra / "config" / "admin-data").mkdir(parents=True)
+    (extra / "config" / "admin-data" / "maintenance.json").write_text('{"restart_enabled": false}')
+    _rewrite_archive_with(archive, extra)
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    _git_stub(bind)
+    r = _run(stack, archive, bind, logf, guard=True,
+             extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state"), "ADMIN_DATA_DIR": str(admin_data)})
+    assert r.returncode == 0, r.stderr
+    assert (stack / "env" / "dist" / "etc" / "worldserver.conf").read_text() == "Restored = 1\n"
+    assert (admin_data / "maintenance.json").read_text() == '{"restart_enabled": false}'
+
+
+def _rewrite_archive_with(archive: Path, extra: Path) -> None:
+    stage = archive.parent / "rewrite"
+    with tarfile.open(archive) as tf:
+        tf.extractall(stage, filter="data")
+    shutil.copytree(extra / "config", stage / "config", dirs_exist_ok=True)
+    with tarfile.open(archive, "w:gz") as tf:
+        for name in ("manifest.json", "sql", "config"):
+            tf.add(stage / name, arcname=name)
+
+
+def test_dr_restore_readiness_survives_a_long_worldserver_log(tmp_path):
+    stack = _stack(tmp_path)
+    archive = _make_archive(tmp_path)
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    big = tmp_path / "big.log"
+    big.write_text("WORLD: World Initialized\n" + "bot spam line\n" * 200000)
+    docker = _stateful_docker_stub(bind)
+    docker.write_text(docker.read_text().replace(
+        "  logs) echo \"WORLD: World Initialized\"; exit 0 ;;",
+        # exec: the stub itself must be the writer that dies of SIGPIPE, as
+        # real `docker logs` does; a child `cat` would let the stub exit 0.
+        f"  logs) exec cat {big} ;;"))
+    # Guard against a silent no-op replace: without the long log RED is not real.
+    assert f"logs) exec cat {big} ;;" in docker.read_text()
+    r = _run(stack, archive, bind, logf, extra_env={
+        "DOCKER_STATE_FILE": str(tmp_path / "state"), "RESTORE_READY_TIMEOUT_SECONDS": "1",
+        "RESTORE_READY_POLL_SECONDS": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "initialized after" in r.stdout
