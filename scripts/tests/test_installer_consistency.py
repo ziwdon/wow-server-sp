@@ -17,7 +17,7 @@ XP = {
     "AC_RATE_SKILL_WEAPON", "AC_RATE_SKILL_DEFENSE",
 }
 DYNAMIC = {
-    "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS", "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS",
+    "AC_PLAYERBOTS_MIN_RANDOM_BOTS", "AC_PLAYERBOTS_MAX_RANDOM_BOTS",
     "AC_MAP_UPDATE_THREADS", "AC_GAME_TYPE",
 }
 
@@ -129,7 +129,7 @@ def test_manual_compose_override_guidance_recreates_only_worldserver():
 def test_installer_profile_default_and_installation_reference_stay_aligned():
     reference = (SCRIPTS.parent / "skills/wow-server-sp-gamemaster/references/ref-installation.md").read_text()
 
-    assert 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS:-1500' in INSTALL
+    assert 'AC_PLAYERBOTS_MIN_RANDOM_BOTS:-1500' in INSTALL
     assert 'Random bot count (1-2000, applied to both MIN and MAX)" 1 2000 1500' in INSTALL
     assert "Server XP rate (x1, x3, x5, or x7)" in reference
     assert "Playerbot count (default: 1500)" in reference
@@ -160,3 +160,11 @@ def test_upstream_versions_file_pins_full_shas():
     for key in ("AC_CORE_REV", "MOD_PLAYERBOTS_REV", "MOD_AHBOT_REV", "MOD_IP_REV"):
         value = next(l.split("=", 1)[1] for l in versions.splitlines() if l.startswith(key + "="))
         assert len(value) == 40 and all(c in "0123456789abcdef" for c in value), key
+
+
+def test_no_pre_rename_playerbots_names_remain():
+    verify = (Path(__file__).resolve().parents[1] / "verify-azerothcore.sh").read_text()
+    for text in (INSTALL, verify):
+        assert "AC_AI_PLAYERBOT_" not in text
+        assert "AiPlayerbot." not in text
+    assert 'PLAYERBOT_COUNT="${AC_PLAYERBOTS_MIN_RANDOM_BOTS:-1500}"' in INSTALL

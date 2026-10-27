@@ -253,7 +253,7 @@ done
 
 # ============================================================================
 # Check 4 — acore_playerbots schema has every required table
-# AiPlayerbot.Enabled=1 alone is not enough: if the mod-playerbots updater
+# Playerbots.Enabled=1 alone is not enough: if the mod-playerbots updater
 # never ran (because AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES was 0), the
 # database exists but core tables are missing and bots silently fail to
 # persist. Mirror the install's eight-table required list.
@@ -420,14 +420,14 @@ if [ ! -f "$OVERRIDE" ]; then
     fail "docker-compose.override.yml missing at $OVERRIDE"
 else
     OVERRIDE_EXPECTED=(
-        '      AC_AI_PLAYERBOT_ENABLED: "1"'
-        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"'
+        '      AC_PLAYERBOTS_ENABLED: "1"'
+        '      AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN: "1"'
         '      AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"'
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE: "0"'
-        '      AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER: "1"'
-        '      AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"'
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"'
-        '      AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"'
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE: "0"'
+        '      AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER: "1"'
+        '      AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE: "1"'
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND: "1"'
+        '      AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD: "0"'
         '      AC_PLAYERBOTS_DATABASE_SYNCH_THREADS: "2"'
         '      AC_MAP_UPDATE_INTERVAL: "10"'
         '      AC_MIN_WORLD_UPDATE_TIME: "1"'
@@ -465,18 +465,18 @@ else
 
     # Substituted lines — values come from install-time prompts, so check
     # only the shape and that MIN/MAX agree (install always writes them equal).
-    if grep -qE '^      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
-        ok "docker-compose.override.yml AC_AI_PLAYERBOT_MIN_RANDOM_BOTS is numeric"
+    if grep -qE '^      AC_PLAYERBOTS_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
+        ok "docker-compose.override.yml AC_PLAYERBOTS_MIN_RANDOM_BOTS is numeric"
     else
-        fail "docker-compose.override.yml AC_AI_PLAYERBOT_MIN_RANDOM_BOTS missing or non-numeric"
+        fail "docker-compose.override.yml AC_PLAYERBOTS_MIN_RANDOM_BOTS missing or non-numeric"
     fi
-    if grep -qE '^      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
-        ok "docker-compose.override.yml AC_AI_PLAYERBOT_MAX_RANDOM_BOTS is numeric"
+    if grep -qE '^      AC_PLAYERBOTS_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE"; then
+        ok "docker-compose.override.yml AC_PLAYERBOTS_MAX_RANDOM_BOTS is numeric"
     else
-        fail "docker-compose.override.yml AC_AI_PLAYERBOT_MAX_RANDOM_BOTS missing or non-numeric"
+        fail "docker-compose.override.yml AC_PLAYERBOTS_MAX_RANDOM_BOTS missing or non-numeric"
     fi
-    pb_min="$(grep -E '^      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
-    pb_max="$(grep -E '^      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
+    pb_min="$(grep -E '^      AC_PLAYERBOTS_MIN_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
+    pb_max="$(grep -E '^      AC_PLAYERBOTS_MAX_RANDOM_BOTS: "[0-9]+"$' "$OVERRIDE" | grep -oE '[0-9]+' | head -1)"
     if [ -n "$pb_min" ] && [ -n "$pb_max" ] && [ "$pb_min" = "$pb_max" ]; then
         ok "Playerbot MIN/MAX_RANDOM_BOTS agree ($pb_min)"
     elif [ -n "$pb_min" ] || [ -n "$pb_max" ]; then
@@ -598,7 +598,7 @@ fi
 
 # ============================================================================
 # Check 11 — playerbots.conf exists on the host (seeded by install Phase 3.1).
-# Content is no longer asserted; AiPlayerbot.Enabled and friends are sourced
+# Content is no longer asserted; Playerbots.Enabled and friends are sourced
 # from AC_* env vars (verified by Check 8 and Check 12).
 # ============================================================================
 PB_CONF=""
@@ -619,16 +619,16 @@ fi
 # Check 12 — managed AC_* env vars map to loaded worldserver config keys
 # ============================================================================
 managed_vars=(
-    AC_AI_PLAYERBOT_ENABLED
-    AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN
+    AC_PLAYERBOTS_ENABLED
+    AC_PLAYERBOTS_RANDOM_BOT_AUTOLOGIN
     AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES
-    AC_AI_PLAYERBOT_MIN_RANDOM_BOTS
-    AC_AI_PLAYERBOT_MAX_RANDOM_BOTS
-    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE
-    AC_AI_PLAYERBOT_DISABLED_WITHOUT_REAL_PLAYER
-    AC_AI_PLAYERBOT_ENABLE_PERIODIC_ONLINE_OFFLINE
-    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
-    AC_AI_PLAYERBOT_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
+    AC_PLAYERBOTS_MIN_RANDOM_BOTS
+    AC_PLAYERBOTS_MAX_RANDOM_BOTS
+    AC_PLAYERBOTS_BOT_ACTIVE_ALONE
+    AC_PLAYERBOTS_DISABLED_WITHOUT_REAL_PLAYER
+    AC_PLAYERBOTS_ENABLE_PERIODIC_ONLINE_OFFLINE
+    AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IS_FRIEND
+    AC_PLAYERBOTS_BOT_ACTIVE_ALONE_FORCE_WHEN_IN_GUILD
     AC_PLAYERBOTS_DATABASE_SYNCH_THREADS
     AC_AUCTION_HOUSE_BOT_ENABLE_SELLER
     AC_AUCTION_HOUSE_BOT_BUYER_ENABLED
