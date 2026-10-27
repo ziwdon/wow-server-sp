@@ -124,6 +124,8 @@ def _run(stack, archive, bind, logf, extra_env=None, guard=False):
         **os.environ,
         "PATH": f"{bind}:{os.environ['PATH']}",
         "DOCKER_CALLS_LOG": str(logf),
+        # Pinned to a missing path so no test can reach a real admin data dir.
+        "ADMIN_DATA_DIR": str(stack.parent / "no-admin-data"),
         **(extra_env or {}),
     }
     return subprocess.run(
@@ -804,9 +806,12 @@ REVS = {"core": "1" * 40, "mod-playerbots": "2" * 40, "mod-ah-bot-plus": "3" * 4
         "mod-individual-progression": "4" * 40}
 
 
-def _git_stub(bind: Path) -> None:
+def _git_stub(bind: Path, no_commits: str = "") -> None:
+    # no_commits: a dir suffix whose repo has no commits; real `git rev-parse HEAD`
+    # there prints "HEAD" on stdout and exits 128.
     _make_stub(bind / "git", (
         '#!/bin/bash\n'
+        f'[ -n "{no_commits}" ] && case "$2" in *{no_commits}) echo HEAD; exit 128 ;; esac\n'
         'case "$2" in\n'
         '  */modules/mod-playerbots) echo 2222222222222222222222222222222222222222 ;;\n'
         '  */modules/mod-ah-bot-plus) echo 3333333333333333333333333333333333333333 ;;\n'
@@ -816,6 +821,13 @@ def _git_stub(bind: Path) -> None:
     ))
 
 
+def _mark_git_checkouts(stack: Path, skip: tuple[str, ...] = ()) -> None:
+    """Give the core and each module its own .git, as a real checkout has."""
+    for rel in (".", "modules/mod-playerbots", "modules/mod-ah-bot-plus", "modules/mod-individual-progression"):
+        if rel not in skip:
+            (stack / rel / ".git").mkdir(parents=True, exist_ok=True)
+
+
 def _guard_manifest(**revs):
     return {"format_version": 1, "label": "manual", "databases": list(DATABASES),
             "skipped_databases": [], "git_revisions": {**REVS, **revs}}
@@ -823,6 +835,7 @@ def _guard_manifest(**revs):
 
 def test_dr_restore_refuses_archives_from_other_source_revisions(tmp_path):
     stack = _stack(tmp_path)
+    _mark_git_checkouts(stack)
     archive = _make_archive(tmp_path, manifest=_guard_manifest(**{"mod-playerbots": "9" * 40}))
     bind = tmp_path / "bin"; bind.mkdir()
     logf = tmp_path / "docker.log"
@@ -832,12 +845,12 @@ def test_dr_restore_refuses_archives_from_other_source_revisions(tmp_path):
     assert r.returncode == 1
     assert "different AzerothCore/module revisions" in r.stderr
     assert "mod-playerbots" in r.stderr
-    calls = logf.read_text() if logf.exists() else ""
-    assert "stop" not in calls and "DROP DATABASE" not in calls
+    assert not logf.exists(), "the guard precedes every docker call"
 
 
 def test_dr_restore_accepts_matching_revisions_and_restores_etc_and_admin_data(tmp_path):
     stack = _stack(tmp_path)
+    _mark_git_checkouts(stack)
     (stack / "env" / "dist" / "etc").mkdir(parents=True)
     admin_data = tmp_path / "admin-data"; admin_data.mkdir()
     archive = _make_archive(tmp_path, manifest=_guard_manifest())
@@ -888,3 +901,80 @@ def test_dr_restore_readiness_survives_a_long_worldserver_log(tmp_path):
         "RESTORE_READY_POLL_SECONDS": "1"})
     assert r.returncode == 0, r.stderr
     assert "initialized after" in r.stdout
+
+
+def test_dr_restore_admin_data_default_derives_from_stack_dir(tmp_path):
+    stack = _stack(tmp_path)
+    admin_data = tmp_path / "azerothcore-admin" / "data"; admin_data.mkdir(parents=True)
+    archive = _make_archive(tmp_path)
+    extra = tmp_path / "extra"
+    (extra / "config" / "admin-data").mkdir(parents=True)
+    (extra / "config" / "admin-data" / "maintenance.json").write_text('{"restart_enabled": false}')
+    _rewrite_archive_with(archive, extra)
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    r = _run(stack, archive, bind, logf,
+             extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state"), "ADMIN_DATA_DIR": ""})  # empty = unset
+    assert r.returncode == 0, r.stderr
+    assert (admin_data / "maintenance.json").read_text() == '{"restart_enabled": false}'
+
+
+def test_dr_restore_refuses_an_archive_without_recorded_revisions(tmp_path):
+    stack = _stack(tmp_path)
+    _mark_git_checkouts(stack)
+    archive = _make_archive(tmp_path)  # default manifest records no git_revisions
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    _git_stub(bind)
+    r = _run(stack, archive, bind, logf, extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state")}, guard=True)
+    assert r.returncode == 1
+    assert "unknown" in r.stderr
+    assert not logf.exists(), "nothing may run against an archive whose revisions are unknown"
+
+
+def test_dr_restore_treats_a_module_without_its_own_git_dir_as_unknown(tmp_path):
+    # Real git would walk up from a plain module directory to the core repo and report ITS HEAD.
+    stack = _stack(tmp_path)
+    _mark_git_checkouts(stack, skip=("modules/mod-ah-bot-plus",))
+    (stack / "modules" / "mod-ah-bot-plus").mkdir(parents=True)
+    archive = _make_archive(tmp_path, manifest=_guard_manifest())
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    _git_stub(bind)
+    r = _run(stack, archive, bind, logf, extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state")}, guard=True)
+    assert r.returncode == 1
+    assert "mod-ah-bot-plus: archive 333333333333 / stack unknown" in r.stderr
+    assert not logf.exists()
+
+
+def test_dr_restore_treats_a_failing_git_lookup_as_unknown(tmp_path):
+    # A repo without commits: `git rev-parse HEAD` prints "HEAD" yet exits 128.
+    stack = _stack(tmp_path)
+    _mark_git_checkouts(stack)
+    archive = _make_archive(tmp_path, manifest=_guard_manifest())
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    _git_stub(bind, no_commits="modules/mod-playerbots")
+    r = _run(stack, archive, bind, logf, extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state")}, guard=True)
+    assert r.returncode == 1
+    assert "mod-playerbots: archive 222222222222 / stack unknown" in r.stderr
+    assert not logf.exists()
+
+
+def test_dr_restore_logs_when_the_admin_data_dir_is_missing(tmp_path):
+    stack = _stack(tmp_path)
+    archive = _make_archive(tmp_path)
+    extra = tmp_path / "extra"
+    (extra / "config" / "admin-data").mkdir(parents=True)
+    (extra / "config" / "admin-data" / "maintenance.json").write_text("{}")
+    _rewrite_archive_with(archive, extra)
+    bind = tmp_path / "bin"; bind.mkdir()
+    logf = tmp_path / "docker.log"
+    _stateful_docker_stub(bind)
+    r = _run(stack, archive, bind, logf, extra_env={"DOCKER_STATE_FILE": str(tmp_path / "state")})
+    assert r.returncode == 0, r.stderr
+    assert f"Skipping admin settings; {tmp_path / 'no-admin-data'} not found." in r.stdout

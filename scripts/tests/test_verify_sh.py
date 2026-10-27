@@ -73,9 +73,9 @@ esac
     return bind
 
 
-def _run(stack: Path, bind: Path, **extra_env: str) -> subprocess.CompletedProcess[str]:
+def _run(stack: Path, bind: Path, verify_sh: Path = VERIFY_SH, **extra_env: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/bash", str(VERIFY_SH)],
+        ["/bin/bash", str(verify_sh)],
         env={
             **os.environ,
             "STACK_DIR": str(stack),
@@ -272,3 +272,13 @@ def test_deployed_backup_script_must_match_the_repository(tmp_path):
     shutil.copy(SCRIPTS_DIR / "backup.sh", stack / "backup.sh")
     fresh = _run(stack, bind)
     assert "[OK] deployed backup.sh matches scripts/backup.sh" in fresh.stdout
+
+
+def test_verifier_without_a_repository_backup_script_says_it_cannot_compare(tmp_path):
+    stack, bind = _stack(tmp_path), _stubs(tmp_path)
+    lonely = tmp_path / "lonely" / "verify-azerothcore.sh"
+    lonely.parent.mkdir()
+    shutil.copy(VERIFY_SH, lonely)
+    result = _run(stack, bind, lonely)
+    assert "[INFO] cannot compare deployed backup.sh (no scripts/backup.sh next to the verifier)" in result.stdout
+    assert "deployed backup.sh differs" not in result.stdout

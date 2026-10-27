@@ -1096,7 +1096,7 @@ verify_managed_env_vars_bound_in_worldserver() {
         fi
 
         mapped_key="${env_to_key[$var]}"
-        if printf '%s\n' "$log_content" | grep -qF "from environment variable '${var}'"; then
+        if grep -qF "from environment variable '${var}'" <<<"$log_content"; then
             echo "  ✓ ${var} -> ${mapped_key} (startup binding log observed)"
         else
             echo "  ✓ ${var} -> ${mapped_key} (present; no startup binding log required)"

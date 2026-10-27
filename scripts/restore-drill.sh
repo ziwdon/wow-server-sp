@@ -200,8 +200,12 @@ fi
 ok "all four databases imported in $(( $(date +%s) - started_at ))s"
 
 # Table inventory: tables created in the drill vs CREATE TABLE statements per
-# database section in the dump itself.
-python3 -I - "$ARCHIVE" "$layout" > "$WORK/expected.tsv" <<'PY'
+# database section in the dump itself. The same pass checks each member's last
+# ~4 KB for mysqldump's completion footer: a truncated dump can import cleanly
+# up to the cut (exit 3 = footer missing; counts are still printed).
+inventory_rc=0
+python3 -I - "$ARCHIVE" "$layout" > "$WORK/expected.tsv" <<'PY' || inventory_rc=$?
+import collections
 import re
 import sys
 import tarfile
@@ -210,19 +214,33 @@ archive, layout = sys.argv[1:3]
 dbs = ["acore_auth", "acore_characters", "acore_world", "acore_playerbots"]
 counts = dict.fromkeys(dbs, 0)
 section = re.compile(rb"^-- Current Database: `([^`]+)`")
+incomplete = False
 with tarfile.open(archive, "r:gz") as tf:
     members = ["sql/azerothcore.sql"] if layout == "v2" else [f"sql/{db}.sql" for db in dbs]
     for member in members:
         current = None if layout == "v2" else member[4:-4]
+        tail, tail_size = collections.deque(), 0
         for line in tf.extractfile(member):
             m = section.match(line)
             if m:
                 current = m.group(1).decode()
             elif line.startswith(b"CREATE TABLE ") and current in counts:
                 counts[current] += 1
+            tail.append(line)
+            tail_size += len(line)
+            while tail_size - len(tail[0]) >= 4096:
+                tail_size -= len(tail.popleft())
+        if b"-- Dump completed" not in b"".join(tail)[-4096:]:
+            incomplete = True
 for db in dbs:
     print(f"{db}\t{counts[db]}")
+raise SystemExit(3 if incomplete else 0)
 PY
+case "$inventory_rc" in
+    0) ;;
+    3) bad "dump is incomplete (no '-- Dump completed' footer)" ;;
+    *) bad "could not read the SQL dump to count its tables"; exit 1 ;;
+esac
 dmysql -N -B -e "SELECT table_schema, COUNT(*) FROM information_schema.tables WHERE table_schema IN ('acore_auth','acore_characters','acore_world','acore_playerbots') AND table_type='BASE TABLE' GROUP BY table_schema ORDER BY table_schema" 2>/dev/null > "$WORK/actual.tsv"
 if diff <(sort "$WORK/expected.tsv") <(sort "$WORK/actual.tsv") >/dev/null; then
     ok "table inventory matches the dump: $(tr '\t\n' '= ' < "$WORK/actual.tsv")"
@@ -253,8 +271,12 @@ if [ "$COMPARE_LIVE" = true ]; then
         awk -F. '{printf "SELECT '\''%s.%s'\'', COUNT(*) FROM `%s`.`%s`;\n",$1,$2,$1,$2}' "$WORK/tables.txt"
     } > "$WORK/count.sql"
     dmysql -N -B < "$WORK/count.sql" 2>/dev/null > "$WORK/drill-counts.tsv"
-    docker exec -i "$LIVE_DB_CONTAINER" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B 2>/dev/null' \
-        < "$WORK/count.sql" > "$WORK/live-counts.tsv"
+    # --force keeps going past a table that is missing live (the comparison
+    # below reports it as live=missing); its non-zero exit must not abort.
+    if ! docker exec -i "$LIVE_DB_CONTAINER" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot --force -N -B 2>/dev/null' \
+        < "$WORK/count.sql" > "$WORK/live-counts.tsv"; then
+        info "some live count queries failed (tables missing live?)"
+    fi
     python3 -I - "$WORK/drill-counts.tsv" "$WORK/live-counts.tsv" <<'PY'
 import sys
 drill = dict(l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if l.strip())

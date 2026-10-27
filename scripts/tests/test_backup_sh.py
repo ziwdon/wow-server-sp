@@ -55,6 +55,7 @@ def _stubs(tmp_path: Path) -> Path:
         '  inspect) [ "${FAIL_DOCKER_INSPECT:-}" = 1 ] && exit 42; exit 0 ;;\n'
         '  exec)\n'
         '    shift\n'
+        '    if printf "%s " "$@" | grep -q data-version; then printf "%s" "${CLIENT_DATA_OUT:-}"; exit 0; fi\n'
         '    if printf "%s " "$@" | grep -q mysqldump; then\n'
         '      if [ "${BLOCK_MYSQLDUMP:-}" = 1 ]; then\n'
         '        touch "${BACKUP_STARTED:?}"\n'
@@ -83,6 +84,8 @@ def _run(stack: Path, bind: Path, *args: str, extra_env=None) -> subprocess.Comp
     env = {
         **os.environ, "PATH": f"{bind}:{os.environ['PATH']}", "STACK_DIR": str(stack),
         "CANONICAL_DUMP": _v2_dump(),
+        # Pinned to a missing path so no test can reach a real admin data dir.
+        "ADMIN_DATA_DIR": str(stack.parent / "no-admin-data"),
         **(extra_env or {}),
     }
     return subprocess.run(
@@ -476,3 +479,51 @@ def test_archive_captures_etc_confs_and_admin_data(tmp_path):
     assert set(manifest["images"]) == {"worldserver", "authserver", "db-import", "client-data"}
     assert manifest["client_data_version"] == "unknown"
     assert len(manifest["backup_script_sha256"]) == 64
+    assert "Captured 1 generated server config(s) from env/dist/etc" in r.stdout
+    assert f"Captured 2 admin setting file(s) from {admin_data}" in r.stdout
+
+
+def test_missing_etc_and_admin_data_dirs_are_logged_not_errors(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    r = _run(stack, bind, "--label", "manual")  # _run pins ADMIN_DATA_DIR to a missing path
+    assert r.returncode == 0, r.stderr
+    assert "No env/dist/etc under" in r.stdout
+    assert f"Admin data dir {tmp_path / 'no-admin-data'} not found; no admin settings captured." in r.stdout
+
+
+def test_admin_data_dir_default_derives_from_stack_dir(tmp_path):
+    stack = _stack(tmp_path)
+    admin_data = tmp_path / "azerothcore-admin" / "data"
+    admin_data.mkdir(parents=True)
+    (admin_data / "maintenance.json").write_text('{"restart_enabled": true}')
+    bind = _stubs(tmp_path)
+    r = _run(stack, bind, "--label", "manual", extra_env={"ADMIN_DATA_DIR": ""})  # empty = unset
+    assert r.returncode == 0, r.stderr
+    archive = next((stack / "backups").glob("azerothcore-backup-manual-*.tar.gz"))
+    with tarfile.open(archive) as tf:
+        assert "config/admin-data/maintenance.json" in tf.getnames()
+
+
+def test_client_data_version_is_sanitized_before_it_enters_the_manifest(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    r = _run(stack, bind, "--label", "manual", extra_env={"CLIENT_DATA_OUT": 'v1"2\n"injected": 1\n'})
+    assert r.returncode == 0, r.stderr
+    archive = next((stack / "backups").glob("azerothcore-backup-manual-*.tar.gz"))
+    with tarfile.open(archive) as tf:
+        manifest = json.loads(tf.extractfile("manifest.json").read())  # still valid JSON
+    assert manifest["client_data_version"] == "v12"
+    assert "injected" not in manifest
+
+
+def test_unhashable_backup_script_does_not_abort_the_backup(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    _make_stub(bind / "sha256sum", "#!/bin/bash\nexit 1\n")
+    r = _run(stack, bind, "--label", "manual")
+    assert r.returncode == 0, r.stderr
+    archive = next((stack / "backups").glob("azerothcore-backup-manual-*.tar.gz"))
+    with tarfile.open(archive) as tf:
+        manifest = json.loads(tf.extractfile("manifest.json").read())
+    assert manifest["backup_script_sha256"] == "unknown"

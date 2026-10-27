@@ -505,10 +505,11 @@ def test_installer_playerbots_fatal_log_check_survives_a_long_log(tmp_path: Path
     # Under pipefail, `docker logs | grep -q` returns 141 (SIGPIPE) once grep
     # matches early in a long log, turning a real fatal match into "no match".
     source = INSTALLER.read_text()
-    functions = "".join(
-        re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.S | re.M).group(0)
-        for name in ("worldserver_playerbots_fatal_pattern", "worldserver_has_playerbots_fatal_logs")
-    )
+    functions = ""
+    for name in ("worldserver_playerbots_fatal_pattern", "worldserver_has_playerbots_fatal_logs"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", source, re.S | re.M)
+        assert match, name
+        functions += match.group(0)
     big = tmp_path / "big.log"
     big.write_text("Unknown database 'acore_playerbots'\n" + "bot spam line\n" * 200000)
     bindir = tmp_path / "bin"; bindir.mkdir()
@@ -524,3 +525,17 @@ def test_installer_playerbots_fatal_log_check_survives_a_long_log(tmp_path: Path
     result = _run(script, env={"PATH": f"{bindir}:{os.environ['PATH']}"})
     assert result.returncode == 0, result.stdout + result.stderr
     assert "FATAL_DETECTED" in result.stdout
+
+
+def test_no_script_pipes_docker_logs_or_a_log_capture_into_grep_q() -> None:
+    # Under pipefail, `grep -q` closing the pipe early SIGPIPEs the writer once
+    # the log is long. Use `grep -q … < <(docker logs …)` or a here-string.
+    sigpipe_prone = re.compile(
+        r"docker\s+logs\b[^\n]*\|\s*grep\s+-\w*q|\"\$log_content\"\s*\|\s*grep\s+-\w*q"
+    )
+    offenders = []
+    for script in sorted(ROOT.glob("*.sh")):
+        joined = script.read_text().replace("\\\n", " ")  # fold line continuations
+        offenders += [f"{script.name}: {line.strip()}" for line in joined.splitlines()
+                      if sigpipe_prone.search(line)]
+    assert not offenders, offenders

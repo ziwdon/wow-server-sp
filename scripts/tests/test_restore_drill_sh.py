@@ -19,10 +19,10 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _archive(tmp_path: Path) -> Path:
+def _archive(tmp_path: Path, footer: bool = True) -> Path:
     dump = "".join(
         f"-- Current Database: `{db}`\nCREATE TABLE `t_{db}` (id int);\n" for db in DBS
-    ) + "-- Dump completed on 2026-10-27  3:00:00\n"
+    ) + ("-- Dump completed on 2026-10-27  3:00:00\n" if footer else "")
     manifest = {"format_version": 2, "databases": DBS, "skipped_databases": [],
                 "dump_layout": "single-multi-database"}
     path = tmp_path / "azerothcore-backup-manual-x.tar.gz"
@@ -52,12 +52,16 @@ case "$1 $2" in
     case "$*" in
       *"ac-database"*)
         cat > "${{DRILL_LIVE_SQL:-/dev/null}}"
-        printf 'acore_auth.account\\t7\\n' ;;
+        printf 'acore_auth.account\\t7\\n'
+        if [ -n "${{DRILL_LIVE_FAILS:-}}" ]; then exit 1; fi ;;
       *"table_schema LIKE"*)
         printf 'acore_auth.account\\nacore_world.creature\\nacore_world.x;DROP TABLE y\\n' ;;
       *"information_schema.tables WHERE table_schema IN"*)
         printf 'acore_auth\\t1\\nacore_characters\\t1\\nacore_playerbots\\t1\\nacore_world\\t1\\n' ;;
       *"SELECT COUNT(*) FROM"*) echo 7 ;;
+      *"--protocol=TCP -N -B")
+        cat >/dev/null
+        printf 'acore_auth.account\\t7\\nacore_world.creature\\t5\\n' ;;
       *) cat >/dev/null 2>&1 || true ;;
     esac ;;
   "rm "*) ;;
@@ -181,3 +185,26 @@ def test_compare_live_sends_only_read_only_count_queries_to_the_live_db(tmp_path
     for line in queries:
         assert line.startswith("SELECT '") and "COUNT(*) FROM" in line and line.endswith(";"), line
     assert "DROP" not in "\n".join(live_sql)
+
+
+def test_compare_live_survives_a_table_missing_from_the_live_database(tmp_path):
+    # The live mysql exits non-zero when a counted table does not exist there;
+    # that must be reported as live=missing, not abort the drill with no RESULT.
+    bind = _bin(tmp_path, "none|{}|volume:x;", extra_tools=("awk",))
+    r = _run(tmp_path, bind, str(_archive(tmp_path)), "--compare-live",
+             env_extra={"DRILL_LIVE_FAILS": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "some live count queries failed" in r.stdout
+    assert "acore_world.creature: backup=5 live=missing" in r.stdout
+    assert "RESULT: DRILL PASSED" in r.stdout
+    assert (tmp_path / "live.sql").read_text().splitlines()[0] == "SET SESSION TRANSACTION READ ONLY;"
+
+
+def test_drill_fails_when_the_dump_has_no_completion_footer(tmp_path):
+    # A truncated dump can still import cleanly up to the cut; only the footer proves it is whole.
+    bind = _bin(tmp_path, "none|{}|volume:x;")
+    r = _run(tmp_path, bind, str(_archive(tmp_path, footer=False)))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "dump is incomplete (no '-- Dump completed' footer)" in r.stdout
+    assert "RESULT: DRILL FAILED" in r.stdout and "RESULT: DRILL PASSED" not in r.stdout
+    assert "rm -f -v acup-drill-db" in (tmp_path / "calls").read_text()

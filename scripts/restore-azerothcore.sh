@@ -3,6 +3,8 @@ set -euo pipefail
 
 # Fresh-machine disaster recovery restore. Run this after reinstalling the
 # AzerothCore stack, using a backup archive produced by scripts/backup.sh.
+# The archive's source revisions (manifest git_revisions) must match this
+# stack's or the restore is refused; see --allow-version-mismatch below.
 
 STACK_DIR="/opt/stacks/azerothcore"
 DB_CONTAINER="ac-database"
@@ -38,6 +40,9 @@ Options:
   -h, --help                Show this help
 
 Run against a freshly reinstalled stack as your normal user, not with sudo.
+The archive's source revisions (manifest git_revisions) must match this stack's,
+or the restore is refused. For fresh-machine recovery, check out those revisions
+and rebuild first, or pass --allow-version-mismatch knowingly.
 USAGE
 }
 
@@ -459,6 +464,7 @@ validate_dump_set
 check_source_revisions() {
     python3 - "${STAGE}/manifest.json" "$STACK_DIR" <<'PY'
 import json
+import os
 import subprocess
 import sys
 
@@ -473,13 +479,20 @@ dirs = {
 archived = manifest.get("git_revisions") or {}
 problems = []
 for key, rel in dirs.items():
-    try:
-        current = subprocess.run(
-            ["git", "-C", f"{stack}/{rel}", "-c", "safe.directory=*", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout.strip() or "unknown"
-    except (OSError, subprocess.TimeoutExpired):
-        current = "unknown"
+    repo = f"{stack}/{rel}"
+    current = "unknown"
+    # Only a checkout with its own .git (file or dir) counts: git would
+    # otherwise walk up and report a parent repo's HEAD for a plain directory.
+    if os.path.exists(f"{repo}/.git"):
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo, "-c", "safe.directory=*", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                current = result.stdout.strip() or "unknown"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     wanted = archived.get(key) or "unknown"
     if "unknown" in (wanted, current) or wanted != current:
         problems.append(f"{key}: archive {wanted[:12]} / stack {current[:12]}")
@@ -494,8 +507,7 @@ if ! revision_report="$(check_source_revisions)"; then
     else
         echo "ERROR: archive was taken on different AzerothCore/module revisions than this stack runs:" >&2
         printf '%s\n' "$revision_report" | sed 's/^/  /' >&2
-        echo "Check out the archive's revisions (manifest git_revisions) and rebuild, use" >&2
-        echo "scripts/upgrade-azerothcore.sh rollback, or pass --allow-version-mismatch." >&2
+        echo "Check out the archive's revisions (manifest git_revisions) and rebuild, or pass --allow-version-mismatch." >&2
         exit 1
     fi
 fi
@@ -579,9 +591,13 @@ if [ -d "${STAGE}/config/etc" ]; then
         exit 1
     fi
 fi
-ADMIN_DATA_DIR="${ADMIN_DATA_DIR:-/opt/stacks/azerothcore-admin/data}"
-if [ -d "${STAGE}/config/admin-data" ] && [ -d "${ADMIN_DATA_DIR}" ]; then
-    if ! cp -a "${STAGE}/config/admin-data/." "${ADMIN_DATA_DIR}/"; then
+# Derived from the final STACK_DIR (--stack-dir is parsed above), so a sandboxed
+# stack never writes to the live admin data.
+ADMIN_DATA_DIR="${ADMIN_DATA_DIR:-$(dirname "$STACK_DIR")/azerothcore-admin/data}"
+if [ -d "${STAGE}/config/admin-data" ]; then
+    if [ ! -d "${ADMIN_DATA_DIR}" ]; then
+        log "Skipping admin settings; ${ADMIN_DATA_DIR} not found."
+    elif ! cp -a "${STAGE}/config/admin-data/." "${ADMIN_DATA_DIR}/"; then
         echo "ERROR: Could not copy restored admin settings. The server remains stopped; re-run restore with a known-good archive." >&2
         exit 1
     fi

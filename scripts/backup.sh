@@ -140,22 +140,34 @@ fi
 # to their .dist templates, but a hand edit there must never be lost.
 if [ -d "${STACK_DIR}/env/dist/etc" ]; then
     mkdir -p "${STAGE}/config/etc"
+    etc_count=0
     for conf in "${STACK_DIR}"/env/dist/etc/*.conf; do
         if [ -f "$conf" ]; then
             cp -a "$conf" "${STAGE}/config/etc/"
+            etc_count=$((etc_count + 1))
         fi
     done
+    log "Captured ${etc_count} generated server config(s) from env/dist/etc"
+else
+    log "No env/dist/etc under ${STACK_DIR}; no generated server configs captured."
 fi
 # Admin app runtime settings (maintenance schedule, login announcer toggle).
-# The admin container sets ADMIN_DATA_DIR=/admin-data; host cron uses the default.
-ADMIN_DATA_DIR="${ADMIN_DATA_DIR:-/opt/stacks/azerothcore-admin/data}"
+# The admin container sets ADMIN_DATA_DIR=/admin-data; host cron derives it from
+# STACK_DIR (/opt/stacks/azerothcore -> /opt/stacks/azerothcore-admin/data), so a
+# relocated or sandboxed STACK_DIR never points at the live admin data.
+ADMIN_DATA_DIR="${ADMIN_DATA_DIR:-$(dirname "$STACK_DIR")/azerothcore-admin/data}"
 if [ -d "${ADMIN_DATA_DIR}" ]; then
     mkdir -p "${STAGE}/config/admin-data"
+    admin_count=0
     for item in maintenance.json presence.json; do
         if [ -f "${ADMIN_DATA_DIR}/${item}" ]; then
             cp -a "${ADMIN_DATA_DIR}/${item}" "${STAGE}/config/admin-data/${item}"
+            admin_count=$((admin_count + 1))
         fi
     done
+    log "Captured ${admin_count} admin setting file(s) from ${ADMIN_DATA_DIR}"
+else
+    log "Admin data dir ${ADMIN_DATA_DIR} not found; no admin settings captured."
 fi
 
 git_rev() {
@@ -176,9 +188,12 @@ image_id() {
     id="$(docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true)"
     echo "${id:-unknown}"
 }
+# Both values are interpolated into manifest.json below: keep the first line
+# and a JSON-safe charset, and never let a lookup failure abort the backup.
 client_data_version="$(docker exec ac-worldserver sh -c \
-    'sed -n "s/^INSTALLED_VERSION=//p" /azerothcore/env/dist/data/data-version' 2>/dev/null || true)"
-script_sha="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
+    'sed -n "s/^INSTALLED_VERSION=//p" /azerothcore/env/dist/data/data-version' 2>/dev/null \
+    | head -n 1 | tr -cd 'A-Za-z0-9._-' || true)"
+script_sha="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1 || true)"
 
 json_array() {
     local out="" first=1 x
@@ -210,7 +225,7 @@ cat > "${STAGE}/manifest.json" <<MANIFEST
     "client-data": "$(image_id "acore/ac-wotlk-client-data:${ac_image}")"
   },
   "client_data_version": "${client_data_version:-unknown}",
-  "backup_script_sha256": "${script_sha}",
+  "backup_script_sha256": "${script_sha:-unknown}",
   "stack_dir": "${STACK_DIR}"
 }
 MANIFEST
