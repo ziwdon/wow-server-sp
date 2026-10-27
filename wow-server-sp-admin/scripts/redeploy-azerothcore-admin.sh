@@ -151,8 +151,12 @@ ADMIN_IMAGE="$CANDIDATE_IMAGE" docker compose -f "$STAGE_DIR/docker-compose.yml"
 
 # Everything above is fallible but non-disruptive. Only now replace the
 # running app, retaining the old compose file/image for automatic rollback.
-sudo mkdir -p "$STACK_DIR/data"
-sudo chown "$(id -u):$(id -g)" "$STACK_DIR/data"
+# sudo is skipped when data/ is already correct: non-interactive callers (e.g.
+# the upgrade cutover) have no TTY for a password prompt.
+if ! { [ -d "$STACK_DIR/data" ] && [ "$(stat -c '%u:%g' "$STACK_DIR/data")" = "$(id -u):$(id -g)" ]; }; then
+    sudo mkdir -p "$STACK_DIR/data"
+    sudo chown "$(id -u):$(id -g)" "$STACK_DIR/data"
+fi
 cp "$STAGE_DIR/docker-compose.yml" "$STACK_DIR/docker-compose.yml"
 
 echo "==> Starting candidate admin container..."

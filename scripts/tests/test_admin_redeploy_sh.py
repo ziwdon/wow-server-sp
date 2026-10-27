@@ -72,7 +72,10 @@ if [ "${ADMIN_REDEPLOY_CASE:-healthy}" = rsync-delete-dist ]; then
 fi
 exit 0
 """)
-    _executable(bind / "sudo", "#!/bin/sh\nexec \"$@\"\n")
+    _executable(bind / "sudo", """#!/bin/sh
+if [ -n "${ADMIN_REDEPLOY_SUDO_LOG:-}" ]; then echo "$@" >> "$ADMIN_REDEPLOY_SUDO_LOG"; fi
+exec "$@"
+""")
     _executable(bind / "sleep", "#!/bin/sh\nexit 0\n")
     return bind
 
@@ -194,3 +197,43 @@ def test_candidate_key_index_comes_from_the_ac_source_tree(tmp_path):
                      extra_env={"AC_STACK_DIR": str(ac), "ADMIN_REDEPLOY_DIST_LOG": str(dist_log)})
     assert result.returncode == 0, result.stderr
     assert dist_log.read_text().startswith("# from modules/mod-playerbots/conf/playerbots.conf.dist")
+
+
+def _own_data_dir(stack: Path) -> Path:
+    """Create stack/data owned by the uid:gid that will actually run the script."""
+    data = stack / "data"
+    data.mkdir()
+    if os.geteuid() == 0:
+        # _run drops to nobody (65534:65534) when the suite runs as root.
+        os.chown(data, 65534, 65534)
+    return data
+
+
+def test_redeploy_skips_sudo_when_data_dir_is_already_owned_by_caller(tmp_path):
+    stack = _stack(tmp_path)
+    data = _own_data_dir(stack)
+    bind = _stubs(tmp_path)
+    sudo_log = bind / "sudo.log"
+    result, calls = _run(stack, bind, "healthy", extra_env={"ADMIN_REDEPLOY_SUDO_LOG": str(sudo_log)})
+
+    assert result.returncode == 0, result.stderr
+    assert calls.count(" up") == 1, f"calls={calls!r}\nstdout={result.stdout}\nstderr={result.stderr}"
+    assert data.is_dir()
+    assert not sudo_log.exists() or sudo_log.read_text() == "", sudo_log.read_text()
+
+
+def test_redeploy_uses_sudo_to_create_missing_data_dir(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    sudo_log = bind / "sudo.log"
+    assert not (stack / "data").exists()
+    result, calls = _run(stack, bind, "healthy", extra_env={"ADMIN_REDEPLOY_SUDO_LOG": str(sudo_log)})
+
+    assert result.returncode == 0, result.stderr
+    assert calls.count(" up") == 1, f"calls={calls!r}\nstdout={result.stdout}\nstderr={result.stderr}"
+    uid_gid = f"{65534}:{65534}" if os.geteuid() == 0 else f"{os.getuid()}:{os.getgid()}"
+    assert sudo_log.read_text().splitlines() == [
+        f"mkdir -p {stack}/data",
+        f"chown {uid_gid} {stack}/data",
+    ]
+    assert (stack / "data").is_dir()
