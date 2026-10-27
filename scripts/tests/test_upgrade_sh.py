@@ -258,7 +258,8 @@ def _stub_docker(bind: Path) -> None:
     FAKE_RESTARTING); FAKE_RESTARTED containers report a StartedAt after any stop;
     FAKE_UNSTOPPABLE containers ignore `compose stop`; the worldserver's exit code
     (FAKE_WORLD_EXIT) and OOM flag (FAKE_OOM); a failing database (FAKE_DB_FAIL) or
-    volume probe (FAKE_PROBE_FAIL); per-volume probe facts keyed by the volume name
+    volume probe (FAKE_PROBE_FAIL); the account/character counts (FAKE_ACCOUNTS,
+    FAKE_CHARACTERS, default 0); per-volume probe facts keyed by the volume name
     with non-alphanumerics as "_": FAKE_VERSION_<vol>, FAKE_TREE_<vol> ("FILES BYTES",
     default "100 4096") and FAKE_MARKER_<vol> (the .acup-complete numbers, default
     the volume's own; empty = no marker) — a volume a copy wrote to (`-v VOL:/dst`)
@@ -294,7 +295,12 @@ case "$*" in
   "inspect -f {{.State.OOMKilled}} "*) echo "${FAKE_OOM:-false}" ;;
   "inspect -f {{.HostConfig.NetworkMode}}"*) echo "acup-rehearsal-net|{}|volume:acup-x:/y:false;" ;;
   "logs --since "*) echo "WORLD: World Initialized In 10 seconds" ;;
-  "exec ac-database "*) [ -z "${FAKE_DB_FAIL:-}" ] || exit 1; echo "${FAKE_HUMANS_ONLINE:-0}" ;;
+  "exec ac-database "*)
+    [ -z "${FAKE_DB_FAIL:-}" ] || exit 1
+    case "$*" in
+      *"FROM acore_auth.account),"*) printf '%s\t%s\n' "${FAKE_ACCOUNTS-0}" "${FAKE_CHARACTERS-0}" ;;
+      *) echo "${FAKE_HUMANS_ONLINE:-0}" ;;
+    esac ;;
   "exec -i -e MYSQL_PWD="*)
     case "$*" in *playerbots_speech*) echo 0 ;; *"column_name='id'"*) echo 1 ;; *) echo 42 ;; esac ;;
   "image inspect "*) echo sha256:abc ;;
@@ -464,7 +470,7 @@ def test_resumed_cutover_records_each_started_marker_before_its_action(tmp_path)
                            CLIENT_DATA_LIVE="v19", CLIENT_DATA_TARGET="v20.0",
                            CLIENT_DATA_ROLLBACK_VOLUME="acup-client-data-rollback-v19",
                            CLIENT_DATA_TARGET_VOLUME="acup-client-data-v20.0")
-    (state / "counts-before.txt").write_text("0\n")
+    (state / "counts-before.txt").write_text("0 0\n")
     _stopped(tmp_path, "ac-worldserver", "ac-authserver")  # as the completed stop step left them
     r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
              PEEK_STATE=str(state / "state.env"))
@@ -720,7 +726,7 @@ def _resume_fixture(tmp_path: Path, step: str, **facts):
     _stub_verifier(tools)
     _stub_script(tmp_path / "repo/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh", "admin-redeploy")
     state = _cutover_state(tmp_path, stack, _before(step), ADMIN_WAS_RUNNING="true", **facts)
-    (state / "counts-before.txt").write_text("0\n")
+    (state / "counts-before.txt").write_text("0 0\n")
     _stopped(tmp_path, "ac-worldserver", "ac-authserver")
     return tools, stack, bind, state
 
@@ -882,12 +888,14 @@ def test_i8_rollback_gives_restore_the_world_init_timeout(tmp_path):
     assert "ready=777" in _calls(tmp_path)
 
 
-@pytest.mark.parametrize("step, facts, env", [
-    ("verify", {"BOOT_STARTED": "1"}, {"FAKE_HUMANS_ONLINE": "5"}),   # counts 0 -> 5
-    ("boot", {}, {"FAKE_DBIMPORT_EXIT": "1"}),
+@pytest.mark.parametrize("step, facts, env, before", [
+    # F10 (operator decision): only a decrease stops the realm; an increase warns.
+    ("verify", {"BOOT_STARTED": "1"}, {"FAKE_CHARACTERS": "4"}, "0 5\n"),   # characters 5 -> 4
+    ("boot", {}, {"FAKE_DBIMPORT_EXIT": "1"}, "0 0\n"),
 ])
-def test_i9_counts_mismatch_and_failed_db_import_stop_the_realm(tmp_path, step, facts, env):
+def test_i9_counts_mismatch_and_failed_db_import_stop_the_realm(tmp_path, step, facts, env, before):
     tools, stack, bind, state = _resume_fixture(tmp_path, step, **facts)
+    (state / "counts-before.txt").write_text(before)
     r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", STOP_TIMEOUT="77", **env)
     assert r.returncode == 1
     lines = _calls(tmp_path).splitlines()
@@ -943,7 +951,7 @@ def test_n1_resume_after_an_interrupted_boot_step_reruns_the_boot(tmp_path):
     _stub_script(tmp_path / "repo/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh", "admin-redeploy")
     state = _cutover_state(tmp_path, stack, _before("boot"), ADMIN_WAS_RUNNING="true",
                            IMAGES_SWITCH_STARTED="1", BOOT_STARTED="1")
-    (state / "counts-before.txt").write_text("0\n")
+    (state / "counts-before.txt").write_text("0 0\n")
     r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "restarted" not in r.stdout + r.stderr
@@ -1811,3 +1819,37 @@ def test_f18_rollback_applies_a_live_diff_exactly_once(tmp_path, steps):
     r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
     assert r.returncode == 0, r.stdout + r.stderr
     assert (module / "README").read_text() == "managed patch\n"
+
+
+# F10 ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("before, env, shown", [
+    ("3 10\n", {"FAKE_ACCOUNTS": "2", "FAKE_CHARACTERS": "10"}, "accounts count DECREASED across the upgrade: 3 -> 2"),
+    ("3 10\n", {"FAKE_ACCOUNTS": "4", "FAKE_CHARACTERS": "9"}, "characters count DECREASED across the upgrade: 10 -> 9"),
+    ("3 10\n", {"FAKE_ACCOUNTS": "", "FAKE_CHARACTERS": ""}, "cannot compare accounts counts"),
+])
+def test_f10_a_count_decrease_stops_the_realm(tmp_path, before, env, shown):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    (state / "counts-before.txt").write_text(before)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", **env)
+    assert r.returncode == 1
+    assert shown in r.stderr and "Server is stopped" in r.stderr
+    assert _stops_after_up(tmp_path), _calls(tmp_path)
+    assert "STEP_verify" not in (state / "state.env").read_text()
+
+
+def test_f10_a_count_increase_warns_records_and_continues(tmp_path):
+    # A player or the bot pool may create a character while the new version boots.
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    (state / "counts-before.txt").write_text("3 10\n")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             FAKE_ACCOUNTS="3", FAKE_CHARACTERS="12")
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "WARNING: characters 10 -> 12 (+2) since the cold backup" in out
+    assert "check before opening the realm" in out
+    assert "WARNING: accounts" not in out
+    assert not _stops_after_up(tmp_path), _calls(tmp_path)
+    text = (state / "state.env").read_text()
+    assert "COUNTS_WARNING=characters 10 -> 12 (+2)" in text
+    assert "STEP_verify=1" in text and "CUTOVER_OK=1" in text

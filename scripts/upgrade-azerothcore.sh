@@ -1097,6 +1097,30 @@ refresh_module_confs() {
 }
 
 # ---------------------------------------------------------------- cutover ---
+# compare_counts — accounts and characters at the cold backup vs after the
+# upgraded boot. A decrease is data loss: stop the realm. An increase can be
+# legitimate (a player or the bot pool created one during boot): warn loudly,
+# record COUNTS_WARNING and go on. An unreadable count stops the realm.
+compare_counts() {
+    local before=() after=() i name b a
+    read -r -a before < "$STATE_DIR/counts-before.txt" || true
+    read -r -a after < "$STATE_DIR/counts-after.txt" || true
+    for i in 0 1; do
+        if [ "$i" = 0 ]; then name=accounts; else name=characters; fi
+        b="${before[$i]:-}"; a="${after[$i]:-}"
+        if ! [[ "$b" =~ ^[0-9]+$ && "$a" =~ ^[0-9]+$ ]]; then
+            stop_realm_and_die "cannot compare $name counts ('$b' -> '$a'; see $STATE_DIR/counts-before.txt and counts-after.txt)."
+        elif [ "$a" -lt "$b" ]; then
+            stop_realm_and_die "$name count DECREASED across the upgrade: $b -> $a ($((a - b))); data may have been lost."
+        elif [ "$a" -gt "$b" ]; then
+            echo "WARNING: $name $b -> $a (+$((a - b))) since the cold backup — expected only if a player or the bot pool created one during boot; check before opening the realm" >&2
+            state_set COUNTS_WARNING "$name $b -> $a (+$((a - b)))"
+        else
+            log "  $name: $a (unchanged since the cold backup)"
+        fi
+    done
+}
+
 # refuse_realm_started_since_stop — azerothcore.service starts the stack at
 # boot: a realm (or db-import) up between the stop step and BOOT_STARTED, or
 # started since the stop step and stopped again, means a host reboot or a hand
@@ -1441,9 +1465,7 @@ cmd_cutover() {
             fi
             db_query "SELECT (SELECT COUNT(*) FROM acore_auth.account),(SELECT COUNT(*) FROM acore_characters.characters)" \
                 | tr '\t' ' ' > "$STATE_DIR/counts-after.txt"
-            if ! cmp -s "$STATE_DIR/counts-before.txt" "$STATE_DIR/counts-after.txt"; then
-                stop_realm_and_die "account/character counts changed across the upgrade: $(cat "$STATE_DIR/counts-before.txt") -> $(cat "$STATE_DIR/counts-after.txt")."
-            fi
+            compare_counts
         fi
         mark_done verify
     fi
@@ -1462,6 +1484,9 @@ cmd_cutover() {
         mark_done admin
     fi
     state_mark CUTOVER_OK
+    if [ -n "$(state_get COUNTS_WARNING)" ]; then
+        echo "WARNING: account/character counts increased during the upgrade (COUNTS_WARNING in $STATE_DIR/state.env); check them before opening the realm." >&2
+    fi
     log "Cutover complete. Rollback stays available: $0 rollback --state $STATE_DIR"
     log "After a stable week: $0 finalize --state $STATE_DIR"
 }
@@ -1815,7 +1840,7 @@ cmd_status() {
     if [ -L "$UPGRADE_ROOT/current" ]; then
         STATE_DIR="$(readlink -f "$UPGRADE_ROOT/current")"
         echo "Cutover: $STATE_DIR"
-        { grep -E '^(STEP_|[A-Z_]+_STARTED=|CUTOVER_OK|ROLLED_BACK|FINALIZED)' "$STATE_DIR/state.env" || true; } | sed 's/^/  /'
+        { grep -E '^(STEP_|[A-Z_]+_STARTED=|CUTOVER_OK|COUNTS_WARNING|ROLLBACK_RESTORED|ROLLED_BACK|FINALIZED)' "$STATE_DIR/state.env" || true; } | sed 's/^/  /'
     else
         echo "Cutover: none"
     fi
