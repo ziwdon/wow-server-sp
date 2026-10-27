@@ -11,7 +11,8 @@ set -euo pipefail
 #   stage      staging checkout + candidate images + client data (live keeps running)
 #   rehearse   boot the candidate against a restored backup on an isolated network
 #   cutover    the only disruptive step: cold backup, switch, boot, verify
-#   rollback   return to the exact pre-cutover state (code, images, configs, DB)
+#   rollback   return to the exact pre-cutover state (code, images, configs, DB);
+#              after go-live it first saves the upgraded state (prerollback backup)
 #   finalize   delete rollback artifacts after the upgrade has proven itself
 #   status     show the current upgrade state
 #
@@ -21,7 +22,8 @@ set -euo pipefail
 #   upgrade-azerothcore.sh rehearse [--archive FILE]
 #   upgrade-azerothcore.sh cutover --previous-repo-rev REV [--pin AC_K=V]... [--yes]
 #                                  [--state DIR] [--skip-rehearsal] [--allow-online-players]
-#   upgrade-azerothcore.sh rollback [--state DIR] [--yes]
+#   upgrade-azerothcore.sh rollback [--state DIR] [--yes] [--no-safety-backup]
+#   upgrade-azerothcore.sh rollback [--state DIR] --accept-verify-failure
 #   upgrade-azerothcore.sh finalize [--state DIR] [--yes]
 #   upgrade-azerothcore.sh status
 #   Add --dry-run to print every mutating command instead of running it.
@@ -72,6 +74,8 @@ DRY_RUN=false
 YES=false
 ALLOW_ONLINE=false
 SKIP_REHEARSAL=false
+NO_SAFETY_BACKUP=false
+ACCEPT_VERIFY_FAILURE=false
 PREVIOUS_REPO_REV=""
 STATE_DIR=""
 ARCHIVE=""
@@ -88,6 +92,8 @@ while [ $# -gt 0 ]; do
         --yes) YES=true; shift ;;
         --allow-online-players) ALLOW_ONLINE=true; shift ;;
         --skip-rehearsal) SKIP_REHEARSAL=true; shift ;;
+        --no-safety-backup) NO_SAFETY_BACKUP=true; shift ;;
+        --accept-verify-failure) ACCEPT_VERIFY_FAILURE=true; shift ;;
         --previous-repo-rev) PREVIOUS_REPO_REV="${2:?}"; shift 2 ;;
         --state) STATE_DIR="${2:?}"; shift 2 ;;
         --archive) ARCHIVE="${2:?}"; shift 2 ;;
@@ -393,6 +399,16 @@ rollback_exit_hint() {
     [ "$rc" -ne 0 ] || return 0
     [ "$(state_get ROLLED_BACK)" = 1 ] && return 0
     echo "" >&2
+    if [ "$(state_get ROLLBACK_RESTORED)" = 1 ]; then
+        {
+            echo "The stack is restored to the pre-upgrade state and was started; only its verification is open (exit $rc)."
+            echo "  Read $STATE_DIR/logs/rollback-verify.log, fix the cause, then verify again (nothing is restored twice):"
+            echo "    $0 rollback --state $STATE_DIR"
+            echo "  Or, if you judge the failed checks harmless, close the rollback:"
+            echo "    $0 rollback --state $STATE_DIR --accept-verify-failure"
+        } >&2
+        return 0
+    fi
     echo "Rollback did not finish (exit $rc); it is safe to re-run: $0 rollback --state $STATE_DIR" >&2
 }
 
@@ -511,8 +527,28 @@ check_live_switch_collisions() {
 }
 
 # -------------------------------------------------------------- preflight ---
+# previous_repo_rev_mismatches — when the --previous-repo-rev tooling pins
+# upstream revisions, print every repository whose pin is not the live HEAD.
+previous_repo_rev_mismatches() {
+    local versions label rel url branch rev key pinned live
+    versions="$(git -C "$REPO_DIR" show "${PREVIOUS_REPO_REV}:scripts/upstream-versions.env" 2>/dev/null)" || return 0
+    while IFS='|' read -r label rel url branch rev <&3; do
+        case "$label" in
+            core) key=AC_CORE_REV ;;
+            mod-playerbots) key=MOD_PLAYERBOTS_REV ;;
+            mod-ah-bot-plus) key=MOD_AHBOT_REV ;;
+            *) key=MOD_IP_REV ;;
+        esac
+        pinned="$(sed -n "s/^${key}=//p" <<< "$versions" | tail -n 1)"
+        live="$(git -C "$STACK_DIR/$rel" rev-parse HEAD 2>/dev/null || echo unknown)"
+        if [ "$pinned" != "$live" ]; then
+            echo "$label: pinned ${pinned:0:12} at ${PREVIOUS_REPO_REV:0:12}, live ${live:0:12}"
+        fi
+    done 3< <(upstream_repo_specs)
+}
+
 preflight_checks() {
-    local mode="$1" label rel url branch rev dir free_gb name humans
+    local mode="$1" label rel url branch rev dir free_gb name humans mismatches
     CHECK_FAILS=0
     echo "== Preflight (${mode})"
     for tool in docker git python3 flock sha256sum cmp comm; do
@@ -526,6 +562,17 @@ preflight_checks() {
     fi
     if [ -n "$PREVIOUS_REPO_REV" ] && git -C "$REPO_DIR" cat-file -e "${PREVIOUS_REPO_REV}^{commit}" 2>/dev/null; then
         check_ok "previous repository revision ${PREVIOUS_REPO_REV:0:12} found (rollback tooling snapshot)"
+        # Its verifier judges the rollback: tooling pinned to other revisions
+        # would fail a correctly rolled-back stack on every attempt.
+        mismatches="$(previous_repo_rev_mismatches)"
+        if [ -n "$mismatches" ]; then
+            check_fail "previous-repo-rev is not the tooling the live stack was installed with:"
+            sed -n 's/^/           /p' <<< "$mismatches"
+        elif git -C "$REPO_DIR" cat-file -e "${PREVIOUS_REPO_REV}:scripts/upstream-versions.env" 2>/dev/null; then
+            check_ok "previous repository revision pins the live checkouts' revisions"
+        else
+            check_info "previous repository revision pins no upstream revisions (from before pinning); not compared"
+        fi
     else
         check_fail "--previous-repo-rev must name the wow-server-sp commit the live stack was installed with"
     fi
@@ -1437,10 +1484,24 @@ rollback_restores_client_data() {
 
 # rollback_preconditions TS
 rollback_preconditions() {
-    local ts="$1" label rel url branch rev svc vol problem
+    local ts="$1" label rel url branch rev svc vol problem old hits fails=0
     while IFS='|' read -r label rel url branch rev <&3; do
-        [ -n "$(state_get "OLD_REV_${label//-/_}")" ] || die "no recorded pre-upgrade revision for $label in $STATE_DIR"
+        old="$(state_get "OLD_REV_${label//-/_}")"
+        [ -n "$old" ] || die "no recorded pre-upgrade revision for $label in $STATE_DIR"
+        # The checkout back to the old revision must not fail (or overwrite a
+        # local file) after the realm is stopped: prove it first.
+        if ! hits="$(live_switch_collisions "$STACK_DIR/$rel" "$old")"; then
+            echo "  $label: cannot compare $STACK_DIR/$rel with ${old:0:12}" >&2
+            fails=$((fails + 1))
+        elif [ -n "$hits" ]; then
+            echo "  $label: local file(s) in $STACK_DIR/$rel collide with paths tracked at ${old:0:12}:" >&2
+            sed -n '1,20s/^/    /p' <<< "$hits" >&2
+            fails=$((fails + 1))
+        fi
     done 3< <(upstream_repo_specs)
+    if [ "$fails" -gt 0 ]; then
+        die "local files collide with the pre-upgrade revisions (listed above); move them, then re-run the rollback. Nothing was changed."
+    fi
     if step_done snapshot_state; then
         if [ ! -f "$STATE_DIR/docker-compose.override.yml" ] || [ ! -d "$STATE_DIR/configs" ]; then
             die "configuration copies missing from $STATE_DIR"
@@ -1486,11 +1547,92 @@ save_rollback_diff() {
     log "  saved the $label working-tree diff to $out before discarding it"
 }
 
+# take_prerollback_copy — after go-live the rollback is about to drop the
+# upgraded databases and overwrite post-cutover configs: save both first
+# (once per cutover) in $STATE_DIR/pre-rollback/, so the upgraded state stays
+# reachable. The realm is stopped, so the archive is consistent.
+take_prerollback_copy() {
+    local dir="$STATE_DIR/pre-rollback" name f before archive
+    log "Saving the upgraded state before the rollback overwrites it: $dir"
+    run mkdir -p "$dir/configs" "$dir/etc"
+    for f in "$STACK_DIR/docker-compose.override.yml" "$STACK_DIR/docker-compose.admin.yml"; do
+        if [ -f "$f" ]; then run cp -p "$f" "$dir/"; fi
+    done
+    run cp -a "$STACK_DIR/configs/." "$dir/configs/"
+    for name in "${ETC_CONFS[@]}"; do
+        for f in "$STACK_DIR/env/dist/etc/$name.conf" "$STACK_DIR/env/dist/etc/$name.conf.dist"; do
+            if [ -f "$f" ]; then run cp -p "$f" "$dir/etc/"; fi
+        done
+    done
+    if [ "$NO_SAFETY_BACKUP" = true ]; then
+        echo "WARNING: --no-safety-backup: the upgraded databases are NOT saved before the restore drops them." >&2
+    else
+        before="$({ find "$STACK_DIR/backups" -maxdepth 1 -name 'azerothcore-backup-prerollback-*.tar.gz' 2>/dev/null || true; } | sort)"
+        if ! run "$STACK_DIR/backup.sh" --label prerollback; then
+            die "the pre-rollback safety backup failed; nothing was overwritten and the realm stays stopped. Fix the cause and re-run: $0 rollback --state $STATE_DIR — or add --no-safety-backup to roll back without saving the upgraded databases"
+        fi
+        if [ "$DRY_RUN" != true ]; then
+            archive="$(comm -13 <(printf '%s\n' "$before") \
+                <(find "$STACK_DIR/backups" -maxdepth 1 -name 'azerothcore-backup-prerollback-*.tar.gz' | sort) | tail -n 1)"
+            [ -n "$archive" ] || die "the pre-rollback archive was not found in $STACK_DIR/backups; nothing was overwritten"
+            cp -p "$archive" "$dir/"
+            (cd "$dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
+            state_set PRE_ROLLBACK_ARCHIVE "$dir/$(basename "$archive")"
+            log "  upgraded databases saved: $dir/$(basename "$archive")"
+        fi
+    fi
+    state_mark PRE_ROLLBACK_BACKUP
+}
+
+# rollback_verify — wait for this boot, then judge it with the previous
+# repository's verifier; only a pass (or the operator's explicit acceptance)
+# closes the rollback.
+rollback_verify() {
+    local verifier="$STATE_DIR/repo-snapshot/scripts/verify-azerothcore.sh"
+    # The old verifier needs a fully booted realm.
+    if [ "$DRY_RUN" != true ] && ! wait_world_initialized ac-worldserver "$WORLD_INIT_TIMEOUT"; then
+        die "ac-worldserver did not reach World Initialized after the rollback (see docker logs ac-worldserver)"
+    fi
+    if [ -f "$verifier" ]; then
+        log "Verifying with the previous repository's verifier"
+        if [ "$DRY_RUN" != true ]; then
+            "$verifier" | tee "$STATE_DIR/logs/rollback-verify.log" \
+                || die "rollback verification failed; see $STATE_DIR/logs/rollback-verify.log"
+        fi
+    else
+        echo "WARNING: no tooling snapshot in $STATE_DIR (the cutover stopped before snapshot_tooling);" \
+            "verify by hand with verify-azerothcore.sh from $(state_get PREVIOUS_REPO_REV)." >&2
+    fi
+    state_mark ROLLED_BACK
+    log "Rollback complete. The repository checkout still holds the new tooling: check out ${PREVIOUS_REPO_REV:-$(state_get PREVIOUS_REPO_REV)} before using the installer or redeploy scripts."
+}
+
 cmd_rollback() {
-    local ts label rel url branch rev old svc vol archive tag rollback_vol verifier scale admin_was_up name f
+    local ts label rel url branch rev old svc vol archive tag rollback_vol scale admin_was_up name f
     resolve_state_dir
     refuse_rolled_back
     load_versions
+    if [ "$(state_get ROLLBACK_RESTORED)" = 1 ]; then
+        # Code, configs, client data, images, databases and admin are back and
+        # the stack was started: only the verification is open. Never restore twice.
+        trap rollback_exit_hint EXIT
+        if [ "$ACCEPT_VERIFY_FAILURE" = true ]; then
+            {
+                echo "WARNING: --accept-verify-failure: closing this rollback although the previous repository's"
+                echo "WARNING: verifier did not pass (see $STATE_DIR/logs/rollback-verify.log). This is your judgment;"
+                echo "WARNING: the failed checks stay unresolved."
+            } >&2
+            state_mark ROLLED_BACK
+            log "Rollback recorded as complete (verification failure accepted)."
+            return 0
+        fi
+        log "The stack was already restored; re-running only the wait and the previous verifier"
+        rollback_verify
+        return 0
+    fi
+    if [ "$ACCEPT_VERIFY_FAILURE" = true ]; then
+        die "--accept-verify-failure only closes a rollback that already restored the stack (ROLLBACK_RESTORED=1 in $STATE_DIR); run the rollback first"
+    fi
     ts="$(state_get TS)"
     tag="$(env_value DOCKER_IMAGE_TAG)"
     archive="$(state_get PREUPGRADE_ARCHIVE)"
@@ -1524,18 +1666,29 @@ cmd_rollback() {
     run compose stop -t "$STOP_TIMEOUT" ac-worldserver
     run compose stop ac-authserver
 
+    if rollback_needs_db_restore && started BOOT_STARTED && [ "$(state_get PRE_ROLLBACK_BACKUP)" != 1 ]; then
+        take_prerollback_copy
+    fi
+
     log "Restoring source checkouts"
     while IFS='|' read -r label rel url branch rev <&3; do
         old="$(state_get "OLD_REV_${label//-/_}")"
-        # Tracked module changes are discarded only once snapshot_state saved
-        # them (patches-live/); before that the code was never switched.
-        if [ "$label" != core ] && step_done snapshot_state; then
+        # Tracked changes (core and modules) are discarded only once
+        # snapshot_state saved them (patches-live/); before that the code was
+        # never switched.
+        if step_done snapshot_state; then
             save_rollback_diff "$label" "$STACK_DIR/$rel"
             run git -C "$STACK_DIR/$rel" checkout -q -- .
         fi
         run git -C "$STACK_DIR/$rel" -c advice.detachedHead=false checkout -q -B "$branch" "$old"
+        # Re-apply the pre-upgrade working-tree diff unless the tree already
+        # holds it (a tree that was never discarded, e.g. a re-run).
         if [ -s "$STATE_DIR/patches-live/${label}.diff" ]; then
-            run git -C "$STACK_DIR/$rel" apply "$STATE_DIR/patches-live/${label}.diff"
+            if git -C "$STACK_DIR/$rel" apply --reverse --check "$STATE_DIR/patches-live/${label}.diff" 2>/dev/null; then
+                log "  $label: the pre-upgrade working-tree diff is already applied"
+            else
+                run git -C "$STACK_DIR/$rel" apply "$STATE_DIR/patches-live/${label}.diff"
+            fi
         fi
     done 3< <(upstream_repo_specs)
 
@@ -1581,17 +1734,15 @@ cmd_rollback() {
 
     if rollback_needs_db_restore; then
         log "Restoring the databases from $(basename "$archive")"
+        # Same machine: the archive's realmlist is the right one, and a re-run
+        # after the databases were dropped has no fresh one to read.
         RESTORE_READY_TIMEOUT_SECONDS="$WORLD_INIT_TIMEOUT" \
-            run "$SCRIPT_DIR/restore-azerothcore.sh" "$archive" --stack-dir "$STACK_DIR" --yes
+            run "$SCRIPT_DIR/restore-azerothcore.sh" "$archive" --stack-dir "$STACK_DIR" --yes --keep-archive-realmlist
     else
         log "Databases untouched (the live code was never switched)"
     fi
     mapfile -t scale < <(compose_scale_args)
     run compose up -d --no-build ${scale[@]+"${scale[@]}"}
-    # The old verifier needs a fully booted realm (restore waited only when it ran).
-    if [ "$DRY_RUN" != true ] && ! wait_world_initialized ac-worldserver "$WORLD_INIT_TIMEOUT"; then
-        die "ac-worldserver did not reach World Initialized after the rollback (see docker logs ac-worldserver)"
-    fi
 
     if started ADMIN_STEP_STARTED; then
         log "Restoring the previous admin app image"
@@ -1610,20 +1761,9 @@ cmd_rollback() {
     else
         log "Admin app left as it was"
     fi
-
-    verifier="$STATE_DIR/repo-snapshot/scripts/verify-azerothcore.sh"
-    if [ -f "$verifier" ]; then
-        log "Verifying with the previous repository's verifier"
-        if [ "$DRY_RUN" != true ]; then
-            "$verifier" | tee "$STATE_DIR/logs/rollback-verify.log" \
-                || die "rollback verification failed; see $STATE_DIR/logs/rollback-verify.log"
-        fi
-    else
-        echo "WARNING: no tooling snapshot in $STATE_DIR (the cutover stopped before snapshot_tooling);" \
-            "verify by hand with verify-azerothcore.sh from $(state_get PREVIOUS_REPO_REV)." >&2
-    fi
-    state_mark ROLLED_BACK
-    log "Rollback complete. The repository checkout still holds the new tooling: check out ${PREVIOUS_REPO_REV:-$(state_get PREVIOUS_REPO_REV)} before using the installer or redeploy scripts."
+    # Everything is back and started; from here a re-run only verifies.
+    state_mark ROLLBACK_RESTORED
+    rollback_verify
 }
 
 # --------------------------------------------------------------- finalize ---

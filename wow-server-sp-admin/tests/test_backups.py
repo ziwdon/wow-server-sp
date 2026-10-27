@@ -195,3 +195,19 @@ def test_list_backups_includes_preupgrade_label(tmp_path):
     assert rows[0].label == "preupgrade"
     # Download and in-app restore resolve names through the same pattern.
     assert resolve_backup_archive(backups_dir=b, archive_name=rows[0].filename) == b / rows[0].filename
+
+
+def test_list_backups_includes_prerollback_label(tmp_path):
+    b = tmp_path / "backups"
+    b.mkdir()
+    _touch(b / "azerothcore-backup-prerollback-2026-10-29T10-00-00.tar.gz")
+    rows = list_backups(backups_dir=b)
+    assert len(rows) == 1
+    assert rows[0].label == "prerollback"
+    assert resolve_backup_archive(backups_dir=b, archive_name=rows[0].filename) == b / rows[0].filename
+
+
+def test_every_listed_label_has_a_badge_style():
+    css = (Path(__file__).resolve().parents[1] / "app/static/app.css").read_text()
+    for label in ("daily", "manual", "prerestore", "preclear", "preupgrade", "prerollback"):
+        assert f".badge-{label} " in css, label

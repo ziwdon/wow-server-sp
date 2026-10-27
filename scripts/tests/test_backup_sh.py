@@ -527,3 +527,21 @@ def test_unhashable_backup_script_does_not_abort_the_backup(tmp_path):
     with tarfile.open(archive) as tf:
         manifest = json.loads(tf.extractfile("manifest.json").read())
     assert manifest["backup_script_sha256"] == "unknown"
+
+
+def test_prerollback_label_is_accepted_and_never_pruned(tmp_path):
+    # Upgrade rollback's safety copy of the upgraded databases: a way back to the new version.
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    backups = stack / "backups"
+    backups.mkdir()
+    old = backups / "azerothcore-backup-prerollback-2000-01-01T00-00-00.tar.gz"
+    old.write_bytes(b"upgraded state")
+    old_t = time.time() - 30 * 86400
+    os.utime(old, (old_t, old_t))
+    r = _run(stack, bind, "--label", "prerollback")
+    assert r.returncode == 0, r.stderr
+    assert len(list(backups.glob("azerothcore-backup-prerollback-*.tar.gz"))) == 2
+    r = _run(stack, bind)  # daily mode prunes
+    assert r.returncode == 0, r.stderr
+    assert old.exists(), "pre-rollback archives must survive daily pruning"

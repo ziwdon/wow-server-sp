@@ -6,7 +6,7 @@ umask 077
 # Phase 7 copies this to the stack dir) and the admin container (bundled into
 # its image at /app/scripts/backup.sh, run with STACK_DIR=/ac). Produces ONE
 # archive: azerothcore-backup-<label>-<stamp>.tar.gz with all DB dumps + all
-# configs + manifest.json. Labels: daily|manual|prerestore|preclear|preupgrade.
+# configs + manifest.json. Labels: daily|manual|prerestore|preclear|preupgrade|prerollback.
 # See docs/superpowers/specs/2026-05-29-admin-backup-restore-design.md.
 
 STACK_DIR="${STACK_DIR:-/opt/stacks/azerothcore}"
@@ -24,8 +24,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$LABEL" in
-    daily|manual|prerestore|preclear|preupgrade) ;;
-    *) echo "Invalid --label: $LABEL (expected daily|manual|prerestore|preclear|preupgrade)" >&2; exit 2 ;;
+    daily|manual|prerestore|preclear|preupgrade|prerollback) ;;
+    *) echo "Invalid --label: $LABEL (expected daily|manual|prerestore|preclear|preupgrade|prerollback)" >&2; exit 2 ;;
 esac
 
 if [ "$LABEL" = "daily" ]; then
@@ -242,11 +242,13 @@ TMP_ARCHIVE=""
 log "Wrote ${ARCHIVE}"
 
 # Prune ONLY in daily mode (the cron's nightly run). Deletes EVERY label older
-# than RETENTION_DAYS (except preupgrade), plus any legacy multi-file backups
-# from before cutover. Pre-upgrade archives are rollback points and are never
-# pruned; finalize the upgrade, then delete them by hand.
+# than RETENTION_DAYS (except preupgrade and prerollback), plus any legacy
+# multi-file backups from before cutover. Pre-upgrade archives are rollback
+# points and pre-rollback archives the way back to the upgraded state; neither
+# is ever pruned: delete them by hand once they are no longer needed.
 if [ "${LABEL}" = "daily" ]; then
     find "${BACKUP_DIR}" -name 'azerothcore-backup-*.tar.gz' ! -name 'azerothcore-backup-preupgrade-*' \
+        ! -name 'azerothcore-backup-prerollback-*' \
         -mtime +"${RETENTION_DAYS}" -delete
     find "${BACKUP_DIR}" -name '*.sql' -mtime +"${RETENTION_DAYS}" -delete
     find "${BACKUP_DIR}" -name 'azerothcore-config-*.tar.gz' -mtime +"${RETENTION_DAYS}" -delete

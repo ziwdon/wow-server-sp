@@ -59,11 +59,6 @@ def _fixture(tmp_path: Path):
         text = (tools / name).read_text()
         assert ROOT_GUARD in text
         (tools / name).write_text(text.replace(ROOT_GUARD, "", 1))
-    _git("init", "-q", cwd=tmp_path / "repo")
-    _git("add", ".", cwd=tmp_path / "repo")
-    _git("commit", "-qm", "tooling", cwd=tmp_path / "repo")
-    previous = _git("rev-parse", "HEAD", cwd=tmp_path / "repo")
-
     stack = tmp_path / "stack"
     core = _repo(stack, "Playerbot", "https://example.invalid/core.git")
     revs = {"core": core}
@@ -94,6 +89,12 @@ def _fixture(tmp_path: Path):
         "MOD_IP_REPO=https://example.invalid/mod-individual-progression.git\nMOD_IP_BRANCH=master\n",
         f"MOD_IP_REV={revs['mod-individual-progression']}\nCLIENT_DATA_VERSION=v20.0\n",
     ]))
+    # The previous tooling commit pins exactly the live checkouts, as the
+    # tooling the stack was installed with would (preflight compares the two).
+    _git("init", "-q", cwd=tmp_path / "repo")
+    _git("add", ".", cwd=tmp_path / "repo")
+    _git("commit", "-qm", "tooling", cwd=tmp_path / "repo")
+    previous = _git("rev-parse", "HEAD", cwd=tmp_path / "repo")
 
     bind = tmp_path / "bin"
     bind.mkdir()
@@ -325,11 +326,19 @@ exit 0
 
 def _addendum_fixture(tmp_path: Path):
     """The plan fixture plus cp (rollback restores file copies), a logging sync
-    stub (state markers are flushed) and the richer docker stub."""
+    stub (state markers are flushed), the richer docker stub and a logging
+    backup.sh stub (deployed and repository copy, so preflight still matches)
+    that writes a pre-rollback archive (FAKE_BACKUP_FAIL makes it fail)."""
     tools, stack, bind, previous = _fixture(tmp_path)
     _tool(bind, "cp")
     _stub_script(bind / "sync", "sync")
     _stub_docker(bind)
+    for path in (stack / "backup.sh", tools / "backup.sh"):
+        _executable(path, '#!/bin/bash\necho "backup.sh $*" >> "$UPGRADE_CALLS"\n'
+                    '[ -z "${FAKE_BACKUP_FAIL:-}" ] || exit 1\n'
+                    'if [ "$*" = "--label prerollback" ]; then\n'
+                    '    echo archive > "$STACK_DIR/backups/azerothcore-backup-prerollback-2026-10-28T10-00-00.tar.gz"\n'
+                    'fi\n')
     return tools, stack, bind, previous
 
 
@@ -1597,3 +1606,208 @@ def test_f6_finalize_never_deletes_a_recorded_path_outside_the_staging_root(tmp_
     assert r.returncode == 0, r.stdout + r.stderr
     assert not [line for line in _calls(tmp_path).splitlines() if line.startswith("rm ")]
     assert "not deleting" in r.stderr
+
+
+# F4 -------------------------------------------------------------------------
+
+def _go_live_rollback(tmp_path: Path, **facts):
+    """A cutover that went live (BOOT_STARTED) with upgraded configs in the stack."""
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    (stack / "docker-compose.override.yml").write_text("services: {} # upgraded override\n")
+    (stack / "docker-compose.admin.yml").write_text("services: {} # upgraded admin.yml\n")
+    (stack / "configs/modules/playerbots.conf").write_text("Playerbots.X = 1 # upgraded\n")
+    state = _cutover_state(tmp_path, stack, STEPS, ADMIN_WAS_RUNNING="true", IMAGES_SWITCH_STARTED="1",
+                           BOOT_STARTED="1", CUTOVER_OK="1", **facts)
+    return tools, stack, bind, state
+
+
+def test_f4_rollback_after_go_live_saves_the_upgraded_state_before_overwriting_it(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = _calls(tmp_path).splitlines()
+    assert _index(lines, "docker compose stop -t ") < _index(lines, "backup.sh --label prerollback") \
+        < _index(lines, "restore-azerothcore.sh")
+    saved = state / "pre-rollback"
+    archive = saved / "azerothcore-backup-prerollback-2026-10-28T10-00-00.tar.gz"
+    assert archive.read_text() == "archive\n"
+    assert (saved / f"{archive.name}.sha256").read_text().split()[0] == hashlib.sha256(b"archive\n").hexdigest()
+    assert (saved / "docker-compose.override.yml").read_text() == "services: {} # upgraded override\n"
+    assert (saved / "docker-compose.admin.yml").read_text() == "services: {} # upgraded admin.yml\n"
+    assert (saved / "configs/modules/playerbots.conf").read_text() == "Playerbots.X = 1 # upgraded\n"
+    assert (saved / "etc/worldserver.conf").is_file()
+    assert (stack / "docker-compose.override.yml").read_text() == "services: {} # pre-upgrade override\n"
+    text = (state / "state.env").read_text()
+    assert "PRE_ROLLBACK_BACKUP=1" in text and f"PRE_ROLLBACK_ARCHIVE={archive}" in text
+
+
+def test_f4_a_failing_safety_backup_refuses_the_rollback_unless_told_otherwise(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes", FAKE_BACKUP_FAIL="1")
+    assert r.returncode == 1
+    assert "safety backup failed" in r.stderr and "--no-safety-backup" in r.stderr
+    calls = _calls(tmp_path)
+    assert "docker compose stop -t " in calls and "restore-azerothcore.sh" not in calls
+    assert "docker tag" not in calls and "docker run" not in calls and "compose up" not in calls
+    assert (stack / "docker-compose.override.yml").read_text() == "services: {} # upgraded override\n"
+    assert "PRE_ROLLBACK_BACKUP" not in (state / "state.env").read_text()
+    (tmp_path / "calls").write_text("")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes", "--no-safety-backup",
+             FAKE_BACKUP_FAIL="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "backup.sh" not in _calls(tmp_path) and "restore-azerothcore.sh" in _calls(tmp_path)
+    assert "--no-safety-backup" in r.stderr  # the warning names what was skipped
+    assert (state / "pre-rollback/docker-compose.override.yml").read_text() == "services: {} # upgraded override\n"
+    assert "ROLLED_BACK=1" in (state / "state.env").read_text()
+
+
+def test_f4_a_rerun_does_not_take_the_safety_backup_twice(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path, ROLLBACK_STARTED="1", PRE_ROLLBACK_BACKUP="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "backup.sh" not in _calls(tmp_path)
+    assert not (state / "pre-rollback").exists()
+
+
+def test_f4_no_safety_backup_when_the_new_version_never_booted(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    state = _cutover_state(tmp_path, stack, _before("switch_images"), ADMIN_WAS_RUNNING="true")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "restore-azerothcore.sh" in _calls(tmp_path) and "backup.sh" not in _calls(tmp_path)
+
+
+# F5 -------------------------------------------------------------------------
+
+def test_f5_a_failing_previous_verifier_is_an_open_item_and_a_rerun_only_verifies(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path)
+    _stub_script(state / "repo-snapshot/scripts/verify-azerothcore.sh", "old-verifier", rc=1)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    text = (state / "state.env").read_text()
+    assert "ROLLBACK_RESTORED=1" in text and "ROLLED_BACK" not in text
+    assert "--accept-verify-failure" in r.stderr and "Rollback did not finish" not in r.stderr
+    # A re-run neither stops nor restores anything again: it waits and verifies.
+    for _attempt in range(2):
+        (tmp_path / "calls").write_text("")
+        r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+        assert r.returncode == 1
+        calls = _calls(tmp_path)
+        assert "logs --since" in calls and "old-verifier" in calls
+        for mutation in (" stop", "docker tag", "docker run", "compose up", "docker start",
+                         "restore-azerothcore.sh", "backup.sh"):
+            assert mutation not in calls, mutation
+    _stub_script(state / "repo-snapshot/scripts/verify-azerothcore.sh", "old-verifier")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ROLLED_BACK=1" in (state / "state.env").read_text()
+
+
+def test_f5_accept_verify_failure_closes_a_restored_rollback(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path, ROLLBACK_STARTED="1", ROLLBACK_RESTORED="1")
+    _stub_script(state / "repo-snapshot/scripts/verify-azerothcore.sh", "old-verifier", rc=1)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--accept-verify-failure")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ROLLED_BACK=1" in (state / "state.env").read_text()
+    assert "WARNING" in r.stderr and "verif" in r.stderr
+    _no_mutation(tmp_path)
+
+
+def test_f5_accept_verify_failure_needs_a_restored_stack(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes", "--accept-verify-failure")
+    assert r.returncode == 1
+    assert "ROLLBACK_RESTORED" in r.stderr
+    _no_mutation(tmp_path)
+    assert "ROLLBACK_STARTED" not in (state / "state.env").read_text()
+
+
+def _tooling_commit(repo: Path, versions, scratch: Path) -> str:
+    """A commit beside HEAD whose scripts/upstream-versions.env is VERSIONS (None: absent)."""
+    env = {**os.environ, **GIT_ENV, "GIT_INDEX_FILE": str(scratch / "tooling-index")}
+
+    def git(*args: str, stdin: str = "") -> str:
+        return subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True,
+                              text=True, input=stdin).stdout.strip()
+    git("read-tree", "HEAD")
+    if versions is None:
+        git("update-index", "--force-remove", "scripts/upstream-versions.env")
+    else:
+        blob = git("hash-object", "-w", "--stdin", stdin=versions)
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},scripts/upstream-versions.env")
+    return git("commit-tree", git("write-tree"), "-p", "HEAD", "-m", "previous tooling")
+
+
+@pytest.mark.parametrize("variant, passes", [("pins other revisions", False), ("pins nothing", True)])
+def test_f5_preflight_checks_the_previous_repo_rev_against_the_live_checkouts(tmp_path, variant, passes):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    if variant == "pins other revisions":
+        versions = re.sub(r"(?m)^MOD_IP_REV=.*$", "MOD_IP_REV=" + "1" * 40, (tools / "upstream-versions.env").read_text())
+    else:
+        versions = None  # tooling from before upstream pinning (e.g. ec93de3)
+    previous = _tooling_commit(tmp_path / "repo", versions, tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "preflight", "--previous-repo-rev", previous)
+    assert (r.returncode == 0) == passes, r.stdout + r.stderr
+    if not passes:
+        assert "previous-repo-rev is not the tooling the live stack was installed with" in r.stdout
+        assert "mod-individual-progression" in r.stdout
+
+
+# F12 ------------------------------------------------------------------------
+
+def test_f12_rollback_restores_with_the_archive_realmlist(tmp_path):
+    tools, stack, bind, state = _go_live_rollback(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    restore = next(line for line in _calls(tmp_path).splitlines() if line.startswith("restore-azerothcore.sh "))
+    assert "--keep-archive-realmlist" in restore.split()
+
+
+# F17 ------------------------------------------------------------------------
+
+def test_f17_rollback_refuses_a_local_file_where_the_old_revision_tracks_one(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("switch_config"), ADMIN_WAS_RUNNING="true",
+                           SWITCH_CODE_STARTED="1")
+    # The switched core no longer tracks README, and a local file now sits there.
+    _git("rm", "-q", "README", cwd=stack)
+    _git("commit", "-qm", "upstream drops README", cwd=stack)
+    (stack / "README").write_text("operator's notes\n")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert "untracked: README" in r.stdout + r.stderr and "collide" in r.stderr
+    _no_mutation(tmp_path)
+    assert "ROLLBACK_STARTED" not in (state / "state.env").read_text()
+
+
+def test_f17_rollback_saves_and_discards_core_edits_made_after_the_switch(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    original = (stack / "README").read_text()
+    (stack / "README").write_text("edited after the cutover\n")
+    state = _cutover_state(tmp_path, stack, _before("switch_config"), ADMIN_WAS_RUNNING="true")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "+edited after the cutover" in (state / "patches-rollback/core.diff").read_text()
+    assert (stack / "README").read_text() == original
+
+
+# F18 ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("steps", [_before("snapshot_state"), _before("switch_config")])
+def test_f18_rollback_applies_a_live_diff_exactly_once(tmp_path, steps):
+    # Before STEP_snapshot_state the tree is not discarded and may already hold the diff.
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    module = stack / "modules/mod-playerbots"
+    (module / "README").write_text("managed patch\n")
+    diff = _git("diff", cwd=module) + "\n"
+    if "snapshot_state" in steps:
+        (module / "README").write_text("edited after the cutover\n")
+    state = _cutover_state(tmp_path, stack, steps, ADMIN_WAS_RUNNING="true")
+    (state / "patches-live/mod-playerbots.diff").write_text(diff)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (module / "README").read_text() == "managed patch\n"
