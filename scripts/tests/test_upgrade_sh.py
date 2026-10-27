@@ -267,7 +267,13 @@ def _stub_docker(bind: Path) -> None:
     (FAKE_COMPOSE_JSON), isolated containers and rehearsal database answers.
 
     Follow-up additions: the rehearsal worldserver's exit code after its stop
-    (FAKE_REHEARSAL_WORLD_EXIT, default 0)."""
+    (FAKE_REHEARSAL_WORLD_EXIT, default 0).
+
+    D5 additions: a `docker exec -i` without a SELECT in its arguments is a SQL
+    file fed on stdin (pre-db-import SQL): its stdin is appended to
+    $UPGRADE_CALLS.sql under a "== docker ARGS" header, and FAKE_SQL_FAIL makes it
+    fail; a guard query (any `docker exec -i` SELECT from acore_world.gameobject,
+    live or rehearsal database) prints FAKE_GUARD_COUNT (default 0)."""
     _executable(bind / "docker", r"""#!/bin/bash
 markers=""
 if [ -n "${PEEK_STATE:-}" ] && [ -f "$PEEK_STATE" ]; then
@@ -305,8 +311,15 @@ case "$*" in
       *"FROM acore_auth.account),"*) printf '%s\t%s\n' "${FAKE_ACCOUNTS-0}" "${FAKE_CHARACTERS-0}" ;;
       *) echo "${FAKE_HUMANS_ONLINE:-0}" ;;
     esac ;;
-  "exec -i -e MYSQL_PWD="*)
-    case "$*" in *playerbots_speech*) echo 0 ;; *"column_name='id'"*) echo 1 ;; *) echo 42 ;; esac ;;
+  "exec -i "*)
+    case "$*" in
+      *SELECT*)
+        case "$*" in
+          *"FROM acore_world.gameobject"*) echo "${FAKE_GUARD_COUNT:-0}" ;;
+          *playerbots_speech*) echo 0 ;; *"column_name='id'"*) echo 1 ;; *) echo 42 ;;
+        esac ;;
+      *) { echo "== docker $*"; cat; } >> "${UPGRADE_CALLS}.sql"; [ -z "${FAKE_SQL_FAIL:-}" ] || exit 1 ;;
+    esac ;;
   "image inspect "*) echo sha256:abc ;;
   "run --rm --network none --user 0 -v "*":/src:ro -v "*":/dst "*)
     dst="${args#*:/src:ro -v }"; echo "${dst%%:/dst *}" >> "$copied" ;;
@@ -1085,6 +1098,11 @@ def _build_inputs(tools: Path) -> str:
         f"PATCH {rel} {hashlib.sha256((patches / rel).read_bytes()).hexdigest()}\n"
         for rel in sorted(str(p.relative_to(patches)) for p in patches.rglob("*.patch") if p.is_file()))
     listing += f"PATCHES_SHA256={hashlib.sha256(patch_lines.encode()).hexdigest()}\n"
+    sql = tools / "patches" / "sql"
+    sql_lines = "".join(
+        f"SQL {rel} {hashlib.sha256((sql / rel).read_bytes()).hexdigest()}\n"
+        for rel in sorted(str(p.relative_to(sql)) for p in sql.rglob("*.sql") if p.is_file()))
+    listing += f"SQL_PATCHES_SHA256={hashlib.sha256(sql_lines.encode()).hexdigest()}\n"
     return listing
 
 
@@ -2080,3 +2098,168 @@ def test_d4_stage_recopies_a_rollback_volume_whose_marker_bytes_are_not_an_exact
     assert "differ" not in r.stderr and "3.23188e+09" in r.stdout + r.stderr  # the log says why it copies
     core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
     assert f"CLIENT_DATA_ROLLBACK_VOLUME={ROLLBACK_VOL}" in (staging.parent / f"stage-{core12}.env").read_text()
+
+
+# D5 fix: pre-db-import SQL (old mod-IP AUTO_INCREMENT gameobject guids) ----------
+
+PRE_DB_IMPORT = "patches/sql/pre-db-import"
+MOD_IP_GUIDS = "0001-mod-ip-fixed-gameobject-guids.sql"
+REHEARSAL_DB_CLIENT = "docker exec -i -e MYSQL_PWD=drillpw acup-rehearsal-db mysql -uroot -N -B"
+LIVE_DB_CLIENT = "docker exec -i ac-database sh -c "
+
+
+def _guard(path: Path) -> str:
+    guards = re.findall(r"(?m)^-- guard: (.+)$", path.read_text())
+    assert len(guards) == 1, guards
+    return guards[0]
+
+
+def test_d5_the_pre_db_import_sql_moves_the_six_old_mod_ip_spawns_to_the_new_fixed_guids():
+    path = SCRIPTS_DIR / PRE_DB_IMPORT / MOD_IP_GUIDS
+    body = "\n".join(line for line in path.read_text().splitlines() if not line.startswith("--"))
+    statements = [s.strip() for s in body.split(";") if s.strip()]
+    assert len(statements) == 6, statements
+    moves = set()
+    for statement in statements:
+        m = re.fullmatch(
+            r"UPDATE acore_world\.gameobject SET guid = (\d+)\s+WHERE id = (\d+) AND map = (\d+) AND guid <> (\d+)"
+            r"\s+AND NOT EXISTS \(SELECT 1 FROM \(SELECT guid FROM acore_world\.gameobject WHERE guid = (\d+)"
+            r" LIMIT 1\) AS t\)", statement)
+        assert m, statement
+        target, spawn_id, spawn_map, unless_at, occupied = m.groups()
+        assert target == unless_at == occupied, statement
+        moves.add((int(spawn_id), int(spawn_map), int(target)))
+    # 193166 also spawns on map 571 (core data): only the map-0 row may move.
+    assert moves == {(176146, 1, 650111), (176147, 1, 650112), (176148, 1, 650113),
+                     (361001, 0, 361001), (181056, 0, 361002), (193166, 0, 361003)}
+    guard = _guard(path)
+    assert guard.startswith("SELECT COUNT(*) FROM acore_world.gameobject WHERE guid >= 5714438 AND (id, map) IN ("), guard
+    assert {(int(i), int(m)) for i, m in re.findall(r"\((\d+), (\d+)\)", guard)} == {(i, m) for i, m, _ in moves}
+
+
+def test_d5_rehearsal_applies_the_pre_db_import_sql_to_the_restored_copy_before_the_db_import(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[OK]   pre-db-import SQL applied" in r.stdout
+    sql = tools / PRE_DB_IMPORT / MOD_IP_GUIDS
+    lines = _calls(tmp_path).splitlines()
+    apply = _index(lines, f"{REHEARSAL_DB_CLIENT} |")
+    guard = _index(lines, f"{REHEARSAL_DB_CLIENT} -e {_guard(sql)} |")
+    assert _index(lines, "restore-drill.sh ") < apply < guard \
+        < _index(lines, "docker run -d --name acup-rehearsal-dbimport "), lines
+    assert (tmp_path / "calls.sql").read_text() == f"== {REHEARSAL_DB_CLIENT}\n{sql.read_text()}"
+
+
+def test_d5_cutover_applies_the_pre_db_import_sql_to_ac_database_after_boot_started_before_compose_up(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "boot", IMAGES_SWITCH_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             PEEK_STATE=str(state / "state.env"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    sql = tools / PRE_DB_IMPORT / MOD_IP_GUIDS
+    lines = _calls(tmp_path).splitlines()
+    apply = _index(lines, LIVE_DB_CLIENT)
+    guard = _index(lines, f" sh -e {_guard(sql)} |")
+    assert LIVE_DB_CLIENT in lines[guard] and '"$@" sh | markers: ' in lines[apply]  # the file goes in on stdin
+    assert apply < guard < _index(lines, "docker compose up -d --no-build"), lines
+    assert "BOOT_STARTED=1" in lines[apply]
+    assert lines[apply - 1] == f"sync {state / 'state.env'}"  # the boot marker is on disk before the first change
+    header, _, fed = (tmp_path / "calls.sql").read_text().partition("\n")
+    assert header.startswith(f"== {LIVE_DB_CLIENT}") and fed == sql.read_text()
+    text = (state / "state.env").read_text()
+    assert "PRE_DB_IMPORT_APPLIED=1" in text and "CUTOVER_OK=1" in text
+
+
+@pytest.mark.parametrize("env, shown", [
+    ({"FAKE_GUARD_COUNT": "1"}, f"the guard of {MOD_IP_GUIDS} counts '1' (must be 0)"),
+    ({"FAKE_SQL_FAIL": "1"}, f"{MOD_IP_GUIDS} failed against acup-rehearsal-db"),
+])
+def test_d5_a_failing_pre_db_import_sql_fails_the_rehearsal_without_running_the_db_import(tmp_path, env, shown):
+    tools, stack, bind, archive, fixture_env = _rehearse_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **fixture_env, **env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "[FAIL] pre-db-import SQL" in r.stdout and "Rehearsal FAILED" in r.stdout
+    calls = _calls(tmp_path)
+    assert "docker run -d --name acup-rehearsal-dbimport" not in calls
+    assert "--name acup-rehearsal-world" not in calls
+    assert shown in (_rehearsal_dir(tmp_path) / "pre-db-import.log").read_text()
+    assert not (tmp_path / "work" / "rehearsal-latest").exists()
+
+
+@pytest.mark.parametrize("env, shown", [
+    ({"FAKE_GUARD_COUNT": "1"}, f"the guard of {MOD_IP_GUIDS} counts '1' (must be 0)"),
+    ({"FAKE_SQL_FAIL": "1"}, f"{MOD_IP_GUIDS} failed against ac-database"),
+])
+def test_d5_a_failing_pre_db_import_sql_stops_the_cutover_before_the_stack_starts(tmp_path, env, shown):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "boot", IMAGES_SWITCH_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", **env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert shown in r.stderr
+    assert "Server is stopped" in r.stderr and f"rollback --state {state}" in r.stderr
+    assert "compose up" not in _calls(tmp_path)
+    text = (state / "state.env").read_text()
+    assert "BOOT_STARTED=1" in text and "STEP_boot" not in text and "PRE_DB_IMPORT_APPLIED" not in text
+
+
+def test_d5_a_pre_db_import_sql_file_without_one_guard_line_fails_before_any_sql_runs(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    (tools / PRE_DB_IMPORT / "0002-unguarded.sql").write_text("UPDATE acore_world.gameobject SET state = 1;\n")
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack))  # staged with it
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    log = (_rehearsal_dir(tmp_path) / "pre-db-import.log").read_text()
+    assert "0002-unguarded.sql must carry exactly one '-- guard: " in log
+    assert not (tmp_path / "calls.sql").exists()  # not even 0001 ran
+    assert "docker run -d --name acup-rehearsal-dbimport" not in _calls(tmp_path)
+
+
+def _edit_pre_db_import_sql(tools: Path) -> None:
+    sql = tools / PRE_DB_IMPORT / MOD_IP_GUIDS
+    sql.write_text(sql.read_text() + "-- edited after the stage\n")
+
+
+def test_d5_a_changed_pre_db_import_sql_file_invalidates_the_stage_for_the_cutover(tmp_path):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    core = _git("rev-parse", "HEAD", cwd=stack)
+    _stage_env(tmp_path, tools, core)
+    _rehearsal_result(tmp_path, tools, core)
+    _edit_pre_db_import_sql(tools)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes")
+    assert r.returncode == 1
+    assert "re-run stage" in r.stderr and "SQL_PATCHES_SHA256" in r.stderr
+    _no_mutation(tmp_path)
+
+
+def test_d5_a_changed_pre_db_import_sql_file_invalidates_the_stage_for_the_rehearsal(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    _edit_pre_db_import_sql(tools)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 1
+    assert "re-run stage" in r.stderr and "SQL_PATCHES_SHA256" in r.stderr
+    assert "restore-drill.sh" not in _calls(tmp_path)
+
+
+def test_d5_a_resume_refuses_a_pre_db_import_sql_file_changed_since_the_cutover_started(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "boot", IMAGES_SWITCH_STARTED="1")
+    with open(state / "state.env", "a") as handle:
+        handle.write(f"BUILD_FINGERPRINT={_fingerprint(tools)}\n")
+    _edit_pre_db_import_sql(tools)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert "changed since this cutover started" in r.stderr
+    _no_mutation(tmp_path)
+    assert "docker exec -i" not in _calls(tmp_path)
+
+
+def test_d5_a_dry_run_cutover_prints_the_pre_db_import_sql_without_running_it(tmp_path):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack))
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--skip-rehearsal", "--dry-run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    sql = tools / PRE_DB_IMPORT / MOD_IP_GUIDS
+    out = r.stdout.splitlines()
+    apply = _index(out, f"< {sql}")
+    assert out[apply].startswith("+ docker exec -i ac-database ")
+    assert apply < _index(out, "+ compose up -d --no-build")
+    assert "docker exec -i" not in _calls(tmp_path)

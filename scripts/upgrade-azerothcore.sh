@@ -725,14 +725,17 @@ file_get() {
 }
 
 # build_inputs — what a stage builds the candidate from, one KEY=VALUE per
-# line: the four pinned revisions, the client-data pin, the versions file and
-# every local patch. The module revisions and patches are not in the candidate
-# tag (core SHA only), so this, not the tag, identifies the build.
+# line: the four pinned revisions, the client-data pin, the versions file,
+# every local patch and every SQL patch (the pre-db-import SQL the rehearsal
+# and the cutover run before db-import). The module revisions and patches are
+# not in the candidate tag (core SHA only), so this, not the tag, identifies
+# the build — and a rehearsal is only valid for the SQL it ran.
 build_inputs() {
     printf 'AC_CORE_REV=%s\nMOD_PLAYERBOTS_REV=%s\nMOD_AHBOT_REV=%s\nMOD_IP_REV=%s\nCLIENT_DATA_VERSION=%s\n' \
         "$AC_CORE_REV" "$MOD_PLAYERBOTS_REV" "$MOD_AHBOT_REV" "$MOD_IP_REV" "$CLIENT_DATA_VERSION"
     printf 'VERSIONS_SHA256=%s\n' "$(sha256sum < "$VERSIONS_FILE" | cut -d' ' -f1)"
     printf 'PATCHES_SHA256=%s\n' "$(patch_listing | sha256sum | cut -d' ' -f1)"
+    printf 'SQL_PATCHES_SHA256=%s\n' "$(sql_patch_listing | sha256sum | cut -d' ' -f1)"
 }
 
 # patch_listing — "PATCH <path> <sha256>" for every scripts/patches/**/*.patch, sorted.
@@ -741,6 +744,15 @@ patch_listing() {
     [ -d "$SCRIPT_DIR/patches" ] || return 0
     (cd "$SCRIPT_DIR/patches" && find . -type f -name '*.patch' | LC_ALL=C sort | while IFS= read -r patch; do
         printf 'PATCH %s %s\n' "${patch#./}" "$(sha256sum < "$patch" | cut -d' ' -f1)"
+    done)
+}
+
+# sql_patch_listing — "SQL <path> <sha256>" for every scripts/patches/sql/**/*.sql, sorted.
+sql_patch_listing() {
+    local file
+    [ -d "$SCRIPT_DIR/patches/sql" ] || return 0
+    (cd "$SCRIPT_DIR/patches/sql" && find . -type f -name '*.sql' | LC_ALL=C sort | while IFS= read -r file; do
+        printf 'SQL %s %s\n' "${file#./}" "$(sha256sum < "$file" | cut -d' ' -f1)"
     done)
 }
 
@@ -867,15 +879,15 @@ require_stage() {
 }
 
 # require_stage_matches_pins — the stage was built from exactly the pinned
-# versions and local patches loaded now (same core SHA, hence same tag, is not
-# enough: a module pin or patch may have changed since).
+# versions, local patches and SQL patches loaded now (same core SHA, hence same
+# tag, is not enough: a module pin or patch may have changed since).
 require_stage_matches_pins() {
     local key value changed=""
     [ "$(stage_get BUILD_FINGERPRINT)" = "$(build_fingerprint)" ] && return 0
     while IFS='=' read -r key value; do
         [ "$(stage_get "$key")" = "$value" ] || changed="${changed:+$changed, }$key"
     done < <(build_inputs)
-    die "the stage was built from other pinned versions or local patches than the ones loaded now (changed: ${changed:-build fingerprint}); re-run stage"
+    die "the stage was built from other pinned versions or local/SQL patches than the ones loaded now (changed: ${changed:-build fingerprint}); re-run stage"
 }
 
 # rehearsal_problem — why rehearsal-latest is not a passing rehearsal of the
@@ -901,6 +913,65 @@ rehearsal_problem() {
     if [ "$rehearsed" != "$wanted" ]; then
         echo "the last one ran with --pin [${rehearsed//$'\n'/ }], this cutover with [${wanted//$'\n'/ }]"; return 1
     fi
+}
+
+# ---------------------------------------------------------- pre-db-import ---
+# scripts/patches/sql/pre-db-import/*.sql: data fixes the candidate db-import
+# needs before it runs (0001 frees gameobject guids a core update hard-codes).
+# `rehearse` runs them on the restored copy, `cutover` on ac-database in the
+# boot step; both right before db-import. Each file must be idempotent (a
+# resumed boot step applies it again, also after db-import ran) and carry
+# exactly one `-- guard: <SELECT returning a count>` line: run after the file,
+# that query must print 0. Their sha256s are in the build fingerprint.
+PRE_DB_IMPORT_SQL_DIR="${SCRIPT_DIR}/patches/sql/pre-db-import"
+
+# pre_db_import_guard FILE — print FILE's one guard query (return 1 otherwise).
+pre_db_import_guard() {
+    local guards
+    guards="$(sed -n 's/^-- guard: //p' "$1")"
+    if [ -z "$guards" ] || [ "$(wc -l <<< "$guards")" -ne 1 ]; then
+        echo "ERROR: $(basename "$1") must carry exactly one '-- guard: <SELECT returning a count>' line" >&2
+        return 1
+    fi
+    printf '%s\n' "$guards"
+}
+
+# apply_pre_db_import_sql LABEL MYSQL_CMD... — run every pre-db-import file,
+# in file-name order, through MYSQL_CMD (a mysql client that reads SQL on stdin
+# and takes `-e QUERY`), each followed by its guard query. Fails closed (returns
+# 1): a file without exactly one guard line (every file is checked before the
+# first one runs), a mysql error, a failing guard query, a count other than 0.
+# A dry run prints the commands instead.
+apply_pre_db_import_sql() {
+    local label="$1" file guard count i files=() guards=()
+    shift
+    for file in "$PRE_DB_IMPORT_SQL_DIR"/*.sql; do
+        [ -f "$file" ] || continue
+        guard="$(pre_db_import_guard "$file")" || return 1
+        files+=("$file"); guards+=("$guard")
+    done
+    for i in "${!files[@]}"; do
+        file="${files[$i]}"; guard="${guards[$i]}"
+        if [ "$DRY_RUN" = true ]; then
+            printf '+ %s< %q\n' "$(printf '%q ' "$@")" "$file"
+            printf '+ %s-e %q   # must print 0\n' "$(printf '%q ' "$@")" "$guard"
+            continue
+        fi
+        log "  $(basename "$file") -> $label"
+        if ! "$@" < "$file"; then
+            echo "ERROR: $(basename "$file") failed against $label (mysql error above)" >&2
+            return 1
+        fi
+        if ! count="$("$@" -e "$guard" < /dev/null)"; then
+            echo "ERROR: the guard query of $(basename "$file") failed against $label" >&2
+            return 1
+        fi
+        if [ "$count" != 0 ]; then
+            echo "ERROR: the guard of $(basename "$file") counts '${count}' (must be 0) on $label: $guard" >&2
+            return 1
+        fi
+    done
+    log "  pre-db-import SQL: ${#files[@]} file(s) applied to $label, every guard 0"
 }
 
 # --------------------------------------------------------------- rehearse ---
@@ -1026,18 +1097,29 @@ cmd_rehearse() {
     refresh_module_confs "$REH_WORK/modules-conf" "$src"
     rehearsal_env "$REH_WORK/world.env" "$db_pw"
 
-    log "Running candidate db-import against the restored copy..."
-    docker run -d --name acup-rehearsal-dbimport --network "$REHEARSAL_NET" --memory 2g \
-        -e AC_DATA_DIR=/azerothcore/env/dist/data -e AC_LOGS_DIR=/azerothcore/env/dist/logs \
-        -e "AC_LOGIN_DATABASE_INFO=acup-rehearsal-db;3306;root;${db_pw};acore_auth" \
-        -e "AC_WORLD_DATABASE_INFO=acup-rehearsal-db;3306;root;${db_pw};acore_world" \
-        -e "AC_CHARACTER_DATABASE_INFO=acup-rehearsal-db;3306;root;${db_pw};acore_characters" \
-        -v "$REH_WORK/etc:/azerothcore/env/dist/etc" -v "$REH_WORK/logs:/azerothcore/env/dist/logs" \
-        "acore/ac-wotlk-db-import:${CANDIDATE_TAG}" >/dev/null
-    assert_rehearsal_isolated acup-rehearsal-dbimport
-    rc="$(docker wait acup-rehearsal-dbimport)"
-    docker logs acup-rehearsal-dbimport > "$REH_WORK/dbimport.log" 2>&1
-    check_that "candidate db-import exited 0" "candidate db-import exited $rc (see $REH_WORK/dbimport.log)" [ "$rc" = 0 ]
+    # As the cutover does right before its db-import (same files, same guards).
+    log "Applying the pre-db-import SQL to the restored copy..."
+    if apply_pre_db_import_sql acup-rehearsal-db docker exec -i -e "MYSQL_PWD=${db_pw}" acup-rehearsal-db mysql -uroot -N -B \
+            > "$REH_WORK/pre-db-import.log" 2>&1; then
+        check_ok "pre-db-import SQL applied to the restored copy (every guard counts 0)"
+    else
+        check_fail "pre-db-import SQL failed (see $REH_WORK/pre-db-import.log); the candidate db-import was not run"
+    fi
+
+    if [ "$CHECK_FAILS" -eq 0 ]; then
+        log "Running candidate db-import against the restored copy..."
+        docker run -d --name acup-rehearsal-dbimport --network "$REHEARSAL_NET" --memory 2g \
+            -e AC_DATA_DIR=/azerothcore/env/dist/data -e AC_LOGS_DIR=/azerothcore/env/dist/logs \
+            -e "AC_LOGIN_DATABASE_INFO=acup-rehearsal-db;3306;root;${db_pw};acore_auth" \
+            -e "AC_WORLD_DATABASE_INFO=acup-rehearsal-db;3306;root;${db_pw};acore_world" \
+            -e "AC_CHARACTER_DATABASE_INFO=acup-rehearsal-db;3306;root;${db_pw};acore_characters" \
+            -v "$REH_WORK/etc:/azerothcore/env/dist/etc" -v "$REH_WORK/logs:/azerothcore/env/dist/logs" \
+            "acore/ac-wotlk-db-import:${CANDIDATE_TAG}" >/dev/null
+        assert_rehearsal_isolated acup-rehearsal-dbimport
+        rc="$(docker wait acup-rehearsal-dbimport)"
+        docker logs acup-rehearsal-dbimport > "$REH_WORK/dbimport.log" 2>&1
+        check_that "candidate db-import exited 0" "candidate db-import exited $rc (see $REH_WORK/dbimport.log)" [ "$rc" = 0 ]
+    fi
 
     if [ "$CHECK_FAILS" -eq 0 ]; then
         log "Booting candidate worldserver (${REHEARSAL_BOTS} random bots)..."
@@ -1486,9 +1568,21 @@ cmd_cutover() {
         log "Validating the merged Compose configuration"
         run compose config -q
         mapfile -t scale < <(compose_scale_args)
-        log "Starting the stack (db-import applies all pending database updates first)"
-        # From here on db-import may migrate the databases: rollback must restore them.
+        # From here on the databases change (pre-db-import SQL, then db-import):
+        # rollback must restore them.
         mark_started BOOT_STARTED
+        # ac-database kept running since the stop step. Idempotent: a resumed
+        # boot step applies the files again (also after db-import ran).
+        log "Applying the pre-db-import SQL to ac-database"
+        # The $ expands in the container's shell (its root password), not here.
+        # shellcheck disable=SC2016
+        if ! apply_pre_db_import_sql ac-database \
+                docker exec -i ac-database sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot -N -B "$@"' sh; then
+            stop_realm_and_die "the pre-db-import SQL did not apply cleanly (see the error above); the stack was not started."
+        fi
+        # Flushed before the stack starts: the state says the SQL completed.
+        state_mark PRE_DB_IMPORT_APPLIED
+        log "Starting the stack (db-import applies all pending database updates first)"
         if ! run compose up -d --no-build ${scale[@]+"${scale[@]}"}; then
             docker logs ac-db-import > "$STATE_DIR/logs/db-import.log" 2>&1 || true
             stop_realm_and_die "stack start failed (db-import log: $STATE_DIR/logs/db-import.log)."
@@ -1912,7 +2006,7 @@ cmd_status() {
     if [ -L "$UPGRADE_ROOT/current" ]; then
         STATE_DIR="$(readlink -f "$UPGRADE_ROOT/current")"
         echo "Cutover: $STATE_DIR"
-        { grep -E '^(STEP_|[A-Z_]+_STARTED=|CUTOVER_OK|COUNTS_WARNING|ROLLBACK_RESTORED|ROLLED_BACK|FINALIZED)' "$STATE_DIR/state.env" || true; } | sed 's/^/  /'
+        { grep -E '^(STEP_|[A-Z_]+_STARTED=|PRE_DB_IMPORT_APPLIED|CUTOVER_OK|COUNTS_WARNING|ROLLBACK_RESTORED|ROLLED_BACK|FINALIZED)' "$STATE_DIR/state.env" || true; } | sed 's/^/  /'
     else
         echo "Cutover: none"
     fi
