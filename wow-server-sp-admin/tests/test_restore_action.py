@@ -14,6 +14,14 @@ from app.services.actions import ActionResult, KNOWN_DBS, SQL_FOOTER_TAIL_BYTES
 from app.services.compose_admin import validate_restored_overlay
 from app.services.config_index import KeyEntry
 
+TEST_REVS = {"core": "a" * 40, "mod-playerbots": "b" * 40, "mod-ah-bot-plus": "c" * 40,
+             "mod-individual-progression": "d" * 40}
+
+
+@pytest.fixture(autouse=True)
+def _matching_stack_revisions(monkeypatch):
+    monkeypatch.setattr(actions, "current_stack_revisions", lambda ac_stack: dict(TEST_REVS))
+
 INT_ENTRY = KeyEntry(
     key="AiPlayerbot.MinRandomBots",
     default="1000",
@@ -45,7 +53,7 @@ def _make_archive(
         (stage / "config" / "docker-compose.admin.yml").write_text(admin_yml_text)
     (stage / "manifest.json").write_text(json.dumps({
         "format_version": 1, "label": "manual", "databases": list(dbs),
-        "skipped_databases": list(skipped), "git_revisions": {}, "ac_image": "x", "stack_dir": "/x",
+        "skipped_databases": list(skipped), "git_revisions": dict(TEST_REVS), "ac_image": "x", "stack_dir": "/x",
     }))
     archive = backups / name
     with tarfile.open(archive, "w:gz") as tf:
@@ -114,6 +122,7 @@ def _make_v2_archive(
             "databases": list(KNOWN_DBS),
             "skipped_databases": [],
             "dump_layout": "single-multi-database",
+            "git_revisions": dict(TEST_REVS),
         }).encode()
     overlay = b"services: {}\n"
     with tarfile.open(archive, "w:gz") as tf:
@@ -880,3 +889,34 @@ def test_v2_create_statement_extraction_does_not_read_the_entire_dump(tmp_path):
         create_sql = actions._v2_create_database_statements(sql_path)
 
     assert "DEFAULT CHARACTER SET utf8mb4" in create_sql
+
+
+def test_revision_mismatch_accepts_identical_revisions():
+    assert actions.revision_mismatch({"git_revisions": dict(TEST_REVS)}, dict(TEST_REVS)) is None
+
+
+@pytest.mark.parametrize("archived, current", [
+    ({**TEST_REVS, "mod-playerbots": "e" * 40}, TEST_REVS),
+    ({**TEST_REVS, "core": "unknown"}, TEST_REVS),
+    (TEST_REVS, {**TEST_REVS, "core": "unknown"}),
+    (None, TEST_REVS),
+])
+def test_revision_mismatch_fails_closed(archived, current):
+    manifest = {} if archived is None else {"git_revisions": archived}
+    assert actions.revision_mismatch(manifest, dict(current)) is not None
+
+
+@patch("app.services.actions.run_stop")
+def test_run_restore_refuses_other_source_revisions_before_stop(mock_stop, tmp_path, monkeypatch):
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    manifest = json.dumps({
+        "format_version": 2, "databases": list(KNOWN_DBS), "skipped_databases": [],
+        "dump_layout": "single-multi-database", "git_revisions": {**TEST_REVS, "core": "f" * 40},
+    }).encode()
+    _make_v2_archive(tmp_path / "backups", "azerothcore-backup-preupgrade-x.tar.gz", manifest=manifest)
+    progress = []
+    result = actions.run_restore("azerothcore-backup-preupgrade-x.tar.gz",
+                                 on_progress=lambda *a: progress.append(a))
+    assert result == ActionResult.ERROR
+    mock_stop.assert_not_called()
+    assert any("revision" in " ".join(map(str, a)) for a in progress)
