@@ -662,10 +662,7 @@ def test_cutover_reports_nested_module_checkouts_only_when_the_pinned_core_track
     tools, stack, bind, previous = _addendum_fixture(tmp_path)
     pinned = _commit_beside_head(stack, pinned_path, "upstream\n", tmp_path)
     _pin(tools, "AC_CORE_REV", pinned)
-    staging = tmp_path / "work" / "staging"
-    staging.mkdir(parents=True)
-    (staging / f"stage-{pinned[:12]}.env").write_text("".join(
-        f"CANDIDATE_ID_{svc}=sha256:abc\n" for svc in ("worldserver", "authserver", "db_import", "client_data")))
+    _stage_env(tmp_path, tools, pinned)
     r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
              "--skip-rehearsal", "--dry-run")
     assert not any(m in _calls(tmp_path) for m in MUTATING)
@@ -782,10 +779,7 @@ def test_i4_fresh_cutover_records_its_pins_revisions_and_candidate_ids(tmp_path)
         _stub_script(path, "backup.sh")
     (tmp_path / "admin").mkdir()
     (tmp_path / "admin/docker-compose.yml").write_text("services: {}\n")
-    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
-    (tmp_path / "work/staging").mkdir(parents=True)
-    (tmp_path / "work/staging" / f"stage-{core12}.env").write_text("".join(
-        f"CANDIDATE_ID_{svc}=sha256:abc\n" for svc in ("worldserver", "authserver", "db_import", "client_data")))
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack))
     r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
              "--skip-rehearsal", "--pin", "AC_DUNGEON_FINDER_OPTIONS_MASK=5",
              "--pin", "AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1")
@@ -1057,8 +1051,8 @@ def _key(volume: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "_", volume)
 
 
-def _fingerprint(tools: Path) -> str:
-    """The build fingerprint as upgrade-azerothcore.sh computes it."""
+def _build_inputs(tools: Path) -> str:
+    """What a stage is built from, as upgrade-azerothcore.sh lists it (KEY=VALUE lines)."""
     versions_file = tools / "upstream-versions.env"
     versions = dict(line.split("=", 1) for line in versions_file.read_text().splitlines()
                     if "=" in line and not line.startswith("#"))
@@ -1066,9 +1060,16 @@ def _fingerprint(tools: Path) -> str:
         "AC_CORE_REV", "MOD_PLAYERBOTS_REV", "MOD_AHBOT_REV", "MOD_IP_REV", "CLIENT_DATA_VERSION"))
     listing += f"VERSIONS_SHA256={hashlib.sha256(versions_file.read_bytes()).hexdigest()}\n"
     patches = tools / "patches"
-    for rel in sorted(str(p.relative_to(patches)) for p in patches.rglob("*.patch") if p.is_file()):
-        listing += f"PATCH {rel} {hashlib.sha256((patches / rel).read_bytes()).hexdigest()}\n"
-    return hashlib.sha256(listing.encode()).hexdigest()
+    patch_lines = "".join(
+        f"PATCH {rel} {hashlib.sha256((patches / rel).read_bytes()).hexdigest()}\n"
+        for rel in sorted(str(p.relative_to(patches)) for p in patches.rglob("*.patch") if p.is_file()))
+    listing += f"PATCHES_SHA256={hashlib.sha256(patch_lines.encode()).hexdigest()}\n"
+    return listing
+
+
+def _fingerprint(tools: Path) -> str:
+    """The build fingerprint as upgrade-azerothcore.sh computes it."""
+    return hashlib.sha256(_build_inputs(tools).encode()).hexdigest()
 
 
 def _stage_env(tmp_path: Path, tools: Path, core_rev: str, fingerprint=None, **facts) -> Path:
@@ -1448,3 +1449,151 @@ def test_f20_every_repository_spec_loop_reads_the_list_on_fd_3():
         feeds = re.findall(r"done [0-9]?< <\(upstream_repo_specs\)", text)
         assert feeds and all(feed == "done 3< <(upstream_repo_specs)" for feed in feeds), (script, feeds)
         assert text.count("<&3; do") == len(feeds), script
+
+
+# F3 -------------------------------------------------------------------------
+
+def _rehearsal_result(tmp_path: Path, tools: Path, core_rev: str, pins=(), **overrides) -> None:
+    """rehearsal-latest/result.env as a passing `rehearse` of the current stage writes it."""
+    work = tmp_path / "work" / "rehearsal-x"
+    work.mkdir(parents=True)
+    values = {"REHEARSAL_OK": "1", "CANDIDATE_TAG": f"upgrade-{core_rev[:12]}",
+              "BUILD_FINGERPRINT": _fingerprint(tools),
+              **{f"CANDIDATE_ID_{svc}": "sha256:abc" for svc in STAGE_SVCS}, **overrides}
+    lines = [f"{key}={value}" for key, value in values.items()] + [f"PIN={pin}" for pin in sorted(pins)]
+    (work / "result.env").write_text("\n".join(lines) + "\n")
+    (tmp_path / "work" / "rehearsal-latest").symlink_to(work)
+
+
+def test_f3_stage_records_what_the_candidate_was_built_from(tmp_path):
+    tools, stack, bind, staging = _stage_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    text = (staging.parent / f"stage-{core12}.env").read_text()
+    assert f"BUILD_FINGERPRINT={_fingerprint(tools)}\n" in text
+    for line in _build_inputs(tools).splitlines():
+        assert line + "\n" in text, line
+
+
+@pytest.mark.parametrize("change", ["module pin", "patch"])
+def test_f3_cutover_refuses_a_stage_built_from_other_pins_or_patches(tmp_path, change):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack))
+    if change == "module pin":
+        module = stack / "modules/mod-playerbots"
+        _pin(tools, "MOD_PLAYERBOTS_REV", _commit_beside_head(module, "hotfix.txt", "fix\n", tmp_path))
+    else:
+        patch = next((tools / "patches").rglob("*.patch"))
+        patch.write_text(patch.read_text() + "\n")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes", "--skip-rehearsal")
+    assert r.returncode == 1
+    assert "re-run stage" in r.stderr
+    assert ("MOD_PLAYERBOTS_REV" if change == "module pin" else "PATCHES_SHA256") in r.stderr
+    _no_mutation(tmp_path)
+
+
+@pytest.mark.parametrize("overrides, pins", [
+    ({"CANDIDATE_ID_worldserver": "sha256:rebuilt"}, ("AC_DUNGEON_FINDER_OPTIONS_MASK=5",)),
+    ({"CANDIDATE_ID_client_data": "sha256:rebuilt"}, ("AC_DUNGEON_FINDER_OPTIONS_MASK=5",)),
+    ({"BUILD_FINGERPRINT": "0" * 64}, ("AC_DUNGEON_FINDER_OPTIONS_MASK=5",)),
+    ({}, ()),                                              # rehearsed without the cutover's pins
+    ({}, ("AC_DUNGEON_FINDER_OPTIONS_MASK=7",)),           # rehearsed with another value
+])
+def test_f3_cutover_refuses_a_rehearsal_of_another_build_or_pin_set(tmp_path, overrides, pins):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    core = _git("rev-parse", "HEAD", cwd=stack)
+    _stage_env(tmp_path, tools, core)
+    _rehearsal_result(tmp_path, tools, core, pins=pins, **overrides)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--pin", "AC_DUNGEON_FINDER_OPTIONS_MASK=5")
+    assert r.returncode == 1
+    assert "no passing rehearsal" in r.stderr
+    _no_mutation(tmp_path)
+
+
+def test_f3_cutover_accepts_the_rehearsal_of_the_staged_build_with_the_same_pins(tmp_path):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    core = _git("rev-parse", "HEAD", cwd=stack)
+    _stage_env(tmp_path, tools, core)
+    pins = ("AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1", "AC_DUNGEON_FINDER_OPTIONS_MASK=5")
+    _rehearsal_result(tmp_path, tools, core, pins=pins)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes", "--dry-run",
+             *[arg for pin in pins for arg in ("--pin", pin)])
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_f3_rehearsal_records_the_candidate_ids_fingerprint_and_pins(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive),
+             "--pin", "AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1", "--pin", "AC_DUNGEON_FINDER_OPTIONS_MASK=5",
+             **env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    text = (tmp_path / "work" / "rehearsal-latest" / "result.env").read_text().splitlines()
+    assert "REHEARSAL_OK=1" in text and f"BUILD_FINGERPRINT={_fingerprint(tools)}" in text
+    for svc in STAGE_SVCS:
+        assert f"CANDIDATE_ID_{svc}=sha256:abc" in text
+    assert [line for line in text if line.startswith("PIN=")] == [
+        "PIN=AC_DUNGEON_FINDER_OPTIONS_MASK=5", "PIN=AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1"]
+
+
+def test_f3_rehearsal_refuses_a_stage_built_from_other_pins(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    patch = next((tools / "patches").rglob("*.patch"))
+    patch.write_text(patch.read_text() + "\n")
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 1
+    assert "re-run stage" in r.stderr
+    assert "restore-drill.sh" not in _calls(tmp_path)
+
+
+def test_f3_cutover_start_records_the_staging_dir_and_fingerprint(tmp_path):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    core = _git("rev-parse", "HEAD", cwd=stack)
+    _stage_env(tmp_path, tools, core)
+    # The fixture's tooling commit has no wow-server-sp-admin/: the run stops at
+    # snapshot_tooling, after the state was recorded.
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes", "--skip-rehearsal")
+    assert r.returncode != 0 and (tmp_path / "work/current").is_symlink(), r.stdout + r.stderr
+    text = ((tmp_path / "work/current").resolve() / "state.env").read_text().splitlines()
+    assert f"STAGING_SRC={tmp_path / 'work/staging' / ('src-' + core[:12])}" in text
+    assert f"BUILD_FINGERPRINT={_fingerprint(tools)}" in text
+
+
+def test_f3_resume_refuses_when_local_patches_changed_since_the_cutover_started(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_code")
+    with open(state / "state.env", "a") as handle:
+        handle.write(f"BUILD_FINGERPRINT={_fingerprint(tools)}\n")
+    patch = next((tools / "patches").rglob("*.patch"))
+    patch.write_text(patch.read_text() + "\n")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert "changed since this cutover started" in r.stderr
+    _no_mutation(tmp_path)
+
+
+# F6 -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("facts, expected", [
+    ({"STAGING_SRC": "{work}/staging/src-aaaaaaaaaaaa"}, "src-aaaaaaaaaaaa"),
+    ({"CANDIDATE_TAG": "upgrade-bbbbbbbbbbbb"}, "src-bbbbbbbbbbbb"),       # a cutover from before STAGING_SRC
+])
+def test_f6_finalize_deletes_the_staging_dir_recorded_in_the_state_not_the_current_pins(tmp_path, facts, expected):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(bind / "rm", "rm")
+    facts = {key: value.format(work=tmp_path / "work") for key, value in facts.items()}
+    state = _cutover_state(tmp_path, stack, STEPS, CUTOVER_OK="1", **facts)
+    r = _run(tmp_path, tools, stack, bind, "finalize", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rm = [line for line in _calls(tmp_path).splitlines() if line.startswith("rm ")]
+    assert rm == [f"rm -rf -- {tmp_path / 'work/staging' / expected}"], rm
+
+
+def test_f6_finalize_never_deletes_a_recorded_path_outside_the_staging_root(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(bind / "rm", "rm")
+    state = _cutover_state(tmp_path, stack, STEPS, CUTOVER_OK="1", STAGING_SRC=str(stack))
+    r = _run(tmp_path, tools, stack, bind, "finalize", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not [line for line in _calls(tmp_path).splitlines() if line.startswith("rm ")]
+    assert "not deleting" in r.stderr

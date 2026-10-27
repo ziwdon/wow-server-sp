@@ -623,9 +623,34 @@ cmd_preflight() { preflight_checks preflight; }
 staging_src() { printf '%s/staging/src-%s\n' "$UPGRADE_ROOT" "${AC_CORE_REV:0:12}"; }
 stage_env() { printf '%s/staging/stage-%s.env\n' "$UPGRADE_ROOT" "${AC_CORE_REV:0:12}"; }
 
-stage_get() {
-    { grep -E "^$1=" "$(stage_env)" 2>/dev/null || true; } | tail -n 1 | cut -d= -f2-
+stage_get() { file_get "$(stage_env)" "$1"; }
+
+# file_get FILE KEY — the last KEY=VALUE in FILE (empty when absent).
+file_get() {
+    { grep -E "^$2=" "$1" 2>/dev/null || true; } | tail -n 1 | cut -d= -f2-
 }
+
+# build_inputs — what a stage builds the candidate from, one KEY=VALUE per
+# line: the four pinned revisions, the client-data pin, the versions file and
+# every local patch. The module revisions and patches are not in the candidate
+# tag (core SHA only), so this, not the tag, identifies the build.
+build_inputs() {
+    printf 'AC_CORE_REV=%s\nMOD_PLAYERBOTS_REV=%s\nMOD_AHBOT_REV=%s\nMOD_IP_REV=%s\nCLIENT_DATA_VERSION=%s\n' \
+        "$AC_CORE_REV" "$MOD_PLAYERBOTS_REV" "$MOD_AHBOT_REV" "$MOD_IP_REV" "$CLIENT_DATA_VERSION"
+    printf 'VERSIONS_SHA256=%s\n' "$(sha256sum < "$VERSIONS_FILE" | cut -d' ' -f1)"
+    printf 'PATCHES_SHA256=%s\n' "$(patch_listing | sha256sum | cut -d' ' -f1)"
+}
+
+# patch_listing — "PATCH <path> <sha256>" for every scripts/patches/**/*.patch, sorted.
+patch_listing() {
+    local patch
+    [ -d "$SCRIPT_DIR/patches" ] || return 0
+    (cd "$SCRIPT_DIR/patches" && find . -type f -name '*.patch' | LC_ALL=C sort | while IFS= read -r patch; do
+        printf 'PATCH %s %s\n' "${patch#./}" "$(sha256sum < "$patch" | cut -d' ' -f1)"
+    done)
+}
+
+build_fingerprint() { build_inputs | sha256sum | cut -d' ' -f1; }
 
 cmd_stage() {
     local src label rel url branch rev uid gid svc vol live_ver rollback_vol target_vol live_image problem
@@ -721,6 +746,8 @@ cmd_stage() {
         for svc in "${IMAGES[@]}"; do
             echo "CANDIDATE_ID_${svc//-/_}=$(image_id "acore/ac-wotlk-${svc}:${CANDIDATE_TAG}")"
         done
+        build_inputs
+        echo "BUILD_FINGERPRINT=$(build_fingerprint)"
     } > "$(stage_env)"
     log "Stage complete: $(stage_env)"
 }
@@ -735,6 +762,43 @@ require_stage() {
             die "candidate image $svc changed or missing since stage; re-run stage"
         fi
     done
+}
+
+# require_stage_matches_pins — the stage was built from exactly the pinned
+# versions and local patches loaded now (same core SHA, hence same tag, is not
+# enough: a module pin or patch may have changed since).
+require_stage_matches_pins() {
+    local key value changed=""
+    [ "$(stage_get BUILD_FINGERPRINT)" = "$(build_fingerprint)" ] && return 0
+    while IFS='=' read -r key value; do
+        [ "$(stage_get "$key")" = "$value" ] || changed="${changed:+$changed, }$key"
+    done < <(build_inputs)
+    die "the stage was built from other pinned versions or local patches than the ones loaded now (changed: ${changed:-build fingerprint}); re-run stage"
+}
+
+# rehearsal_problem — why rehearsal-latest is not a passing rehearsal of the
+# staged build with this cutover's --pin set; prints nothing when it is.
+rehearsal_problem() {
+    local result="$UPGRADE_ROOT/rehearsal-latest/result.env" svc rehearsed wanted
+    if [ ! -f "$result" ] || [ "$(file_get "$result" REHEARSAL_OK)" != 1 ]; then
+        echo "none recorded"; return 1
+    fi
+    if [ "$(file_get "$result" CANDIDATE_TAG)" != "$CANDIDATE_TAG" ]; then
+        echo "the last one rehearsed $(file_get "$result" CANDIDATE_TAG)"; return 1
+    fi
+    if [ -z "$(stage_get BUILD_FINGERPRINT)" ] || [ "$(file_get "$result" BUILD_FINGERPRINT)" != "$(stage_get BUILD_FINGERPRINT)" ]; then
+        echo "the last one rehearsed another build (fingerprint differs from the stage)"; return 1
+    fi
+    for svc in "${IMAGES[@]}"; do
+        if [ "$(file_get "$result" "CANDIDATE_ID_${svc//-/_}")" != "$(stage_get "CANDIDATE_ID_${svc//-/_}")" ]; then
+            echo "the last one rehearsed another $svc image"; return 1
+        fi
+    done
+    rehearsed="$({ grep '^PIN=' "$result" || true; } | cut -d= -f2- | LC_ALL=C sort)"
+    wanted="$(printf '%s\n' ${PINS[@]+"${PINS[@]}"} | { grep . || true; } | LC_ALL=C sort)"
+    if [ "$rehearsed" != "$wanted" ]; then
+        echo "the last one ran with --pin [${rehearsed//$'\n'/ }], this cutover with [${wanted//$'\n'/ }]"; return 1
+    fi
 }
 
 # --------------------------------------------------------------- rehearse ---
@@ -829,6 +893,7 @@ cmd_rehearse() {
     local src mem_gb archive started rc db_pw chars_before chars_after
     load_versions
     require_stage
+    require_stage_matches_pins
     src="$(staging_src)"
     archive="${ARCHIVE:-$(find "$STACK_DIR/backups" -maxdepth 1 -name 'azerothcore-backup-*.tar.gz' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)}"
     [ -f "$archive" ] || die "no backup archive to rehearse with"
@@ -901,8 +966,16 @@ cmd_rehearse() {
     rehearsal_cleanup
     trap - EXIT
     if [ "$CHECK_FAILS" -eq 0 ]; then
-        printf 'REHEARSAL_OK=1\nCANDIDATE_TAG=%s\nCANDIDATE_ID_worldserver=%s\n' \
-            "$CANDIDATE_TAG" "$(stage_get CANDIDATE_ID_worldserver)" > "$REH_WORK/result.env"
+        # What exactly passed: the cutover accepts it only for this build and pin set.
+        {
+            echo "REHEARSAL_OK=1"
+            echo "CANDIDATE_TAG=$CANDIDATE_TAG"
+            echo "BUILD_FINGERPRINT=$(stage_get BUILD_FINGERPRINT)"
+            for svc in "${IMAGES[@]}"; do
+                echo "CANDIDATE_ID_${svc//-/_}=$(stage_get "CANDIDATE_ID_${svc//-/_}")"
+            done
+            printf '%s\n' ${PINS[@]+"${PINS[@]}"} | { grep . || true; } | LC_ALL=C sort | sed 's/^/PIN=/'
+        } > "$REH_WORK/result.env"
         ln -sfn "$REH_WORK" "$UPGRADE_ROOT/rehearsal-latest"
         log "Rehearsal PASSED: $REH_WORK"
     else
@@ -1014,6 +1087,11 @@ cmd_cutover() {
         if [ "$(state_get CANDIDATE_TAG)" != "$CANDIDATE_TAG" ]; then
             die "pinned versions changed since this cutover started ($(state_get CANDIDATE_TAG) -> ${CANDIDATE_TAG}); resume with the tooling revision it started with"
         fi
+        # The live checkouts get this run's patches: they must be the ones the
+        # images were built with (cutovers recorded before the fingerprint skip this).
+        if [ -n "$(state_get BUILD_FINGERPRINT)" ] && [ "$(state_get BUILD_FINGERPRINT)" != "$(build_fingerprint)" ]; then
+            die "pinned versions or local patches changed since this cutover started (build fingerprint differs); resume with the tooling revision it started with"
+        fi
         while IFS='|' read -r label rel url branch rev <&3; do
             if [ "$(state_get "PIN_REV_${label//-/_}")" != "$rev" ]; then
                 die "pinned versions changed since this cutover started ($label: $(state_get "PIN_REV_${label//-/_}") -> $rev); resume with the tooling revision it started with"
@@ -1060,9 +1138,10 @@ cmd_cutover() {
         preflight_checks cutover || die "preflight failed; nothing was changed"
         require_stage
         if [ "$SKIP_REHEARSAL" != true ]; then
-            [ "$(grep -s '^CANDIDATE_TAG=' "$UPGRADE_ROOT/rehearsal-latest/result.env" | cut -d= -f2)" = "$CANDIDATE_TAG" ] \
-                || die "no passing rehearsal for ${CANDIDATE_TAG}; run 'rehearse' (or pass --skip-rehearsal)"
+            problem="$(rehearsal_problem)" \
+                || die "no passing rehearsal for ${CANDIDATE_TAG} with this build and these --pin values (${problem}); run 'rehearse' (or pass --skip-rehearsal)"
         fi
+        require_stage_matches_pins
         # Again here, not only in stage: a file created after staging must be
         # caught before the downtime starts.
         check_live_switch_collisions || die "local files collide with the pinned revisions; nothing was changed"
@@ -1091,6 +1170,9 @@ cmd_cutover() {
         state_set CANDIDATE_TAG "$CANDIDATE_TAG"
         state_set PREVIOUS_REPO_REV "$PREVIOUS_REPO_REV"
         state_set ADMIN_PRESENT "$ADMIN_PRESENT"
+        # Finalize deletes this staging tree; a resume refuses other inputs.
+        state_set STAGING_SRC "$(stage_get STAGING_SRC | grep . || staging_src)"
+        state_set BUILD_FINGERPRINT "$(stage_get BUILD_FINGERPRINT)"
         while IFS='|' read -r label rel url branch rev <&3; do
             state_set "OLD_REV_${label//-/_}" "$(git -C "$STACK_DIR/$rel" rev-parse HEAD)"
             state_set "PIN_REV_${label//-/_}" "$rev"
@@ -1546,7 +1628,7 @@ cmd_rollback() {
 
 # --------------------------------------------------------------- finalize ---
 cmd_finalize() {
-    local ts label rel url branch rev svc
+    local ts label rel url branch rev svc staging
     resolve_state_dir
     load_versions
     [ "$(state_get CUTOVER_OK)" = 1 ] || die "cutover in $STATE_DIR did not complete; refusing to delete rollback artifacts"
@@ -1568,7 +1650,19 @@ cmd_finalize() {
     while IFS='|' read -r label rel url branch rev <&3; do
         run git -C "$STACK_DIR/$rel" tag -d "preupgrade-$ts" || true
     done 3< <(upstream_repo_specs)
-    run rm -rf -- "$(staging_src)"
+    # The staging tree this cutover used, never one derived from the current
+    # pins (they may have moved on); only ever inside the staging root.
+    staging="$(state_get STAGING_SRC)"
+    if [ -z "$staging" ] && [ -n "$(state_get CANDIDATE_TAG)" ]; then
+        staging="$UPGRADE_ROOT/staging/src-$(state_get CANDIDATE_TAG | sed 's/^upgrade-//')"
+    fi
+    case "$staging" in
+        */..|*/../*) ;;
+        "$UPGRADE_ROOT"/staging/src-?*) run rm -rf -- "$staging"; staging="" ;;
+    esac
+    if [ -n "$staging" ]; then
+        echo "WARNING: not deleting the recorded staging checkout '$staging' (outside $UPGRADE_ROOT/staging); remove it by hand." >&2
+    fi
     state_mark FINALIZED
     log "Finalized. Move or delete $STATE_DIR (it holds the pre-upgrade archive) when you no longer need it."
 }
