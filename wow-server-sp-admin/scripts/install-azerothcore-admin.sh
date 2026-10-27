@@ -156,13 +156,34 @@ sudo mkdir -p "$STACK_DIR" "$STACK_DIR/snapshots" "$STACK_DIR/data"
 sudo chown "$(id -u):$(id -g)" "$STACK_DIR" "$STACK_DIR/snapshots" "$STACK_DIR/data"
 sudo chmod 700 "$STACK_DIR/snapshots" "$STACK_DIR/data"
 
+# Stage the .conf.dist files the Settings key index is built from. Prefer the
+# AzerothCore source tree the running server was built from, so the index
+# always matches the deployed version; fall back to the offline docs copy.
+stage_conf_dists() {
+    local dest="$1" f
+    local -a sources=(
+        "$AC_STACK_DIR/src/server/apps/worldserver/worldserver.conf.dist"
+        "$AC_STACK_DIR/modules/mod-playerbots/conf/playerbots.conf.dist"
+        "$AC_STACK_DIR/modules/mod-ah-bot-plus/conf/mod_ahbot.conf.dist"
+        "$AC_STACK_DIR/modules/mod-individual-progression/conf/individualProgression.conf.dist"
+    )
+    for f in "${sources[@]}"; do
+        if [ ! -f "$f" ]; then
+            echo "WARNING: $f not found; using docs/configs copies for the key index." >&2
+            cp "$REPO_DIR/../docs/configs/"*.conf.dist "$dest/"
+            return 0
+        fi
+    done
+    cp "${sources[@]}" "$dest/"
+}
+
 # --- Step 6: copy compose + dist into stack ---
 cp "$REPO_DIR/docker-compose.yml" "$STACK_DIR/"
 rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
 
 # Stage .conf.dist files under build/ so the Dockerfile can `COPY dist/`.
 mkdir -p "$STACK_DIR/build/dist"
-cp "$REPO_DIR/../docs/configs/"*.conf.dist "$STACK_DIR/build/dist/"
+stage_conf_dists "$STACK_DIR/build/dist"
 # Stage the canonical backup script into the build context (Dockerfile COPYs it).
 cp "$REPO_DIR/../scripts/backup.sh" "$STACK_DIR/build/backup.sh"
 

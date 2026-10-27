@@ -33,6 +33,7 @@ echo "$@" >> "$ADMIN_REDEPLOY_CALLS"
 if [ "$1" = compose ]; then
     for arg in "$@"; do
         if [ "$arg" = build ] && [ "${ADMIN_REDEPLOY_CASE:-healthy}" = build-fail ]; then exit 42; fi
+        if [ "$arg" = build ] && [ -n "${ADMIN_REDEPLOY_DIST_LOG:-}" ]; then cat "$STACK_DIR"/.redeploy.*/build/dist/playerbots.conf.dist > "$ADMIN_REDEPLOY_DIST_LOG"; fi
         if [ "$arg" = up ]; then
             if [ ! -f "$ADMIN_REDEPLOY_STATE" ]; then echo candidate > "$ADMIN_REDEPLOY_STATE"; else echo rollback > "$ADMIN_REDEPLOY_STATE"; fi
         fi
@@ -76,7 +77,7 @@ exit 0
     return bind
 
 
-def _run(stack: Path, bind: Path, case: str) -> tuple[subprocess.CompletedProcess[str], str]:
+def _run(stack: Path, bind: Path, case: str, extra_env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], str]:
     calls = bind / "calls"
     verify = stack.parent / "verify"
     _executable(verify, "#!/bin/sh\nexit 0\n")
@@ -99,10 +100,14 @@ def _run(stack: Path, bind: Path, case: str) -> tuple[subprocess.CompletedProces
             **os.environ,
             "PATH": f"{bind}:{os.environ['PATH']}",
             "STACK_DIR": str(stack),
+            # Never read the live AC stack: default to a path that does not exist
+            # (the helper then falls back to the repo's docs/configs copies).
+            "AC_STACK_DIR": str(stack.parent / "no-such-ac-stack"),
             "VERIFY_SCRIPT": str(verify),
             "ADMIN_REDEPLOY_CASE": case,
             "ADMIN_REDEPLOY_CALLS": str(calls),
             "ADMIN_REDEPLOY_STATE": str(bind / "state"),
+            **(extra_env or {}),
         },
         capture_output=True,
         text=True,
@@ -171,3 +176,21 @@ def test_redeploy_lock_contention_is_non_disruptive(tmp_path):
     assert result.returncode == 75
     assert "another admin redeploy is already running" in result.stderr
     assert calls == ""
+
+
+def test_candidate_key_index_comes_from_the_ac_source_tree(tmp_path):
+    stack = _stack(tmp_path)
+    ac = tmp_path / "ac"
+    for rel in ("src/server/apps/worldserver/worldserver.conf.dist",
+                "modules/mod-playerbots/conf/playerbots.conf.dist",
+                "modules/mod-ah-bot-plus/conf/mod_ahbot.conf.dist",
+                "modules/mod-individual-progression/conf/individualProgression.conf.dist"):
+        (ac / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ac / rel).write_text(f"# from {rel}\nPlayerbots.Enabled = 1\n")
+    bind = _stubs(tmp_path)
+    # bind is world-writable; tmp_path is not, and the script runs as nobody under root.
+    dist_log = bind / "dist.log"
+    result, _ = _run(stack, bind, "healthy",
+                     extra_env={"AC_STACK_DIR": str(ac), "ADMIN_REDEPLOY_DIST_LOG": str(dist_log)})
+    assert result.returncode == 0, result.stderr
+    assert dist_log.read_text().startswith("# from modules/mod-playerbots/conf/playerbots.conf.dist")

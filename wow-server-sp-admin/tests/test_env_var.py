@@ -17,6 +17,7 @@ def test_golden_file_matches_bash_helper():
 
 def test_known_examples_from_claude_md():
     assert config_key_to_ac_env_var("AiPlayerbot.Enabled") == "AC_AI_PLAYERBOT_ENABLED"
+    assert config_key_to_ac_env_var("Playerbots.Enabled") == "AC_PLAYERBOTS_ENABLED"
     assert (
         config_key_to_ac_env_var("Respawn.DynamicRateGameObject")
         == "AC_RESPAWN_DYNAMIC_RATE_GAME_OBJECT"
