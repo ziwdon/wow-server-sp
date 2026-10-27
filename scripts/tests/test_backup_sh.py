@@ -434,3 +434,45 @@ def test_exit_zero_malformed_dump_is_not_published_or_reported_complete(tmp_path
     assert old.read_bytes() == b"recoverable-old-archive"
     assert not list(backups.glob("azerothcore-backup-manual-*.tar.gz"))
     assert not list(backups.glob(".*.tmp.*"))
+
+
+def test_preupgrade_label_is_accepted_and_never_pruned(tmp_path):
+    stack = _stack(tmp_path)
+    bind = _stubs(tmp_path)
+    backups = stack / "backups"
+    backups.mkdir()
+    old = backups / "azerothcore-backup-preupgrade-2000-01-01T00-00-00.tar.gz"
+    old.write_bytes(b"rollback point")
+    old_t = time.time() - 30 * 86400
+    os.utime(old, (old_t, old_t))
+    r = _run(stack, bind, "--label", "preupgrade")
+    assert r.returncode == 0, r.stderr
+    assert len(list(backups.glob("azerothcore-backup-preupgrade-*.tar.gz"))) == 2
+    r = _run(stack, bind)  # daily mode prunes
+    assert r.returncode == 0, r.stderr
+    assert old.exists(), "pre-upgrade archives must survive daily pruning"
+
+
+def test_archive_captures_etc_confs_and_admin_data(tmp_path):
+    stack = _stack(tmp_path)
+    (stack / "env" / "dist" / "etc").mkdir(parents=True)
+    (stack / "env" / "dist" / "etc" / "worldserver.conf").write_text("Edited = 1\n")
+    (stack / "env" / "dist" / "etc" / "worldserver.conf.dist").write_text("Edited = 0\n")
+    admin_data = tmp_path / "admin-data"
+    admin_data.mkdir()
+    (admin_data / "maintenance.json").write_text('{"restart_enabled": true}')
+    (admin_data / "presence.json").write_text('{"announce_enabled": true}')
+    bind = _stubs(tmp_path)
+    r = _run(stack, bind, "--label", "manual", extra_env={"ADMIN_DATA_DIR": str(admin_data)})
+    assert r.returncode == 0, r.stderr
+    archive = next((stack / "backups").glob("azerothcore-backup-manual-*.tar.gz"))
+    with tarfile.open(archive) as tf:
+        names = tf.getnames()
+        manifest = json.loads(tf.extractfile("manifest.json").read())
+    assert "config/etc/worldserver.conf" in names
+    assert "config/etc/worldserver.conf.dist" not in names
+    assert "config/admin-data/maintenance.json" in names
+    assert "config/admin-data/presence.json" in names
+    assert set(manifest["images"]) == {"worldserver", "authserver", "db-import", "client-data"}
+    assert manifest["client_data_version"] == "unknown"
+    assert len(manifest["backup_script_sha256"]) == 64
