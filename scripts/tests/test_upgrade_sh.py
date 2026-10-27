@@ -248,8 +248,9 @@ def _stub_docker(bind: Path) -> None:
     """The fixture's docker stub plus container states (always-stopped FAKE_STOPPED,
     and a stopped list in $UPGRADE_CALLS.stopped that `stop`/`compose stop` add to
     and `compose up` clears), missing volumes (FAKE_MISSING_VOLUMES), the db-import
-    exit code (FAKE_DBIMPORT_EXIT), and the cutover's *_STARTED markers as they
-    stood in PEEK_STATE when each call was made."""
+    exit code (FAKE_DBIMPORT_EXIT), crash-looping containers (FAKE_RESTARTING), the
+    data-version a volume read reports (FAKE_DATA_VERSION, default v19), and the
+    cutover's *_STARTED markers as they stood in PEEK_STATE when each call was made."""
     _executable(bind / "docker", r"""#!/bin/bash
 markers=""
 if [ -n "${PEEK_STATE:-}" ] && [ -f "$PEEK_STATE" ]; then
@@ -264,6 +265,7 @@ case "$*" in
   "compose stop "*) for a in "$@"; do case "$a" in ac-*) echo "$a" >> "$stopped" ;; esac; done ;;
   "stop "*) echo "$last" >> "$stopped" ;;
   "inspect -f {{.State.Status}} "*)
+    case " ${FAKE_RESTARTING:-} " in *" $last "*) echo restarting; exit 0 ;; esac
     if grep -qx "$last" "$stopped" 2>/dev/null; then echo exited; exit 0; fi
     case " ${FAKE_STOPPED:-} " in *" $last "*) echo exited ;; *) echo running ;; esac ;;
   "inspect -f {{.State.StartedAt}} "*) echo 2026-10-27T08:00:00Z ;;
@@ -271,6 +273,7 @@ case "$*" in
   "logs --since "*) echo "WORLD: World Initialized In 10 seconds" ;;
   "exec ac-database "*) echo "${FAKE_HUMANS_ONLINE:-0}" ;;
   "image inspect "*) echo sha256:abc ;;
+  "run --rm --network none --user 0 -v "*":/d:ro --entrypoint sh "*) echo "INSTALLED_VERSION=${FAKE_DATA_VERSION-v19}" ;;
   "volume inspect "*)
     case " ${FAKE_MISSING_VOLUMES:-} " in *" $last "*) exit 1 ;; esac ;;
 esac
@@ -359,8 +362,8 @@ def test_rollback_restores_client_data_from_the_volume_recorded_in_the_cutover_s
     assert r.returncode == 0, r.stdout + r.stderr
     runs = [line for line in _calls(tmp_path).splitlines() if line.startswith("docker run ")]
     assert any("-v acup-client-data-rollback-v19:/src:ro" in line for line in runs), runs
-    copy = next(line for line in runs if "acup-client-data-rollback-v19" in line)
-    assert "test -f /src/data-version && find /dst -mindepth 1 -delete" in copy
+    copy = next(line for line in runs if "acup-client-data-rollback-v19:/src:ro" in line)
+    assert "test -f /src/data-version || { echo " in copy and "exit 1; }; find /dst -mindepth 1 -delete" in copy
     # I3 ruling: the live code was switched (STEP_switch_code=1), so the databases are restored.
     assert "restore-azerothcore.sh" in _calls(tmp_path)
 
@@ -380,7 +383,7 @@ def test_rollback_after_boot_restores_client_data_images_databases_then_admin(tm
     _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
     (tmp_path / "admin").mkdir()
     (tmp_path / "admin/docker-compose.yml").write_text("services: {} # upgraded admin\n")
-    state = _cutover_state(tmp_path, stack, _before("admin"), ADMIN_WAS_RUNNING="true",
+    state = _cutover_state(tmp_path, stack, _before("admin"), ADMIN_WAS_RUNNING="true", CLIENT_DATA_LIVE="v19",
                            CLIENT_DATA_ROLLBACK_VOLUME="acup-client-data-rollback-v19",
                            CLIENT_DATA_SWITCH_STARTED="1", IMAGES_SWITCH_STARTED="1", BOOT_STARTED="1",
                            ADMIN_STEP_STARTED="1")
@@ -426,7 +429,7 @@ def test_resumed_cutover_records_each_started_marker_before_its_action(tmp_path)
     assert "BOOT_STARTED=1" in up and "ADMIN_STEP_STARTED" not in up
     assert "ADMIN_STEP_STARTED=1" in start
     assert "admin-redeploy" in _calls(tmp_path)
-    assert "test -f /src/data-version && find /dst -mindepth 1 -delete" in copy
+    assert "test -f /src/data-version || { echo " in copy and "exit 1; }; find /dst -mindepth 1 -delete" in copy
     for action in (copy, tag, up, start):  # each marker is flushed to disk right before its action
         assert lines[lines.index(action) - 1] == f"sync {state / 'state.env'}", action
 
@@ -840,11 +843,12 @@ def test_i8_rollback_gives_restore_the_world_init_timeout(tmp_path):
 ])
 def test_i9_counts_mismatch_and_failed_db_import_stop_the_realm(tmp_path, step, facts, env):
     tools, stack, bind, state = _resume_fixture(tmp_path, step, **facts)
-    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", **env)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", STOP_TIMEOUT="77", **env)
     assert r.returncode == 1
     lines = _calls(tmp_path).splitlines()
-    stop = [i for i, line in enumerate(lines) if line.startswith("docker compose stop ac-worldserver ac-authserver")]
-    assert stop and stop[-1] > _index(lines, "docker compose up -d --no-build"), lines
+    world = [i for i, line in enumerate(lines) if line.startswith("docker compose stop -t 77 ac-worldserver |")]
+    auth = [i for i, line in enumerate(lines) if line.startswith("docker compose stop ac-authserver |")]
+    assert world and auth and _index(lines, "docker compose up -d --no-build") < world[-1] < auth[-1], lines
     assert f"rollback --state {state}" in r.stderr
 
 
@@ -881,3 +885,115 @@ def test_i11_rollback_saves_module_edits_before_discarding_them(tmp_path):
     assert str(saved) in r.stdout
     assert readme.read_text() == original
     assert not (state / "patches-rollback/mod-playerbots.diff").exists()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (re-review N1-N4).
+
+def test_n1_resume_after_an_interrupted_boot_step_reruns_the_boot(tmp_path):
+    # Ctrl-C / SSH drop during the World Initialized wait: the running realm is the
+    # cutover's own target stack, and the re-run boot step re-checks it.
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_verifier(tools)
+    _stub_script(tmp_path / "repo/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh", "admin-redeploy")
+    state = _cutover_state(tmp_path, stack, _before("boot"), ADMIN_WAS_RUNNING="true",
+                           IMAGES_SWITCH_STARTED="1", BOOT_STARTED="1")
+    (state / "counts-before.txt").write_text("0\n")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "restarted" not in r.stdout + r.stderr
+    lines = _calls(tmp_path).splitlines()
+    assert _index(lines, "docker compose up -d --no-build") < _index(lines, "inspect -f {{.State.ExitCode}} ac-db-import")
+    text = (state / "state.env").read_text()
+    assert "STEP_boot=1" in text and "CUTOVER_OK=1" in text
+
+
+def test_n1_a_started_rollback_blocks_resume_and_finalize_until_it_finishes(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh", rc=1)
+    _stub_script(bind / "rm", "rm")
+    (tmp_path / "admin").mkdir()
+    state = _cutover_state(tmp_path, stack, STEPS, ADMIN_WAS_RUNNING="true", IMAGES_SWITCH_STARTED="1",
+                           BOOT_STARTED="1", ADMIN_STEP_STARTED="1", CUTOVER_OK="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode != 0  # the restore failed after the rollback had begun
+    text = (state / "state.env").read_text()
+    assert "ROLLBACK_STARTED=1" in text and "ROLLED_BACK" not in text
+    for command in ("cutover", "finalize"):
+        (tmp_path / "calls").write_text("")
+        r = _run(tmp_path, tools, stack, bind, command, "--state", str(state), "--yes")
+        assert r.returncode == 1, command
+        assert "a rollback was started for this cutover; finish it" in r.stderr
+        assert f"rollback --state {state}" in r.stderr
+        assert not any(m in _calls(tmp_path) for m in MUTATING), command
+        assert "volume rm" not in _calls(tmp_path) and "image rm" not in _calls(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr  # re-running the rollback stays allowed
+    assert "ROLLED_BACK=1" in (state / "state.env").read_text()
+
+
+def test_n1_fresh_cutover_refuses_while_a_rollback_is_unfinished(tmp_path):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, STEPS, ADMIN_WAS_RUNNING="true", BOOT_STARTED="1",
+                           CUTOVER_OK="1", ROLLBACK_STARTED="1")
+    (tmp_path / "work" / "current").symlink_to(state)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes")
+    assert r.returncode == 1
+    assert "a rollback was started" in r.stderr and f"rollback --state {state}" in r.stderr
+    assert not any(m in _calls(tmp_path) for m in MUTATING)
+
+
+def test_n2_a_failed_verification_stops_the_worldserver_with_the_save_timeout(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    _stub_script(tools / "verify-azerothcore.sh", "new-verifier", rc=1)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", STOP_TIMEOUT="77")
+    assert r.returncode == 1
+    lines = _calls(tmp_path).splitlines()
+    world = _index(lines, "docker compose stop -t 77 ac-worldserver |")
+    assert _index(lines, "new-verifier") < world < _index(lines, "docker compose stop ac-authserver |")
+
+
+@pytest.mark.parametrize("found", ["", "v20.0"])
+def test_n3_rollback_refuses_a_rollback_volume_without_the_recorded_version(tmp_path, found):
+    # An empty or partial copy (interrupted stage) must be caught before the realm stops.
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    state = _cutover_state(tmp_path, stack, _before("switch_client_data"), ADMIN_WAS_RUNNING="true",
+                           CLIENT_DATA_LIVE="v19", CLIENT_DATA_ROLLBACK_VOLUME="acup-client-data-rollback-v19",
+                           CLIENT_DATA_SWITCH_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes", FAKE_DATA_VERSION=found)
+    assert r.returncode == 1
+    assert "acup-client-data-rollback-v19" in r.stderr and "v19" in r.stderr
+    calls = _calls(tmp_path)
+    # The only container run is the read-only version probe of the rollback volume.
+    runs = [line for line in calls.splitlines() if line.startswith("docker run ")]
+    assert runs and all("-v acup-client-data-rollback-v19:/d:ro " in line for line in runs), runs
+    assert not any(m in calls for m in MUTATING if m != "docker run")
+    assert "ROLLBACK_STARTED" not in (state / "state.env").read_text()
+
+
+def test_n3_stage_refuses_a_client_data_switch_when_the_live_version_is_unreadable(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "apply-local-patches.sh", "apply-local-patches.sh")
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    staging = tmp_path / "work" / "staging" / f"src-{core12}"
+    shutil.copytree(stack, staging, symlinks=True)
+    (staging / "modules/mod-ah-bot-plus/conf").mkdir()
+    shutil.copy(stack / "configs/modules/mod_ahbot.conf.dist", staging / "modules/mod-ah-bot-plus/conf")
+    r = _run(tmp_path, tools, stack, bind, "stage", FAKE_DATA_VERSION="")
+    assert r.returncode == 1
+    assert "cannot read the live client data version; refusing to stage a client-data switch" in r.stderr
+    calls = _calls(tmp_path)
+    assert "volume create" not in calls and "acup-client-data-download" not in calls
+
+
+def test_n4_resume_treats_a_restarting_realm_as_running(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("snapshot_state"), ADMIN_WAS_RUNNING="true")
+    _stopped(tmp_path, "ac-authserver")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             FAKE_RESTARTING="ac-worldserver")
+    assert r.returncode == 1
+    assert "restarted" in r.stderr and "restarting" in r.stderr
+    assert not any(m in _calls(tmp_path) for m in MUTATING)

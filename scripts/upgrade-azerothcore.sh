@@ -280,7 +280,10 @@ refuse_rolled_back() {
 # stop_realm_and_die MESSAGE — a failed boot or verification leaves the realm
 # stopped (never half-up on an unverified version), then dies with both ways on.
 stop_realm_and_die() {
-    compose stop ac-worldserver ac-authserver || true
+    # The booted realm may be mid-saveall with bots online: give it the full
+    # stop timeout (Docker's 10 s default would SIGKILL it), then the authserver.
+    compose stop -t "$STOP_TIMEOUT" ac-worldserver || true
+    compose stop ac-authserver || true
     die "$1 Server is stopped. Fix and re-run: $0 cutover --state $STATE_DIR — or roll back: $0 rollback --state $STATE_DIR"
 }
 
@@ -291,6 +294,15 @@ rollback_exit_hint() {
     [ "$(state_get ROLLED_BACK)" = 1 ] && return 0
     echo "" >&2
     echo "Rollback did not finish (exit $rc); it is safe to re-run: $0 rollback --state $STATE_DIR" >&2
+}
+
+# refuse_rollback_in_progress — once a rollback has begun, only the rollback may
+# continue (re-runs are allowed); resuming or finalizing would act on a
+# half-restored stack.
+refuse_rollback_in_progress() {
+    if [ "$(state_get ROLLBACK_STARTED)" = 1 ]; then
+        die "a rollback was started for this cutover; finish it: $0 rollback --state $STATE_DIR"
+    fi
 }
 
 # cutover_exit_hint — on any failed exit after the state exists, say how to go on.
@@ -563,7 +575,11 @@ cmd_stage() {
     rollback_vol="acup-client-data-rollback-${live_ver:-unknown}"
     target_vol="acup-client-data-${CLIENT_DATA_VERSION}"
     if [ "$live_ver" != "$CLIENT_DATA_VERSION" ]; then
-        log "Client data changes ${live_ver:-unknown} -> ${CLIENT_DATA_VERSION}."
+        # The rollback copy is named and verified by this version.
+        if [ -z "$live_ver" ] || [ "$live_ver" = unknown ]; then
+            die "cannot read the live client data version; refusing to stage a client-data switch"
+        fi
+        log "Client data changes ${live_ver} -> ${CLIENT_DATA_VERSION}."
         if ! docker volume inspect "$rollback_vol" >/dev/null 2>&1; then
             log "  copying live client data to rollback volume $rollback_vol (read-only source)"
             run docker volume create "$rollback_vol" >/dev/null
@@ -830,11 +846,12 @@ refresh_module_confs() {
 
 # ---------------------------------------------------------------- cutover ---
 cmd_cutover() {
-    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state pin name recorded
+    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state pin name recorded status
     load_versions
     if [ -n "$STATE_DIR" ]; then
         resolve_state_dir
         refuse_rolled_back
+        refuse_rollback_in_progress
         if [ "$(state_get CANDIDATE_TAG)" != "$CANDIDATE_TAG" ]; then
             die "pinned versions changed since this cutover started ($(state_get CANDIDATE_TAG) -> ${CANDIDATE_TAG}); resume with the tooling revision it started with"
         fi
@@ -851,22 +868,33 @@ cmd_cutover() {
         fi
         PIN_ARGS=()
         for pin in ${recorded[@]+"${recorded[@]}"}; do PIN_ARGS+=(--pin "$pin"); done
-        # azerothcore.service starts the stack at boot: a realm running between
-        # the stop and the boot step means a host reboot (or a hand start) ran the
-        # half-switched stack. The databases may have changed; never stop it and go on.
-        if step_done stop && ! step_done boot; then
+        # azerothcore.service starts the stack at boot: a realm up between the
+        # stop step and BOOT_STARTED means a host reboot (or a hand start) ran the
+        # half-switched stack. The databases may have changed; never stop it and
+        # go on. After BOOT_STARTED it is the cutover's own target stack (e.g. an
+        # interrupted boot wait), and the re-run boot step re-checks db-import and
+        # World Initialized. Anything but exited/created/missing counts as up
+        # (a crash-looping container reports "restarting").
+        if step_done stop && ! started BOOT_STARTED; then
             for name in ac-worldserver ac-authserver; do
-                if [ "$(container_status "$name")" = running ]; then
-                    die "the realm was restarted after the cutover stopped it ($name is running; host reboot?); the databases may have been modified. Roll back: $0 rollback --state $STATE_DIR"
-                fi
+                status="$(container_status "$name")"
+                case "$status" in
+                    exited|created|missing) ;;
+                    *) die "the realm was restarted after the cutover stopped it ($name is $status; host reboot?); the databases may have been modified. Roll back: $0 rollback --state $STATE_DIR" ;;
+                esac
             done
         fi
         log "Resuming cutover in $STATE_DIR"
     else
         if [ -L "$UPGRADE_ROOT/current" ]; then
             previous_state="$(readlink -f "$UPGRADE_ROOT/current")"
-            if [ -f "$previous_state/state.env" ] && ! grep -qxE '(CUTOVER_OK|ROLLED_BACK)=1' "$previous_state/state.env"; then
-                die "the cutover in $previous_state is incomplete; resume it ($0 cutover --state $previous_state) or roll it back ($0 rollback --state $previous_state)"
+            if [ -f "$previous_state/state.env" ] && ! grep -qx 'ROLLED_BACK=1' "$previous_state/state.env"; then
+                if grep -qx 'ROLLBACK_STARTED=1' "$previous_state/state.env"; then
+                    die "a rollback was started for the cutover in $previous_state; finish it: $0 rollback --state $previous_state"
+                fi
+                if ! grep -qx 'CUTOVER_OK=1' "$previous_state/state.env"; then
+                    die "the cutover in $previous_state is incomplete; resume it ($0 cutover --state $previous_state) or roll it back ($0 rollback --state $previous_state)"
+                fi
             fi
         fi
         preflight_checks cutover || die "preflight failed; nothing was changed"
@@ -1020,7 +1048,7 @@ cmd_cutover() {
             mark_started CLIENT_DATA_SWITCH_STARTED
             run docker run --rm --network none --user 0 -v "$target_vol:/src:ro" -v "$vol:/dst" \
                 --entrypoint sh "acore/ac-wotlk-client-data:${CANDIDATE_TAG}" \
-                -c "test -f /src/data-version && find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && chown -R $(env_value DOCKER_USER_ID):$(env_value DOCKER_GROUP_ID) /dst"
+                -c "test -f /src/data-version || { echo 'ERROR: source volume has no data-version; client data left untouched' >&2; exit 1; }; find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && chown -R $(env_value DOCKER_USER_ID):$(env_value DOCKER_GROUP_ID) /dst"
         fi
         mark_done switch_client_data
     fi
@@ -1121,7 +1149,7 @@ rollback_restores_client_data() {
 
 # rollback_preconditions TS
 rollback_preconditions() {
-    local ts="$1" label rel url branch rev svc
+    local ts="$1" label rel url branch rev svc vol live found
     while IFS='|' read -r label rel url branch rev; do
         [ -n "$(state_get "OLD_REV_${label//-/_}")" ] || die "no recorded pre-upgrade revision for $label in $STATE_DIR"
     done < <(upstream_repo_specs)
@@ -1139,8 +1167,17 @@ rollback_preconditions() {
     fi
     # `docker run -v` would create a missing volume empty, and the copy would
     # then empty the live client data.
-    if rollback_restores_client_data && ! docker volume inspect "$(state_get CLIENT_DATA_ROLLBACK_VOLUME)" >/dev/null 2>&1; then
-        die "client-data rollback volume $(state_get CLIENT_DATA_ROLLBACK_VOLUME) is missing; restore it before rolling back"
+    if rollback_restores_client_data; then
+        vol="$(state_get CLIENT_DATA_ROLLBACK_VOLUME)"
+        docker volume inspect "$vol" >/dev/null 2>&1 \
+            || die "client-data rollback volume $vol is missing; restore it before rolling back"
+        # An empty or partial copy (an interrupted stage) must be caught before
+        # the realm stops, not by the copy's own guard afterwards.
+        live="$(state_get CLIENT_DATA_LIVE)"
+        found="$(volume_data_version "$vol" "acore/ac-wotlk-client-data:preupgrade-$ts" || true)"
+        if [ -z "$live" ] || [ "$found" != "$live" ]; then
+            die "client-data rollback volume $vol holds '${found:-no data-version}', not the recorded pre-upgrade version '${live:-unknown}'; restore it before rolling back"
+        fi
     fi
     if started ADMIN_STEP_STARTED; then
         [ -f "$STATE_DIR/admin-stack/docker-compose.yml" ] || die "admin compose file copy missing from $STATE_DIR"
@@ -1190,6 +1227,8 @@ cmd_rollback() {
         echo "The live code was never switched: the databases were not touched and are kept."
     fi
     confirm ROLLBACK
+    # From here the stack is being returned: a resume or finalize must not interleave.
+    state_mark ROLLBACK_STARTED
     trap rollback_exit_hint EXIT
 
     log "Stopping the admin app and the realm"
@@ -1238,7 +1277,8 @@ cmd_rollback() {
     if rollback_restores_client_data; then
         log "Restoring client data $(state_get CLIENT_DATA_LIVE) from $rollback_vol"
         run docker run --rm --network none --user 0 -v "$rollback_vol:/src:ro" -v "$vol:/dst" \
-            --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" -c 'test -f /src/data-version && find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
+            --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" \
+            -c 'test -f /src/data-version || { echo "ERROR: source volume has no data-version; client data left untouched" >&2; exit 1; }; find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
     else
         log "Client data untouched"
     fi
@@ -1307,6 +1347,7 @@ cmd_finalize() {
     load_versions
     [ "$(state_get CUTOVER_OK)" = 1 ] || die "cutover in $STATE_DIR did not complete; refusing to delete rollback artifacts"
     if [ "$(state_get ROLLED_BACK)" = 1 ]; then die "this upgrade was rolled back; nothing to finalize"; fi
+    refuse_rollback_in_progress
     ts="$(state_get TS)"
     echo "This deletes the rollback images, client-data copies, git tags and staging checkout"
     echo "for the upgrade in $STATE_DIR. The pre-upgrade archive in $STATE_DIR is kept."
