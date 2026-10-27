@@ -24,6 +24,8 @@ fi
 
 STACK_DIR="/opt/stacks/azerothcore"
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_SOURCE_DIR}/lib/upstream-versions.sh"
 STATE_FILE="${HOME}/.azerothcore-install-state"
 CONFIG_FILE="${HOME}/.azerothcore-install-config"
 INSTALL_LOCK_FILE="${HOME}/.azerothcore-install.lock"
@@ -1200,6 +1202,18 @@ clone_or_verify_repo() {
 
     mkdir -p "$(dirname "$dest")"
     git clone "$url" --branch="$branch" --depth 1 "$dest"
+}
+
+# Pin every checkout to the exact revisions this repository is written
+# against (scripts/upstream-versions.env), then apply the local patches.
+pin_upstream_checkouts() {
+    local label rel url branch rev
+    load_upstream_versions "${SCRIPT_SOURCE_DIR}/upstream-versions.env"
+    while IFS='|' read -r label rel url branch rev; do
+        echo "Pinning ${label} to ${rev:0:12}..."
+        checkout_pinned_rev "${STACK_DIR}/${rel}" "$url" "$branch" "$rev"
+    done < <(upstream_repo_specs)
+    "${SCRIPT_SOURCE_DIR}/apply-local-patches.sh" "$STACK_DIR"
 }
 
 clone_or_verify_core_repo() {
@@ -2647,6 +2661,8 @@ if should_run_phase "1"; then
         "${STACK_DIR}/modules/mod-individual-progression" \
         "mod-individual-progression" \
         "ZhengPeiRu21/mod-individual-progression"
+
+    pin_upstream_checkouts
 
     # VERIFY Phase 1
     echo ""

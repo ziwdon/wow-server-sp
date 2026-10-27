@@ -147,3 +147,16 @@ def test_capacity_metric_test_seams_are_not_available_to_production_installs():
     assert "INSTALLER_TEST_OPT_FREE_KIB" not in INSTALL
     assert "INSTALLER_TEST_MEM_TOTAL_KIB" not in INSTALL
     assert "INSTALLER_TEST_ASSUME_INTERACTIVE" not in INSTALL
+
+
+def test_phase1_pins_upstream_revisions_and_applies_local_patches():
+    assert 'source "${SCRIPT_SOURCE_DIR}/lib/upstream-versions.sh"' in INSTALL
+    phase1 = INSTALL[INSTALL.index('"ZhengPeiRu21/mod-individual-progression"'):INSTALL.index("# VERIFY Phase 1")]
+    assert "pin_upstream_checkouts" in phase1
+
+
+def test_upstream_versions_file_pins_full_shas():
+    versions = (Path(__file__).resolve().parents[1] / "upstream-versions.env").read_text()
+    for key in ("AC_CORE_REV", "MOD_PLAYERBOTS_REV", "MOD_AHBOT_REV", "MOD_IP_REV"):
+        value = next(l.split("=", 1)[1] for l in versions.splitlines() if l.startswith(key + "="))
+        assert len(value) == 40 and all(c in "0123456789abcdef" for c in value), key

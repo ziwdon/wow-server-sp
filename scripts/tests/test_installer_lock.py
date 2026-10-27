@@ -63,6 +63,12 @@ def _installer_fixture(tmp_path: Path) -> Path:
         + logging_marker,
         1,
     )
+    # The installer sources lib/upstream-versions.sh relative to itself, so the
+    # copied fixture needs the library beside it (plumbing only).
+    (tmp_path / "lib").mkdir(exist_ok=True)
+    (tmp_path / "lib" / "upstream-versions.sh").write_text(
+        (SCRIPTS_DIR / "lib" / "upstream-versions.sh").read_text()
+    )
     fixture = tmp_path / "install-azerothcore.sh"
     _write_executable(fixture, source)
     return fixture
