@@ -245,9 +245,11 @@ def _tool(bind: Path, name: str) -> None:
 
 
 def _stub_docker(bind: Path) -> None:
-    """The fixture's docker stub plus per-container states (FAKE_STOPPED), missing
-    volumes (FAKE_MISSING_VOLUMES), a clean db-import exit, and the cutover's
-    *_STARTED markers as they stood in PEEK_STATE when each call was made."""
+    """The fixture's docker stub plus container states (always-stopped FAKE_STOPPED,
+    and a stopped list in $UPGRADE_CALLS.stopped that `stop`/`compose stop` add to
+    and `compose up` clears), missing volumes (FAKE_MISSING_VOLUMES), the db-import
+    exit code (FAKE_DBIMPORT_EXIT), and the cutover's *_STARTED markers as they
+    stood in PEEK_STATE when each call was made."""
     _executable(bind / "docker", r"""#!/bin/bash
 markers=""
 if [ -n "${PEEK_STATE:-}" ] && [ -f "$PEEK_STATE" ]; then
@@ -256,11 +258,16 @@ fi
 echo "docker $* | markers: $markers" >> "$UPGRADE_CALLS"
 args="$*"
 last="${args##* }"
+stopped="${UPGRADE_CALLS}.stopped"
 case "$*" in
+  "compose up "*) : > "$stopped" ;;
+  "compose stop "*) for a in "$@"; do case "$a" in ac-*) echo "$a" >> "$stopped" ;; esac; done ;;
+  "stop "*) echo "$last" >> "$stopped" ;;
   "inspect -f {{.State.Status}} "*)
+    if grep -qx "$last" "$stopped" 2>/dev/null; then echo exited; exit 0; fi
     case " ${FAKE_STOPPED:-} " in *" $last "*) echo exited ;; *) echo running ;; esac ;;
   "inspect -f {{.State.StartedAt}} "*) echo 2026-10-27T08:00:00Z ;;
-  "inspect -f {{.State.ExitCode}} "*) echo 0 ;;
+  "inspect -f {{.State.ExitCode}} "*) echo "${FAKE_DBIMPORT_EXIT:-0}" ;;
   "logs --since "*) echo "WORLD: World Initialized In 10 seconds" ;;
   "exec ac-database "*) echo "${FAKE_HUMANS_ONLINE:-0}" ;;
   "image inspect "*) echo sha256:abc ;;
@@ -272,14 +279,21 @@ exit 0
 
 
 def _addendum_fixture(tmp_path: Path):
-    """The plan fixture plus cp (rollback restores file copies) and the richer docker stub."""
+    """The plan fixture plus cp (rollback restores file copies), a logging sync
+    stub (state markers are flushed) and the richer docker stub."""
     tools, stack, bind, previous = _fixture(tmp_path)
     _tool(bind, "cp")
+    _stub_script(bind / "sync", "sync")
     _stub_docker(bind)
     return tools, stack, bind, previous
 
 
-def _cutover_state(tmp_path: Path, stack: Path, steps: tuple, archive=None, **facts) -> Path:
+def _stopped(tmp_path: Path, *names: str) -> None:
+    """Containers the docker stub reports as exited until `compose up`."""
+    (tmp_path / "calls.stopped").write_text("".join(f"{name}\n" for name in names))
+
+
+def _cutover_state(tmp_path: Path, stack: Path, steps: tuple, archive=None, pins=(), **facts) -> Path:
     """A cutover state directory as cmd_cutover leaves it after completing STEPS."""
     state = tmp_path / "work" / "cutover-x"
     for sub in ("configs", "etc", "logs", "patches-live", "admin-stack"):
@@ -287,6 +301,9 @@ def _cutover_state(tmp_path: Path, stack: Path, steps: tuple, archive=None, **fa
     candidate = f"upgrade-{_git('rev-parse', 'HEAD', cwd=stack)[:12]}"  # the fixture pins the stack HEADs
     lines = ["TS=x", f"CANDIDATE_TAG={candidate}", "PREVIOUS_REPO_REV=prev"]
     lines += [f"OLD_REV_{label}={_git('rev-parse', 'HEAD', cwd=stack / rel)}" for label, rel in LABELS.items()]
+    lines += [f"PIN_REV_{label}={_git('rev-parse', 'HEAD', cwd=stack / rel)}" for label, rel in LABELS.items()]
+    lines += [f"CANDIDATE_ID_{svc}=sha256:abc" for svc in ("worldserver", "authserver", "db_import", "client_data")]
+    lines += [f"PIN={pin}" for pin in pins]
     if "snapshot_tooling" in steps:
         _stub_script(state / "repo-snapshot/scripts/verify-azerothcore.sh", "old-verifier")
     if "stop" in steps:
@@ -342,7 +359,10 @@ def test_rollback_restores_client_data_from_the_volume_recorded_in_the_cutover_s
     assert r.returncode == 0, r.stdout + r.stderr
     runs = [line for line in _calls(tmp_path).splitlines() if line.startswith("docker run ")]
     assert any("-v acup-client-data-rollback-v19:/src:ro" in line for line in runs), runs
-    assert "restore-azerothcore.sh" not in _calls(tmp_path)
+    copy = next(line for line in runs if "acup-client-data-rollback-v19" in line)
+    assert "test -f /src/data-version && find /dst -mindepth 1 -delete" in copy
+    # I3 ruling: the live code was switched (STEP_switch_code=1), so the databases are restored.
+    assert "restore-azerothcore.sh" in _calls(tmp_path)
 
 
 def test_rollback_refuses_when_boot_started_but_no_preupgrade_archive_was_recorded(tmp_path):
@@ -391,6 +411,7 @@ def test_resumed_cutover_records_each_started_marker_before_its_action(tmp_path)
                            CLIENT_DATA_ROLLBACK_VOLUME="acup-client-data-rollback-v19",
                            CLIENT_DATA_TARGET_VOLUME="acup-client-data-v20.0")
     (state / "counts-before.txt").write_text("0\n")
+    _stopped(tmp_path, "ac-worldserver", "ac-authserver")  # as the completed stop step left them
     r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
              PEEK_STATE=str(state / "state.env"))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -405,6 +426,9 @@ def test_resumed_cutover_records_each_started_marker_before_its_action(tmp_path)
     assert "BOOT_STARTED=1" in up and "ADMIN_STEP_STARTED" not in up
     assert "ADMIN_STEP_STARTED=1" in start
     assert "admin-redeploy" in _calls(tmp_path)
+    assert "test -f /src/data-version && find /dst -mindepth 1 -delete" in copy
+    for action in (copy, tag, up, start):  # each marker is flushed to disk right before its action
+        assert lines[lines.index(action) - 1] == f"sync {state / 'state.env'}", action
 
 
 def test_finalize_reads_client_data_volumes_from_the_cutover_state(tmp_path):
@@ -626,3 +650,234 @@ def test_stage_reports_an_ignored_local_file_at_a_pinned_path_as_overwritten(tmp
     assert "ignored: conf/local.log" in r.stdout
     assert "would be overwritten" in r.stdout
     assert "compose" not in _calls(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (task review I1-I11).
+
+def _stub_verifier(tools: Path) -> None:
+    """The new verifier fails, as the real one would, while ac-worldserver is stopped."""
+    _executable(tools / "verify-azerothcore.sh", '#!/bin/bash\n'
+                'if grep -qx ac-worldserver "${UPGRADE_CALLS}.stopped" 2>/dev/null; then\n'
+                '    echo "new-verifier FAIL (worldserver stopped)" >> "$UPGRADE_CALLS"; exit 1\nfi\n'
+                'echo "new-verifier" >> "$UPGRADE_CALLS"\n')
+
+
+def _resume_fixture(tmp_path: Path, step: str, **facts):
+    """A cutover that stopped inside STEP, with the realm as that step leaves it."""
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_verifier(tools)
+    _stub_script(tmp_path / "repo/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh", "admin-redeploy")
+    state = _cutover_state(tmp_path, stack, _before(step), ADMIN_WAS_RUNNING="true", **facts)
+    (state / "counts-before.txt").write_text("0\n")
+    _stopped(tmp_path, "ac-worldserver", "ac-authserver")
+    return tools, stack, bind, state
+
+
+def test_i1_resumed_verify_restarts_the_stopped_realm_and_waits_before_verifying(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = _calls(tmp_path).splitlines()
+    assert _index(lines, "docker compose up -d --no-build") < _index(lines, "logs --since") \
+        < _index(lines, "new-verifier")
+    assert "CUTOVER_OK=1" in (state / "state.env").read_text()
+
+
+def test_i2_rollback_waits_for_world_initialized_before_the_old_verifier(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("backup"), ADMIN_WAS_RUNNING="true")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = _calls(tmp_path).splitlines()
+    assert _index(lines, "docker compose up -d --no-build") < _index(lines, "logs --since ") \
+        < _index(lines, "old-verifier")
+
+
+def test_i3_rollback_restores_the_databases_once_the_code_switch_started(tmp_path):
+    # A reboot restarts the realm on the switched ./modules checkout, whose SQL the
+    # worldserver applies: the databases may have changed before any boot marker.
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    state = _cutover_state(tmp_path, stack, _before("switch_code"), ADMIN_WAS_RUNNING="true",
+                           SWITCH_CODE_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"restore-azerothcore.sh {state / 'azerothcore-backup-preupgrade-x.tar.gz'}" in _calls(tmp_path)
+
+
+def test_i3_resume_refuses_a_realm_restarted_after_the_cutover_stopped_it(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("snapshot_state"), ADMIN_WAS_RUNNING="true")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert "restarted" in r.stdout + r.stderr
+    assert f"rollback --state {state}" in r.stderr
+    assert not any(m in _calls(tmp_path) for m in MUTATING)
+
+
+def test_i3_switch_code_writes_a_started_marker_before_the_first_checkout(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_code")
+    _stub_script(tools / "apply-local-patches.sh", "apply-local-patches.sh", rc=1)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    text = (state / "state.env").read_text()
+    assert "SWITCH_CODE_STARTED=1" in text and "STEP_switch_code" not in text
+    assert f"sync {state / 'state.env'}" in _calls(tmp_path)
+
+
+def test_i4_fresh_cutover_records_its_pins_revisions_and_candidate_ids(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    (tmp_path / "repo/wow-server-sp-admin/scripts").mkdir(parents=True)
+    (tmp_path / "repo/wow-server-sp-admin/scripts/README").write_text("admin tooling\n")
+    _git("add", ".", cwd=tmp_path / "repo")
+    _git("commit", "-qm", "admin tooling", cwd=tmp_path / "repo")
+    previous = _git("rev-parse", "HEAD", cwd=tmp_path / "repo")
+    for path in (stack / "backup.sh", tools / "backup.sh"):  # preflight compares the two
+        _stub_script(path, "backup.sh")
+    (tmp_path / "admin").mkdir()
+    (tmp_path / "admin/docker-compose.yml").write_text("services: {}\n")
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    (tmp_path / "work/staging").mkdir(parents=True)
+    (tmp_path / "work/staging" / f"stage-{core12}.env").write_text("".join(
+        f"CANDIDATE_ID_{svc}=sha256:abc\n" for svc in ("worldserver", "authserver", "db_import", "client_data")))
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--skip-rehearsal", "--pin", "AC_DUNGEON_FINDER_OPTIONS_MASK=5",
+             "--pin", "AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1")
+    assert r.returncode == 1  # the backup stub produces no archive
+    assert "pre-upgrade archive not found" in r.stderr
+    state = (tmp_path / "work/current").resolve()
+    text = (state / "state.env").read_text().splitlines()
+    assert [line for line in text if line.startswith("PIN=")] == [
+        "PIN=AC_DUNGEON_FINDER_OPTIONS_MASK=5", "PIN=AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1"]
+    for label, rel in LABELS.items():
+        assert f"PIN_REV_{label}={_git('rev-parse', 'HEAD', cwd=stack / rel)}" in text
+    for svc in ("worldserver", "authserver", "db_import", "client_data"):
+        assert f"CANDIDATE_ID_{svc}=sha256:abc" in text
+
+
+@pytest.mark.parametrize("cli_pins", [(), ("AC_DUNGEON_FINDER_OPTIONS_MASK=7",)])
+def test_i4_resumed_cutover_replays_the_recorded_pins_and_refuses_different_ones(tmp_path, cli_pins):
+    pins = ("AC_DUNGEON_FINDER_OPTIONS_MASK=5", "AC_INDIVIDUAL_PROGRESSION_ENFORCE_GROUP_RULES=1")
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stopped(tmp_path, "ac-worldserver", "ac-authserver")
+    _stub_script(bind / "rm", "rm")
+    _stub_script(tools / "migrate-ac-env.sh", "migrate-ac-env.sh", rc=1)  # record argv, stop there
+    for module, name in (("mod-playerbots", "playerbots"), ("mod-ah-bot-plus", "mod_ahbot"),
+                         ("mod-individual-progression", "individualProgression")):
+        (stack / "modules" / module / "conf").mkdir()
+        (stack / "modules" / module / "conf" / f"{name}.conf.dist").write_text(f"{name}.X = 1\n")
+    state = _cutover_state(tmp_path, stack, _before("switch_config"), pins=pins, ADMIN_WAS_RUNNING="true")
+    args = [arg for pin in cli_pins for arg in ("--pin", pin)]
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", *args)
+    assert r.returncode == 1
+    if cli_pins:
+        assert "pins differ from the cutover's" in r.stderr
+        assert "migrate-ac-env.sh" not in _calls(tmp_path)
+    else:
+        lines = _calls(tmp_path).splitlines()
+        assert "--pin " + " --pin ".join(pins) + " " in lines[_index(lines, "migrate-ac-env.sh ")]
+
+
+def test_i5_rollback_refuses_a_missing_client_data_rollback_volume_before_stopping_anything(tmp_path):
+    # `docker run -v` would create the missing volume empty and the copy would wipe live client data.
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("switch_client_data"), ADMIN_WAS_RUNNING="true",
+                           CLIENT_DATA_ROLLBACK_VOLUME="acup-client-data-rollback-v19",
+                           CLIENT_DATA_SWITCH_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes",
+             FAKE_MISSING_VOLUMES="acup-client-data-rollback-v19")
+    assert r.returncode == 1
+    assert "acup-client-data-rollback-v19" in r.stderr and "missing" in r.stderr
+    assert not any(m in _calls(tmp_path) for m in MUTATING)
+
+
+@pytest.mark.parametrize("pin_key", ["MOD_PLAYERBOTS_REV", "MOD_IP_REV"])
+def test_i6_resume_refuses_a_changed_module_pin(tmp_path, pin_key):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("switch_code"), ADMIN_WAS_RUNNING="true")
+    _stopped(tmp_path, "ac-worldserver", "ac-authserver")
+    _pin(tools, pin_key, "1" * 40)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert "pinned versions changed" in r.stderr
+    assert not any(m in _calls(tmp_path) for m in MUTATING)
+
+
+def test_i6_resume_refuses_candidate_images_changed_since_the_cutover_started(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_images",
+                                                CANDIDATE_ID_worldserver="sha256:rebuilt")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert "candidate images changed since the cutover started" in r.stderr
+    assert "docker tag" not in _calls(tmp_path)
+    assert "IMAGES_SWITCH_STARTED" not in (state / "state.env").read_text()
+
+
+def test_i7_an_unfinished_rollback_says_it_is_safe_to_re_run(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh", rc=1)
+    state = _cutover_state(tmp_path, stack, _before("verify"), ADMIN_WAS_RUNNING="true", BOOT_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode != 0
+    assert "safe to re-run" in r.stderr and f"rollback --state {state}" in r.stderr
+    assert "ROLLED_BACK" not in (state / "state.env").read_text()
+
+
+def test_i8_rollback_gives_restore_the_world_init_timeout(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _executable(tools / "restore-azerothcore.sh",
+                '#!/bin/sh\necho "restore-azerothcore.sh $* ready=$RESTORE_READY_TIMEOUT_SECONDS" >> "$UPGRADE_CALLS"\n')
+    state = _cutover_state(tmp_path, stack, _before("verify"), ADMIN_WAS_RUNNING="true", BOOT_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes", WORLD_INIT_TIMEOUT="777")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ready=777" in _calls(tmp_path)
+
+
+@pytest.mark.parametrize("step, facts, env", [
+    ("verify", {"BOOT_STARTED": "1"}, {"FAKE_HUMANS_ONLINE": "5"}),   # counts 0 -> 5
+    ("boot", {}, {"FAKE_DBIMPORT_EXIT": "1"}),
+])
+def test_i9_counts_mismatch_and_failed_db_import_stop_the_realm(tmp_path, step, facts, env):
+    tools, stack, bind, state = _resume_fixture(tmp_path, step, **facts)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", **env)
+    assert r.returncode == 1
+    lines = _calls(tmp_path).splitlines()
+    stop = [i for i, line in enumerate(lines) if line.startswith("docker compose stop ac-worldserver ac-authserver")]
+    assert stop and stop[-1] > _index(lines, "docker compose up -d --no-build"), lines
+    assert f"rollback --state {state}" in r.stderr
+
+
+def test_i10_a_one_second_readiness_probe_still_looks_once(tmp_path):
+    tools, stack, bind, previous = _fixture(tmp_path)
+    real_date = shutil.which("date")
+    counter = tmp_path / "date-counter"
+    (bind / "date").unlink()
+    # Every `date +%s` is one second later: a 1 s deadline has passed by the first loop test.
+    _executable(bind / "date", "#!/bin/bash\n"
+                'if [ "$*" = "+%s" ]; then\n'
+                f'    n=$(( $(cat "{counter}" 2>/dev/null || echo 0) + 1 ))\n'
+                f'    echo "$n" > "{counter}"\n'
+                '    echo $(( 1800000000 + n ))\n'
+                '    exit 0\n'
+                'fi\n'
+                f'exec {real_date} "$@"\n')
+    r = _run(tmp_path, tools, stack, bind, "preflight", "--previous-repo-rev", previous)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[OK]   ac-worldserver reached World Initialized this boot" in r.stdout
+
+
+def test_i11_rollback_saves_module_edits_before_discarding_them(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    readme = stack / "modules/mod-ah-bot-plus/README"
+    original = readme.read_text()
+    readme.write_text("edited after the cutover\n")
+    state = _cutover_state(tmp_path, stack, _before("switch_config"), ADMIN_WAS_RUNNING="true")
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    saved = state / "patches-rollback/mod-ah-bot-plus.diff"
+    assert "+edited after the cutover" in saved.read_text()
+    assert str(saved) in r.stdout
+    assert readme.read_text() == original
+    assert not (state / "patches-rollback/mod-playerbots.diff").exists()

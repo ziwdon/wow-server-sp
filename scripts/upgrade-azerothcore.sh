@@ -96,7 +96,14 @@ while [ $# -gt 0 ]; do
 done
 
 PIN_ARGS=()
-for pin in ${PINS[@]+"${PINS[@]}"}; do PIN_ARGS+=(--pin "$pin"); done
+for pin in ${PINS[@]+"${PINS[@]}"}; do
+    # Same rule as migrate-ac-env.sh; checked here because pins are recorded in state.env.
+    if ! [[ "$pin" =~ ^AC_[A-Z0-9_]+=[A-Za-z0-9._,:-]*$ ]]; then
+        echo "ERROR: invalid --pin '$pin' (expected AC_KEY=VALUE with a shell-safe value)" >&2
+        exit 2
+    fi
+    PIN_ARGS+=(--pin "$pin")
+done
 
 # ---------------------------------------------------------------- helpers ---
 log() { echo "[$(date -u '+%F %T')Z] $*"; }
@@ -150,7 +157,9 @@ wait_world_initialized() {
     local name="$1" timeout="$2" started deadline status
     started="$(docker inspect -f '{{.State.StartedAt}}' "$name" 2>/dev/null)" || return 1
     deadline=$(( $(date +%s) + timeout ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
+    # Look at least once before testing the deadline: a short timeout must not
+    # expire across a second boundary before the first look.
+    while :; do
         status="$(container_status "$name")"
         if [ "$status" != running ]; then
             echo "ERROR: $name entered '$status' before World Initialized." >&2
@@ -161,6 +170,7 @@ wait_world_initialized() {
         if grep -q "World Initialized" < <(docker logs --since "$started" "$name" 2>&1); then
             return 0
         fi
+        [ "$(date +%s)" -lt "$deadline" ] || break
         sleep 10
     done
     echo "ERROR: $name did not log World Initialized within ${timeout}s." >&2
@@ -204,14 +214,27 @@ state_get() {
     [ -f "$STATE_DIR/state.env" ] || return 0
     { grep -E "^$1=" "$STATE_DIR/state.env" || true; } | tail -n 1 | cut -d= -f2-
 }
+# state_mark KEY — set a marker (KEY=1) and flush state.env to disk before the
+# action it guards: after a power loss the markers must still say what changed.
+state_mark() {
+    state_set "$1" 1
+    [ "$DRY_RUN" = true ] && return 0
+    sync "$STATE_DIR/state.env" 2>/dev/null || sync
+}
 step_done() { [ "$(state_get "STEP_$1")" = 1 ]; }
-mark_done() { state_set "STEP_$1" 1; }
-# Started markers (CLIENT_DATA_SWITCH_STARTED, IMAGES_SWITCH_STARTED,
-# BOOT_STARTED, ADMIN_STEP_STARTED) are written immediately BEFORE a step's
-# first mutation, so rollback knows what may have changed even when the step
-# died before its STEP_ marker.
-mark_started() { state_set "$1" 1; }
+mark_done() { state_mark "STEP_$1"; }
+# Started markers (SWITCH_CODE_STARTED, CLIENT_DATA_SWITCH_STARTED,
+# IMAGES_SWITCH_STARTED, BOOT_STARTED, ADMIN_STEP_STARTED) are written
+# immediately BEFORE a step's first mutation, so rollback knows what may have
+# changed even when the step died before its STEP_ marker.
+mark_started() { state_mark "$1"; }
 started() { [ "$(state_get "$1")" = 1 ]; }
+# recorded_pins — the --pin values the cutover started with, one per line.
+recorded_pins() {
+    if [ -f "$STATE_DIR/state.env" ]; then
+        { grep '^PIN=' "$STATE_DIR/state.env" || true; } | cut -d= -f2-
+    fi
+}
 
 # cutover_fact KEY — a staging fact recorded in the cutover state (the staging
 # file itself during a dry run, which records no state).
@@ -252,6 +275,22 @@ refuse_rolled_back() {
     if [ "$(state_get ROLLED_BACK)" = 1 ]; then
         die "the upgrade in $STATE_DIR was already rolled back; start a new cutover (without --state) to upgrade again"
     fi
+}
+
+# stop_realm_and_die MESSAGE — a failed boot or verification leaves the realm
+# stopped (never half-up on an unverified version), then dies with both ways on.
+stop_realm_and_die() {
+    compose stop ac-worldserver ac-authserver || true
+    die "$1 Server is stopped. Fix and re-run: $0 cutover --state $STATE_DIR — or roll back: $0 rollback --state $STATE_DIR"
+}
+
+# rollback_exit_hint — rollback is idempotent until it records ROLLED_BACK.
+rollback_exit_hint() {
+    local rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    [ "$(state_get ROLLED_BACK)" = 1 ] && return 0
+    echo "" >&2
+    echo "Rollback did not finish (exit $rc); it is safe to re-run: $0 rollback --state $STATE_DIR" >&2
 }
 
 # cutover_exit_hint — on any failed exit after the state exists, say how to go on.
@@ -791,13 +830,36 @@ refresh_module_confs() {
 
 # ---------------------------------------------------------------- cutover ---
 cmd_cutover() {
-    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state
+    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state pin name recorded
     load_versions
     if [ -n "$STATE_DIR" ]; then
         resolve_state_dir
         refuse_rolled_back
         if [ "$(state_get CANDIDATE_TAG)" != "$CANDIDATE_TAG" ]; then
             die "pinned versions changed since this cutover started ($(state_get CANDIDATE_TAG) -> ${CANDIDATE_TAG}); resume with the tooling revision it started with"
+        fi
+        while IFS='|' read -r label rel url branch rev; do
+            if [ "$(state_get "PIN_REV_${label//-/_}")" != "$rev" ]; then
+                die "pinned versions changed since this cutover started ($label: $(state_get "PIN_REV_${label//-/_}") -> $rev); resume with the tooling revision it started with"
+            fi
+        done < <(upstream_repo_specs)
+        # The cutover's --pin values are part of its state: replay them, and
+        # refuse a resume that names different ones.
+        mapfile -t recorded < <(recorded_pins)
+        if [ "${#PINS[@]}" -gt 0 ] && [ "$(printf '%s\n' "${PINS[@]}" | sort)" != "$(printf '%s\n' ${recorded[@]+"${recorded[@]}"} | sort)" ]; then
+            die "pins differ from the cutover's (recorded: ${recorded[*]:-none}); resume without --pin to reuse them"
+        fi
+        PIN_ARGS=()
+        for pin in ${recorded[@]+"${recorded[@]}"}; do PIN_ARGS+=(--pin "$pin"); done
+        # azerothcore.service starts the stack at boot: a realm running between
+        # the stop and the boot step means a host reboot (or a hand start) ran the
+        # half-switched stack. The databases may have changed; never stop it and go on.
+        if step_done stop && ! step_done boot; then
+            for name in ac-worldserver ac-authserver; do
+                if [ "$(container_status "$name")" = running ]; then
+                    die "the realm was restarted after the cutover stopped it ($name is running; host reboot?); the databases may have been modified. Roll back: $0 rollback --state $STATE_DIR"
+                fi
+            done
         fi
         log "Resuming cutover in $STATE_DIR"
     else
@@ -831,7 +893,12 @@ cmd_cutover() {
         state_set PREVIOUS_REPO_REV "$PREVIOUS_REPO_REV"
         while IFS='|' read -r label rel url branch rev; do
             state_set "OLD_REV_${label//-/_}" "$(git -C "$STACK_DIR/$rel" rev-parse HEAD)"
+            state_set "PIN_REV_${label//-/_}" "$rev"
         done < <(upstream_repo_specs)
+        for svc in "${IMAGES[@]}"; do
+            state_set "CANDIDATE_ID_${svc//-/_}" "$(stage_get "CANDIDATE_ID_${svc//-/_}")"
+        done
+        for pin in ${PINS[@]+"${PINS[@]}"}; do state_set PIN "$pin"; done
         # Rollback and finalize read these from the state, never from the
         # staging file (a later 'stage' may rewrite or remove it).
         for key in "${CLIENT_DATA_FACTS[@]}"; do
@@ -915,6 +982,9 @@ cmd_cutover() {
 
     if ! step_done switch_code; then
         log "Switching live checkouts to the pinned revisions"
+        # From here on the host-mounted ./modules may hold new SQL that a
+        # (re)started worldserver applies: rollback must restore the databases.
+        mark_started SWITCH_CODE_STARTED
         while IFS='|' read -r label rel url branch rev; do
             if [ "$label" != core ]; then run git -C "$STACK_DIR/$rel" checkout -q -- .; fi
             if [ "$DRY_RUN" = true ]; then
@@ -950,12 +1020,19 @@ cmd_cutover() {
             mark_started CLIENT_DATA_SWITCH_STARTED
             run docker run --rm --network none --user 0 -v "$target_vol:/src:ro" -v "$vol:/dst" \
                 --entrypoint sh "acore/ac-wotlk-client-data:${CANDIDATE_TAG}" \
-                -c "find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && chown -R $(env_value DOCKER_USER_ID):$(env_value DOCKER_GROUP_ID) /dst"
+                -c "test -f /src/data-version && find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && chown -R $(env_value DOCKER_USER_ID):$(env_value DOCKER_GROUP_ID) /dst"
         fi
         mark_done switch_client_data
     fi
 
     if ! step_done switch_images; then
+        if [ "$DRY_RUN" != true ]; then
+            for svc in "${IMAGES[@]}"; do
+                if [ "$(image_id "acore/ac-wotlk-${svc}:${CANDIDATE_TAG}")" != "$(state_get "CANDIDATE_ID_${svc//-/_}")" ]; then
+                    die "candidate images changed since the cutover started (acore/ac-wotlk-${svc}:${CANDIDATE_TAG}); re-stage and roll back"
+                fi
+            done
+        fi
         mark_started IMAGES_SWITCH_STARTED
         for svc in "${IMAGES[@]}"; do
             run docker tag "acore/ac-wotlk-${svc}:${CANDIDATE_TAG}" "acore/ac-wotlk-${svc}:$(env_value DOCKER_IMAGE_TAG)"
@@ -972,16 +1049,16 @@ cmd_cutover() {
         mark_started BOOT_STARTED
         if ! run compose up -d --no-build ${scale[@]+"${scale[@]}"}; then
             docker logs ac-db-import > "$STATE_DIR/logs/db-import.log" 2>&1 || true
-            run compose stop ac-worldserver ac-authserver || true
-            die "stack start failed (db-import log: $STATE_DIR/logs/db-import.log). Server is stopped. Fix and re-run: $0 cutover --state $STATE_DIR  — or roll back: $0 rollback --state $STATE_DIR"
+            stop_realm_and_die "stack start failed (db-import log: $STATE_DIR/logs/db-import.log)."
         fi
         if [ "$DRY_RUN" != true ]; then
             docker logs ac-db-import > "$STATE_DIR/logs/db-import.log" 2>&1 || true
-            [ "$(docker inspect -f '{{.State.ExitCode}}' ac-db-import)" = 0 ] || die "ac-db-import did not exit 0"
+            if [ "$(docker inspect -f '{{.State.ExitCode}}' ac-db-import)" != 0 ]; then
+                stop_realm_and_die "ac-db-import did not exit 0 (log: $STATE_DIR/logs/db-import.log)."
+            fi
             if ! wait_world_initialized ac-worldserver "$WORLD_INIT_TIMEOUT"; then
                 docker logs ac-worldserver > "$STATE_DIR/logs/worldserver-boot.log" 2>&1 || true
-                compose stop ac-worldserver ac-authserver || true
-                die "worldserver did not initialize. Server is stopped. Rollback: $0 rollback --state $STATE_DIR"
+                stop_realm_and_die "worldserver did not initialize (log: $STATE_DIR/logs/worldserver-boot.log)."
             fi
             docker logs ac-worldserver > "$STATE_DIR/logs/worldserver-boot.log" 2>&1 || true
         fi
@@ -989,16 +1066,27 @@ cmd_cutover() {
     fi
 
     if ! step_done verify; then
+        # A resumed verify finds the realm stopped by the failed attempt: start it
+        # (a no-op when it is running) and wait for this boot before verifying.
+        log "Starting the realm for verification (no-op when it is already up)"
+        mapfile -t scale < <(compose_scale_args)
+        if ! run compose up -d --no-build ${scale[@]+"${scale[@]}"}; then
+            stop_realm_and_die "stack start before verification failed."
+        fi
         log "Verifying the upgraded stack"
         if [ "$DRY_RUN" != true ]; then
+            if ! wait_world_initialized ac-worldserver "$WORLD_INIT_TIMEOUT"; then
+                docker logs ac-worldserver > "$STATE_DIR/logs/worldserver-boot.log" 2>&1 || true
+                stop_realm_and_die "worldserver did not initialize before verification (log: $STATE_DIR/logs/worldserver-boot.log)."
+            fi
             if ! "$SCRIPT_DIR/verify-azerothcore.sh" | tee "$STATE_DIR/logs/verify.log"; then
-                compose stop ac-worldserver ac-authserver || true
-                die "verification failed (see $STATE_DIR/logs/verify.log). Server is stopped. Fix and re-run: $0 cutover --state $STATE_DIR — or roll back: $0 rollback --state $STATE_DIR"
+                stop_realm_and_die "verification failed (see $STATE_DIR/logs/verify.log)."
             fi
             db_query "SELECT (SELECT COUNT(*) FROM acore_auth.account),(SELECT COUNT(*) FROM acore_characters.characters)" \
                 | tr '\t' ' ' > "$STATE_DIR/counts-after.txt"
-            cmp -s "$STATE_DIR/counts-before.txt" "$STATE_DIR/counts-after.txt" \
-                || die "account/character counts changed across the upgrade: $(cat "$STATE_DIR/counts-before.txt") -> $(cat "$STATE_DIR/counts-after.txt")"
+            if ! cmp -s "$STATE_DIR/counts-before.txt" "$STATE_DIR/counts-after.txt"; then
+                stop_realm_and_die "account/character counts changed across the upgrade: $(cat "$STATE_DIR/counts-before.txt") -> $(cat "$STATE_DIR/counts-after.txt")."
+            fi
         fi
         mark_done verify
     fi
@@ -1010,7 +1098,7 @@ cmd_cutover() {
         run "$REPO_DIR/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh"
         mark_done admin
     fi
-    state_set CUTOVER_OK 1
+    state_mark CUTOVER_OK
     log "Cutover complete. Rollback stays available: $0 rollback --state $STATE_DIR"
     log "After a stable week: $0 finalize --state $STATE_DIR"
 }
@@ -1019,6 +1107,18 @@ cmd_cutover() {
 # Rollback undoes only what the cutover did. The STEP_ markers and the started
 # markers (set before each step's first mutation) say what may have changed;
 # every artifact the undo needs is checked before the first mutation.
+# rollback_needs_db_restore — true as soon as anything the old or new binaries
+# could act on changed: the code switch (a restarted worldserver applies the
+# switched ./modules SQL), the image switch, or the boot (db-import).
+rollback_needs_db_restore() {
+    step_done switch_code || started SWITCH_CODE_STARTED || started IMAGES_SWITCH_STARTED || started BOOT_STARTED
+}
+
+# rollback_restores_client_data — the client-data copy may have begun.
+rollback_restores_client_data() {
+    started CLIENT_DATA_SWITCH_STARTED && [ -n "$(state_get CLIENT_DATA_ROLLBACK_VOLUME)" ]
+}
+
 # rollback_preconditions TS
 rollback_preconditions() {
     local ts="$1" label rel url branch rev svc
@@ -1037,14 +1137,36 @@ rollback_preconditions() {
     if started CLIENT_DATA_SWITCH_STARTED && [ -z "$(state_get CLIENT_DATA_ROLLBACK_VOLUME)" ]; then
         die "client data was switched but no rollback volume is recorded in $STATE_DIR"
     fi
+    # `docker run -v` would create a missing volume empty, and the copy would
+    # then empty the live client data.
+    if rollback_restores_client_data && ! docker volume inspect "$(state_get CLIENT_DATA_ROLLBACK_VOLUME)" >/dev/null 2>&1; then
+        die "client-data rollback volume $(state_get CLIENT_DATA_ROLLBACK_VOLUME) is missing; restore it before rolling back"
+    fi
     if started ADMIN_STEP_STARTED; then
         [ -f "$STATE_DIR/admin-stack/docker-compose.yml" ] || die "admin compose file copy missing from $STATE_DIR"
         [ -n "$(image_id "azerothcore-admin:preupgrade-$ts")" ] || die "rollback image azerothcore-admin:preupgrade-$ts is missing"
     fi
 }
 
+# save_rollback_diff LABEL DIR — keep whatever a discard would lose (e.g. edits
+# made after the cutover) in $STATE_DIR/patches-rollback/; never overwrites.
+save_rollback_diff() {
+    local label="$1" dir="$2" diff out
+    diff="$(git -C "$dir" diff)"
+    [ -n "$diff" ] || return 0
+    out="$STATE_DIR/patches-rollback/${label}.diff"
+    [ -e "$out" ] && out="$STATE_DIR/patches-rollback/${label}.$(date -u +%Y%m%dT%H%M%SZ).diff"
+    if [ "$DRY_RUN" = true ]; then
+        log "  would save the $label working-tree diff to $out"
+        return 0
+    fi
+    mkdir -p "$STATE_DIR/patches-rollback"
+    printf '%s\n' "$diff" > "$out"
+    log "  saved the $label working-tree diff to $out before discarding it"
+}
+
 cmd_rollback() {
-    local ts label rel url branch rev old svc vol archive tag rollback_vol verifier scale admin_was_up
+    local ts label rel url branch rev old svc vol archive tag rollback_vol verifier scale admin_was_up name f
     resolve_state_dir
     refuse_rolled_back
     load_versions
@@ -1057,17 +1179,18 @@ cmd_rollback() {
         archive="$STATE_DIR/$(basename "$archive")"
         [ -f "$archive" ] || die "pre-upgrade archive $archive is missing"
         (cd "$STATE_DIR" && sha256sum -c --quiet "$(basename "$archive").sha256") || die "pre-upgrade archive checksum mismatch"
-    elif started BOOT_STARTED; then
+    elif rollback_needs_db_restore; then
         die "databases may have been migrated but no pre-upgrade archive was recorded in $STATE_DIR; restore a backup by hand"
     fi
     rollback_preconditions "$ts"
     echo "Rolling back to the pre-upgrade state captured in $STATE_DIR."
-    if started BOOT_STARTED; then
+    if rollback_needs_db_restore; then
         echo "The databases are restored from $(basename "$archive"): everything players did after the cutover's backup is lost."
     else
-        echo "The new version never booted: the databases were not touched and are kept."
+        echo "The live code was never switched: the databases were not touched and are kept."
     fi
     confirm ROLLBACK
+    trap rollback_exit_hint EXIT
 
     log "Stopping the admin app and the realm"
     admin_was_up=false
@@ -1083,7 +1206,10 @@ cmd_rollback() {
         old="$(state_get "OLD_REV_${label//-/_}")"
         # Tracked module changes are discarded only once snapshot_state saved
         # them (patches-live/); before that the code was never switched.
-        if [ "$label" != core ] && step_done snapshot_state; then run git -C "$STACK_DIR/$rel" checkout -q -- .; fi
+        if [ "$label" != core ] && step_done snapshot_state; then
+            save_rollback_diff "$label" "$STACK_DIR/$rel"
+            run git -C "$STACK_DIR/$rel" checkout -q -- .
+        fi
         run git -C "$STACK_DIR/$rel" -c advice.detachedHead=false checkout -q -B "$branch" "$old"
         if [ -s "$STATE_DIR/patches-live/${label}.diff" ]; then
             run git -C "$STACK_DIR/$rel" apply "$STATE_DIR/patches-live/${label}.diff"
@@ -1109,10 +1235,10 @@ cmd_rollback() {
 
     vol="$(client_data_volume)"
     rollback_vol="$(state_get CLIENT_DATA_ROLLBACK_VOLUME)"
-    if started CLIENT_DATA_SWITCH_STARTED && [ -n "$rollback_vol" ]; then
+    if rollback_restores_client_data; then
         log "Restoring client data $(state_get CLIENT_DATA_LIVE) from $rollback_vol"
         run docker run --rm --network none --user 0 -v "$rollback_vol:/src:ro" -v "$vol:/dst" \
-            --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" -c 'find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
+            --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" -c 'test -f /src/data-version && find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
     else
         log "Client data untouched"
     fi
@@ -1129,14 +1255,19 @@ cmd_rollback() {
         log "Images untouched (cutover stopped before snapshot_state)"
     fi
 
-    if started BOOT_STARTED; then
+    if rollback_needs_db_restore; then
         log "Restoring the databases from $(basename "$archive")"
-        run "$SCRIPT_DIR/restore-azerothcore.sh" "$archive" --stack-dir "$STACK_DIR" --yes
+        RESTORE_READY_TIMEOUT_SECONDS="$WORLD_INIT_TIMEOUT" \
+            run "$SCRIPT_DIR/restore-azerothcore.sh" "$archive" --stack-dir "$STACK_DIR" --yes
     else
-        log "Databases untouched (the new version never booted)"
+        log "Databases untouched (the live code was never switched)"
     fi
     mapfile -t scale < <(compose_scale_args)
     run compose up -d --no-build ${scale[@]+"${scale[@]}"}
+    # The old verifier needs a fully booted realm (restore waited only when it ran).
+    if [ "$DRY_RUN" != true ] && ! wait_world_initialized ac-worldserver "$WORLD_INIT_TIMEOUT"; then
+        die "ac-worldserver did not reach World Initialized after the rollback (see docker logs ac-worldserver)"
+    fi
 
     if started ADMIN_STEP_STARTED; then
         log "Restoring the previous admin app image"
@@ -1165,7 +1296,7 @@ cmd_rollback() {
         echo "WARNING: no tooling snapshot in $STATE_DIR (the cutover stopped before snapshot_tooling);" \
             "verify by hand with verify-azerothcore.sh from $(state_get PREVIOUS_REPO_REV)." >&2
     fi
-    state_set ROLLED_BACK 1
+    state_mark ROLLED_BACK
     log "Rollback complete. The repository checkout still holds the new tooling: check out ${PREVIOUS_REPO_REV:-$(state_get PREVIOUS_REPO_REV)} before using the installer or redeploy scripts."
 }
 
@@ -1193,7 +1324,7 @@ cmd_finalize() {
         run git -C "$STACK_DIR/$rel" tag -d "preupgrade-$ts" || true
     done < <(upstream_repo_specs)
     run rm -rf -- "$(staging_src)"
-    state_set FINALIZED 1
+    state_mark FINALIZED
     log "Finalized. Move or delete $STATE_DIR (it holds the pre-upgrade archive) when you no longer need it."
 }
 
