@@ -53,6 +53,8 @@ BUILD_SERVICES=(ac-worldserver ac-authserver ac-db-import ac-client-data-init)
 MODULE_CONFS=("mod-playerbots:playerbots" "mod-individual-progression:individualProgression" "mod-ah-bot-plus:mod_ahbot")
 ETC_CONFS=(worldserver authserver dbimport)
 REHEARSAL_NET="acup-rehearsal-net"
+# The admin stack is optional: recorded at cutover start (image + compose file).
+ADMIN_PRESENT=true
 CLIENT_DATA_FACTS=(CLIENT_DATA_LIVE CLIENT_DATA_TARGET CLIENT_DATA_ROLLBACK_VOLUME CLIENT_DATA_TARGET_VOLUME)
 
 # shellcheck disable=SC1091
@@ -204,6 +206,63 @@ volume_data_version() {
         -c 'cat /d/data-version 2>/dev/null' | sed -n 's/^INSTALLED_VERSION=//p'
 }
 
+# volume_copy_facts VOLUME IMAGE — read-only facts about a client-data volume:
+# its data-version lines, the rollback-copy completion marker (MARKER_FILES,
+# MARKER_BYTES) and its own tree (TREE_FILES = entries, TREE_BYTES = bytes in
+# regular files), both without the marker. Regular-file bytes, not `du -sb`:
+# directory sizes legitimately differ between a tree and its `cp -a` copy.
+volume_copy_facts() {
+    docker run --rm --network none --user 0 -v "$1:/d:ro" --entrypoint sh "$2" -c '
+        cat /d/data-version 2>/dev/null; echo
+        if [ -f /d/.acup-complete ]; then sed "s/^/MARKER_/" /d/.acup-complete; fi
+        echo "TREE_FILES=$(find /d -mindepth 1 ! -path /d/.acup-complete | wc -l)"
+        echo "TREE_BYTES=$(find /d -type f ! -path /d/.acup-complete -printf "%s\n" | awk "{s+=\$1} END {print s+0}")"'
+}
+
+# COPY_WITH_MARKER_CMD — container command for `-v SRC:/src:ro -v DST:/dst`:
+# empty DST, copy SRC, then record SRC's entry count and byte total (marker
+# excluded) in DST/.acup-complete. Only a copy that finished carries the marker.
+# The expressions expand in the container's shell, not here.
+# shellcheck disable=SC2016
+{
+    COPY_WITH_MARKER_CMD='find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
+    COPY_WITH_MARKER_CMD+=' && files=$(find /src -mindepth 1 ! -path /src/.acup-complete | wc -l)'
+    COPY_WITH_MARKER_CMD+=' && bytes=$(find /src -type f ! -path /src/.acup-complete -printf "%s\n" | awk "{s+=\$1} END {print s+0}")'
+    COPY_WITH_MARKER_CMD+=' && printf "FILES=%s\nBYTES=%s\n" "$files" "$bytes" > /dst/.acup-complete'
+}
+
+# rollback_copy_problem VOLUME VERSION IMAGE [LIVE_VOLUME] — print why VOLUME
+# is not a complete rollback copy of the client data VERSION (and return 1):
+# it must exist, hold VERSION, carry the completion marker and match the
+# marker's numbers — and LIVE_VOLUME's, when given (before the live data is
+# switched; afterwards only the marker can vouch for the copy). All read-only.
+rollback_copy_problem() {
+    local vol="$1" want="$2" image="$3" live="${4:-}" facts found mf mb tf tb lf lb
+    if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+        echo "volume $vol is missing"; return 1
+    fi
+    facts="$(volume_copy_facts "$vol" "$image")" || { echo "cannot read volume $vol"; return 1; }
+    found="$(sed -n 's/^INSTALLED_VERSION=//p' <<< "$facts" | head -n 1)"
+    mf="$(sed -n 's/^MARKER_FILES=//p' <<< "$facts")"; mb="$(sed -n 's/^MARKER_BYTES=//p' <<< "$facts")"
+    tf="$(sed -n 's/^TREE_FILES=//p' <<< "$facts")"; tb="$(sed -n 's/^TREE_BYTES=//p' <<< "$facts")"
+    if [ -z "$want" ] || [ "$found" != "$want" ]; then
+        echo "$vol holds '${found:-no data-version}', not the recorded pre-upgrade version '${want:-unknown}'"; return 1
+    fi
+    if [ -z "$mf" ] || [ -z "$mb" ]; then
+        echo "$vol has no completion marker (.acup-complete): its copy never finished"; return 1
+    fi
+    if [ "$tf $tb" != "$mf $mb" ]; then
+        echo "$vol holds ${tf:-?} entries / ${tb:-?} bytes but its completion marker says $mf / $mb"; return 1
+    fi
+    if [ -n "$live" ]; then
+        facts="$(volume_copy_facts "$live" "$image")" || { echo "cannot read volume $live"; return 1; }
+        lf="$(sed -n 's/^TREE_FILES=//p' <<< "$facts")"; lb="$(sed -n 's/^TREE_BYTES=//p' <<< "$facts")"
+        if [ "$tf $tb" != "$lf $lb" ]; then
+            echo "$vol holds $tf entries / $tb bytes but the live client data $live holds ${lf:-?} / ${lb:-?}"; return 1
+        fi
+    fi
+}
+
 image_id() { docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true; }
 
 state_set() {
@@ -279,12 +338,53 @@ refuse_rolled_back() {
 
 # stop_realm_and_die MESSAGE — a failed boot or verification leaves the realm
 # stopped (never half-up on an unverified version), then dies with both ways on.
+# A stop that did not take is reported, never claimed.
 stop_realm_and_die() {
+    local name still=""
+    trap - ERR
     # The booted realm may be mid-saveall with bots online: give it the full
     # stop timeout (Docker's 10 s default would SIGKILL it), then the authserver.
     compose stop -t "$STOP_TIMEOUT" ac-worldserver || true
     compose stop ac-authserver || true
+    for name in ac-worldserver ac-authserver; do
+        case "$(container_status "$name")" in
+            exited|created|missing) ;;
+            *) still="${still:+$still, }$name" ;;
+        esac
+    done
+    if [ -n "$still" ]; then
+        die "$1 STILL RUNNING: ${still} (the stop failed; stop it by hand: cd $STACK_DIR && docker compose stop -t $STOP_TIMEOUT ac-worldserver ac-authserver). Then fix and re-run: $0 cutover --state $STATE_DIR — or roll back: $0 rollback --state $STATE_DIR"
+    fi
     die "$1 Server is stopped. Fix and re-run: $0 cutover --state $STATE_DIR — or roll back: $0 rollback --state $STATE_DIR"
+}
+
+# boot_failure_trap STEP — ERR trap (with errtrace) for the boot and verify
+# steps: any unexpected failure there (a count query, a step marker) stops the
+# realm like a failed check does. Inside a subshell or command substitution it
+# only ends that subshell; the failing command in the main shell trips it again.
+boot_failure_trap() {
+    local rc=$?
+    [ "$BASH_SUBSHELL" -eq 0 ] || exit "$rc"
+    stop_realm_and_die "unexpected failure (exit $rc) during the $1 step."
+}
+
+# utc_minute_of_day — minutes since 00:00 UTC. UPGRADE_NOW_UTC_MIN is a test
+# seam only; it never needs to be set for real runs.
+utc_minute_of_day() {
+    if [ -n "${UPGRADE_NOW_UTC_MIN:-}" ]; then
+        [[ "$UPGRADE_NOW_UTC_MIN" =~ ^[0-9]+$ ]] || die "UPGRADE_NOW_UTC_MIN must be a number of minutes"
+        echo "$UPGRADE_NOW_UTC_MIN"
+    else
+        echo $(( 10#$(date -u +%H) * 60 + 10#$(date -u +%M) ))
+    fi
+}
+
+# in_nightly_backup_window — 02:30-03:45 UTC: the 03:00 cron backup would race
+# a cold backup, db-import DDL or a stopped database.
+in_nightly_backup_window() {
+    local now
+    now="$(utc_minute_of_day)" || exit 1
+    [ "$now" -ge 150 ] && [ "$now" -lt 225 ]
 }
 
 # rollback_exit_hint — rollback is idempotent until it records ROLLED_BACK.
@@ -380,7 +480,7 @@ live_switch_collisions() {
 check_live_switch_collisions() {
     local label rel url branch rev dir hits n fails=0
     echo "== Live checkout switch check"
-    while IFS='|' read -r label rel url branch rev; do
+    while IFS='|' read -r label rel url branch rev <&3; do
         dir="$STACK_DIR/$rel"
         if ! git -C "$dir" cat-file -e "${rev}^{commit}" 2>/dev/null; then
             if [ "$DRY_RUN" = true ]; then
@@ -403,7 +503,7 @@ check_live_switch_collisions() {
             if [ "$n" -gt 20 ]; then echo "           ... and $((n - 20)) more"; fi
             fails=$((fails + 1))
         fi
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
     if [ "$fails" -gt 0 ]; then
         echo "  Move or remove the files listed above (or commit them upstream), then re-run."
         return 1
@@ -412,7 +512,7 @@ check_live_switch_collisions() {
 
 # -------------------------------------------------------------- preflight ---
 preflight_checks() {
-    local mode="$1" label rel url branch rev dir free_gb name now_min humans
+    local mode="$1" label rel url branch rev dir free_gb name humans
     CHECK_FAILS=0
     echo "== Preflight (${mode})"
     for tool in docker git python3 flock sha256sum cmp comm; do
@@ -482,7 +582,7 @@ preflight_checks() {
                 cmp -s "$STACK_DIR/configs/modules/$name.conf" "$STACK_DIR/configs/modules/$name.conf.dist"
         fi
     done
-    while IFS='|' read -r label rel url branch rev; do
+    while IFS='|' read -r label rel url branch rev <&3; do
         dir="$STACK_DIR/$rel"
         if [ "$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$branch" ]; then
             check_fail "$label: $dir is not on branch $branch"
@@ -495,7 +595,7 @@ preflight_checks() {
         else
             check_ok "$label: $dir clean at $(git -C "$dir" rev-parse --short=12 HEAD)"
         fi
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
     if cmp -s "$STACK_DIR/backup.sh" "$SCRIPT_DIR/backup.sh"; then
         check_ok "deployed backup.sh matches the repository"
     else
@@ -507,8 +607,7 @@ preflight_checks() {
         check_fail "nightly backup cron entry missing"
     fi
     if [ "$mode" = cutover ]; then
-        now_min=$(( 10#$(date -u +%H) * 60 + 10#$(date -u +%M) ))
-        if [ "$now_min" -ge 150 ] && [ "$now_min" -lt 225 ]; then
+        if in_nightly_backup_window; then
             check_fail "02:30-03:45 UTC overlaps the 03:00 nightly backup; pick another time"
         else
             check_ok "outside the nightly backup window"
@@ -529,14 +628,14 @@ stage_get() {
 }
 
 cmd_stage() {
-    local src label rel url branch rev uid gid svc vol live_ver rollback_vol target_vol
+    local src label rel url branch rev uid gid svc vol live_ver rollback_vol target_vol live_image problem
     load_versions
     src="$(staging_src)"
     ensure_root
     run mkdir -p "$UPGRADE_ROOT/staging"
 
     log "Staging checkout at pinned revisions: $src"
-    while IFS='|' read -r label rel url branch rev; do
+    while IFS='|' read -r label rel url branch rev <&3; do
         if [ "$DRY_RUN" = true ]; then
             run checkout_pinned_rev "$src/$rel" "$url" "$branch" "$rev"
         else
@@ -548,7 +647,7 @@ cmd_stage() {
         if ! git -C "$STACK_DIR/$rel" cat-file -e "${rev}^{commit}" 2>/dev/null; then
             run git -C "$STACK_DIR/$rel" fetch -q --depth 1 origin "$rev"
         fi
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
     check_live_switch_collisions || die "local files collide with the pinned revisions; nothing was built"
     run "$SCRIPT_DIR/apply-local-patches.sh" "$src"
 
@@ -571,7 +670,9 @@ cmd_stage() {
     fi
 
     vol="$(client_data_volume)"
-    live_ver="$(volume_data_version "$vol" "acore/ac-wotlk-client-data:$(env_value DOCKER_IMAGE_TAG)")"
+    live_image="acore/ac-wotlk-client-data:$(env_value DOCKER_IMAGE_TAG)"
+    # A failed read must reach the explanation below, not end the run silently.
+    live_ver="$(volume_data_version "$vol" "$live_image")" || true
     rollback_vol="acup-client-data-rollback-${live_ver:-unknown}"
     target_vol="acup-client-data-${CLIENT_DATA_VERSION}"
     if [ "$live_ver" != "$CLIENT_DATA_VERSION" ]; then
@@ -580,11 +681,21 @@ cmd_stage() {
             die "cannot read the live client data version; refusing to stage a client-data switch"
         fi
         log "Client data changes ${live_ver} -> ${CLIENT_DATA_VERSION}."
-        if ! docker volume inspect "$rollback_vol" >/dev/null 2>&1; then
-            log "  copying live client data to rollback volume $rollback_vol (read-only source)"
-            run docker volume create "$rollback_vol" >/dev/null
+        # Only a copy that finished carries the completion marker: an existing
+        # volume without a valid one (an interrupted stage) is emptied and copied again.
+        if problem="$(rollback_copy_problem "$rollback_vol" "$live_ver" "$live_image" "$vol")"; then
+            log "  rollback volume $rollback_vol already holds a complete copy of the live client data"
+        else
+            log "  copying live client data to rollback volume $rollback_vol (read-only source; ${problem})"
+            if ! docker volume inspect "$rollback_vol" >/dev/null 2>&1; then
+                run docker volume create "$rollback_vol" >/dev/null
+            fi
             run docker run --rm --network none --user 0 -v "$vol:/src:ro" -v "$rollback_vol:/dst" \
-                --entrypoint sh "acore/ac-wotlk-client-data:$(env_value DOCKER_IMAGE_TAG)" -c 'cp -a /src/. /dst/'
+                --entrypoint sh "$live_image" -c "$COPY_WITH_MARKER_CMD"
+            if [ "$DRY_RUN" != true ]; then
+                problem="$(rollback_copy_problem "$rollback_vol" "$live_ver" "$live_image" "$vol")" \
+                    || die "the rollback copy of the client data is not complete: ${problem}"
+            fi
         fi
         if [ "$DRY_RUN" = true ] || [ "$(volume_data_version "$target_vol" "acore/ac-wotlk-client-data:${CANDIDATE_TAG}" || true)" != "$CLIENT_DATA_VERSION" ]; then
             log "  downloading ${CLIENT_DATA_VERSION} into $target_vol (about 1.2 GB)"
@@ -660,24 +771,45 @@ rehearsal_env() {
         --validate-against "$src/modules/mod-playerbots/conf/playerbots.conf.dist" \
         --validate-against "$src/modules/mod-individual-progression/conf/individualProgression.conf.dist" \
         --validate-against "$src/modules/mod-ah-bot-plus/conf/mod_ahbot.conf.dist" >/dev/null
-    (cd "$src" && docker compose --env-file "$STACK_DIR/.env" -f docker-compose.yml \
-        -f "$REH_WORK/override.yml" -f "$REH_WORK/admin.yml" config --format json) > "$REH_WORK/compose.json"
-    python3 -I - "$REH_WORK/compose.json" "$src/conf/dist/env.ac" "$password" "$REHEARSAL_BOTS" > "$out" <<'PY'
+    # The render holds the live database password: owner-only, and the reader
+    # below deletes it.
+    (umask 077 && cd "$src" && docker compose --env-file "$STACK_DIR/.env" -f docker-compose.yml \
+        -f "$REH_WORK/override.yml" -f "$REH_WORK/admin.yml" config --format json > "$REH_WORK/compose.json")
+    python3 -I - "$REH_WORK/compose.json" "$src/conf/dist/env.ac" "$password" "$REHEARSAL_BOTS" \
+        "$REH_WORK/override.yml" "$REH_WORK/admin.yml" "$REH_WORK/overlay-keys.txt" > "$out" <<'PY'
 import json
+import os
+import re
 import sys
 
-compose, env_ac, password, bots = sys.argv[1:5]
+compose, env_ac, password, bots, override, admin, overlay_keys = sys.argv[1:8]
+with open(compose, encoding="utf-8") as handle:
+    rendered = json.load(handle)
+os.unlink(compose)  # it holds the live database password
 env = {}
 for line in open(env_ac, encoding="utf-8"):
     line = line.strip()
     if line and not line.startswith("#") and "=" in line:
         key, value = line.split("=", 1)
         env[key] = value
-service = json.load(open(compose, encoding="utf-8"))["services"]["ac-worldserver"]
+service = rendered["services"]["ac-worldserver"]
 raw = service.get("environment") or {}
 if isinstance(raw, list):
     raw = dict(item.split("=", 1) for item in raw)
 env.update({k: "" if v is None else str(v) for k, v in raw.items()})
+# The overrides this server sets: AC_* names the (migrated) overlays define
+# that reach the worldserver. Compose also folds the image's env.ac
+# (AC_CCACHE, AC_RESTARTER_*: build/restarter settings, no config key) and the
+# base file's paths into the render; those are not overrides.
+named = set()
+entry = re.compile(r"^\s*(?:-\s*)?['\"]?(AC_[A-Z0-9_]+)['\"]?\s*[:=]")
+for path in (override, admin):
+    for line in open(path, encoding="utf-8"):
+        m = entry.match(line)
+        if m:
+            named.add(m.group(1))
+with open(overlay_keys, "w", encoding="utf-8") as handle:
+    handle.writelines(f"{key}\n" for key in sorted(named & set(raw)))
 for key, value in list(env.items()):
     if key.endswith("_DATABASE_INFO"):
         parts = value.split(";")
@@ -791,14 +923,14 @@ rehearsal_checks() {
     check_that "mod-playerbots DB updates applied (playerbots_speech dropped)" "mod-playerbots DB updates did not run" [ "$n" = 0 ]
     n="$(rmysql -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='acore_world' AND table_name='creature' AND column_name='id'")"
     check_that "core world DB updates applied (creature.id present)" "creature.id missing: core world updates did not apply" [ "$n" = 1 ]
-    python3 -I - "$REH_WORK/world.env" "$REH_WORK/etc/worldserver.conf" "$REH_WORK/modules-conf" \
+    python3 -I - "$REH_WORK/overlay-keys.txt" "$REH_WORK/etc/worldserver.conf" "$REH_WORK/modules-conf" \
         "$REPO_DIR/wow-server-sp-admin/app/services/env_var.py" > "$REH_WORK/unmapped.txt" <<'PY'
 import importlib.util
 import re
 import sys
 from pathlib import Path
 
-env_file, world_conf, module_dir, env_var_py = sys.argv[1:5]
+keys_file, world_conf, module_dir, env_var_py = sys.argv[1:5]
 spec = importlib.util.spec_from_file_location("env_var", env_var_py)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -810,10 +942,10 @@ for conf in [Path(world_conf), *sorted(Path(module_dir).glob("*.conf"))]:
         if m:
             known.add(module.config_key_to_ac_env_var(m.group(1)))
 ignored = {"AC_DATA_DIR", "AC_LOGS_DIR", "AC_TEMP_DIR"}
+keys = [line.strip() for line in open(keys_file, encoding="utf-8") if line.startswith("AC_")]
 unmapped = sorted(
-    line.split("=", 1)[0] for line in open(env_file, encoding="utf-8")
-    if line.startswith("AC_") and line.split("=", 1)[0] not in known
-    and line.split("=", 1)[0] not in ignored and not line.split("=", 1)[0].endswith("_DATABASE_INFO")
+    key for key in keys
+    if key not in known and key not in ignored and not key.endswith("_DATABASE_INFO")
 )
 for name in unmapped:
     print(f"  unmapped: {name}")
@@ -845,8 +977,35 @@ refresh_module_confs() {
 }
 
 # ---------------------------------------------------------------- cutover ---
+# refuse_realm_started_since_stop — azerothcore.service starts the stack at
+# boot: a realm (or db-import) up between the stop step and BOOT_STARTED, or
+# started since the stop step and stopped again, means a host reboot or a hand
+# start ran the half-switched stack. The databases may have changed; never
+# stop it and go on. Anything but exited/created/missing counts as up (a
+# crash-looping container reports "restarting").
+refuse_realm_started_since_stop() {
+    local name status started_at started_epoch stopped_at
+    stopped_at="$(state_get STOPPED_AT)"
+    for name in ac-worldserver ac-authserver ac-db-import; do
+        status="$(container_status "$name")"
+        case "$status" in
+            exited|created|missing) ;;
+            *) die "the realm was restarted after the cutover stopped it ($name is $status; host reboot?); the databases may have been modified. Roll back: $0 rollback --state $STATE_DIR" ;;
+        esac
+        # Cutovers recorded before STOPPED_AT existed fall back to the status check.
+        if [ -z "$stopped_at" ] || [ "$status" = missing ]; then continue; fi
+        started_at="$(docker inspect -f '{{.State.StartedAt}}' "$name" 2>/dev/null || true)"
+        started_epoch="$(date -u -d "$started_at" +%s 2>/dev/null)" \
+            || die "cannot read when $name last started ('$started_at'); refusing to resume"
+        if [ "$started_epoch" -gt "$stopped_at" ]; then
+            die "the realm was restarted after the cutover stopped it ($name started at $started_at; host reboot?); the databases may have been modified. Roll back: $0 rollback --state $STATE_DIR"
+        fi
+    done
+}
+
 cmd_cutover() {
-    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state pin name recorded status
+    local ts src label rel url branch rev svc vol scale archive key target_vol previous_state pin name recorded
+    local problem code oom live_cmp
     load_versions
     if [ -n "$STATE_DIR" ]; then
         resolve_state_dir
@@ -855,11 +1014,11 @@ cmd_cutover() {
         if [ "$(state_get CANDIDATE_TAG)" != "$CANDIDATE_TAG" ]; then
             die "pinned versions changed since this cutover started ($(state_get CANDIDATE_TAG) -> ${CANDIDATE_TAG}); resume with the tooling revision it started with"
         fi
-        while IFS='|' read -r label rel url branch rev; do
+        while IFS='|' read -r label rel url branch rev <&3; do
             if [ "$(state_get "PIN_REV_${label//-/_}")" != "$rev" ]; then
                 die "pinned versions changed since this cutover started ($label: $(state_get "PIN_REV_${label//-/_}") -> $rev); resume with the tooling revision it started with"
             fi
-        done < <(upstream_repo_specs)
+        done 3< <(upstream_repo_specs)
         # The cutover's --pin values are part of its state: replay them, and
         # refuse a resume that names different ones.
         mapfile -t recorded < <(recorded_pins)
@@ -868,21 +1027,22 @@ cmd_cutover() {
         fi
         PIN_ARGS=()
         for pin in ${recorded[@]+"${recorded[@]}"}; do PIN_ARGS+=(--pin "$pin"); done
-        # azerothcore.service starts the stack at boot: a realm up between the
-        # stop step and BOOT_STARTED means a host reboot (or a hand start) ran the
-        # half-switched stack. The databases may have changed; never stop it and
-        # go on. After BOOT_STARTED it is the cutover's own target stack (e.g. an
-        # interrupted boot wait), and the re-run boot step re-checks db-import and
-        # World Initialized. Anything but exited/created/missing counts as up
-        # (a crash-looping container reports "restarting").
+        # After BOOT_STARTED a running realm is the cutover's own target stack
+        # (e.g. an interrupted boot wait); the re-run boot step re-checks
+        # db-import and World Initialized.
         if step_done stop && ! started BOOT_STARTED; then
-            for name in ac-worldserver ac-authserver; do
-                status="$(container_status "$name")"
-                case "$status" in
-                    exited|created|missing) ;;
-                    *) die "the realm was restarted after the cutover stopped it ($name is $status; host reboot?); the databases may have been modified. Roll back: $0 rollback --state $STATE_DIR" ;;
-                esac
-            done
+            refuse_realm_started_since_stop
+        fi
+        if in_nightly_backup_window; then
+            die "02:30-03:45 UTC overlaps the 03:00 nightly backup; resume outside that window (nothing was changed)"
+        fi
+        ADMIN_PRESENT="$(state_get ADMIN_PRESENT)"
+        ADMIN_PRESENT="${ADMIN_PRESENT:-true}"
+        # A host reboot also starts the admin app (scheduled restarts, console
+        # writes, presence polling): keep it stopped until the admin step.
+        if step_done stop && ! started ADMIN_STEP_STARTED && [ "$(container_status azerothcore-admin)" = running ]; then
+            log "The admin app is running again (host reboot?); stopping it until the cutover's admin step"
+            run docker stop azerothcore-admin
         fi
         log "Resuming cutover in $STATE_DIR"
     else
@@ -906,6 +1066,17 @@ cmd_cutover() {
         # Again here, not only in stage: a file created after staging must be
         # caught before the downtime starts.
         check_live_switch_collisions || die "local files collide with the pinned revisions; nothing was changed"
+        # The client-data switch deletes the only live copy of the old data:
+        # its rollback copy must be complete before any downtime is spent.
+        if [ -n "$(stage_get CLIENT_DATA_TARGET_VOLUME)" ]; then
+            problem="$(rollback_copy_problem "$(stage_get CLIENT_DATA_ROLLBACK_VOLUME)" "$(stage_get CLIENT_DATA_LIVE)" \
+                "acore/ac-wotlk-client-data:$(env_value DOCKER_IMAGE_TAG)" "$(client_data_volume)")" \
+                || die "client-data rollback copy: ${problem}; re-run 'stage' (it copies an incomplete volume again). Nothing was changed."
+        fi
+        ADMIN_PRESENT=false
+        if [ -n "$(image_id azerothcore-admin:local)" ] && [ -f "$ADMIN_STACK_DIR/docker-compose.yml" ]; then
+            ADMIN_PRESENT=true
+        fi
         echo ""
         echo "This stops the realm, takes a cold backup, switches code/images/configs to"
         echo "core ${AC_CORE_REV:0:12} and boots it. Players are disconnected for the duration."
@@ -919,10 +1090,11 @@ cmd_cutover() {
         state_set TS "$ts"
         state_set CANDIDATE_TAG "$CANDIDATE_TAG"
         state_set PREVIOUS_REPO_REV "$PREVIOUS_REPO_REV"
-        while IFS='|' read -r label rel url branch rev; do
+        state_set ADMIN_PRESENT "$ADMIN_PRESENT"
+        while IFS='|' read -r label rel url branch rev <&3; do
             state_set "OLD_REV_${label//-/_}" "$(git -C "$STACK_DIR/$rel" rev-parse HEAD)"
             state_set "PIN_REV_${label//-/_}" "$rev"
-        done < <(upstream_repo_specs)
+        done 3< <(upstream_repo_specs)
         for svc in "${IMAGES[@]}"; do
             state_set "CANDIDATE_ID_${svc//-/_}" "$(stage_get "CANDIDATE_ID_${svc//-/_}")"
         done
@@ -953,8 +1125,12 @@ cmd_cutover() {
             state_set ADMIN_WAS_RUNNING "$([ "$(container_status azerothcore-admin)" = running ] && echo true || echo false)"
             state_set ADMIN_IMAGE_ID "$(image_id azerothcore-admin:local)"
         fi
-        run docker tag azerothcore-admin:local "azerothcore-admin:preupgrade-$ts"
-        run cp -p "$ADMIN_STACK_DIR/docker-compose.yml" "$STATE_DIR/admin-stack/docker-compose.yml"
+        if [ "$ADMIN_PRESENT" = true ]; then
+            run docker tag azerothcore-admin:local "azerothcore-admin:preupgrade-$ts"
+            run cp -p "$ADMIN_STACK_DIR/docker-compose.yml" "$STATE_DIR/admin-stack/docker-compose.yml"
+        else
+            log "The admin app is not installed (no azerothcore-admin:local image or $ADMIN_STACK_DIR/docker-compose.yml): no admin rollback copy"
+        fi
         log "Stopping the admin app (no scheduled jobs or console writes during cutover)"
         if [ "$(container_status azerothcore-admin)" = running ]; then run docker stop azerothcore-admin; fi
         log "Graceful worldserver stop (up to ${STOP_TIMEOUT}s for saveall), then authserver"
@@ -962,7 +1138,17 @@ cmd_cutover() {
         run compose stop ac-authserver
         if [ "$DRY_RUN" != true ]; then
             [ "$(container_status ac-worldserver)" = exited ] || die "ac-worldserver did not stop cleanly"
+            # A SIGKILL after the stop timeout (or an OOM kill) cut the final
+            # saveall short: the cold backup would miss it.
+            code="$(docker inspect -f '{{.State.ExitCode}}' ac-worldserver 2>/dev/null || echo unknown)"
+            oom="$(docker inspect -f '{{.State.OOMKilled}}' ac-worldserver 2>/dev/null || echo unknown)"
+            if [ "$code" != 0 ] || [ "$oom" != false ]; then
+                die "ac-worldserver did not exit cleanly (code ${code}$([ "$oom" = false ] || echo ", OOMKilled=${oom}")); its last saveall may be incomplete. Start the realm again and resume (the stop step is repeated), or roll back: $0 rollback --state $STATE_DIR"
+            fi
         fi
+        # Resume evidence: a realm container started after this moment ran the
+        # half-switched stack (see refuse_realm_started_since_stop).
+        state_set STOPPED_AT "$(date -u +%s)"
         mark_done stop
     fi
 
@@ -999,12 +1185,12 @@ cmd_cutover() {
             state_set "OLD_ID_${svc//-/_}" "$(image_id "acore/ac-wotlk-${svc}:$(env_value DOCKER_IMAGE_TAG)")"
             run docker tag "acore/ac-wotlk-${svc}:$(env_value DOCKER_IMAGE_TAG)" "acore/ac-wotlk-${svc}:preupgrade-$ts"
         done
-        while IFS='|' read -r label rel url branch rev; do
+        while IFS='|' read -r label rel url branch rev <&3; do
             run git -C "$STACK_DIR/$rel" tag -f "preupgrade-$ts" HEAD
             if [ "$DRY_RUN" != true ]; then
                 git -C "$STACK_DIR/$rel" diff > "$STATE_DIR/patches-live/${label}.diff"
             fi
-        done < <(upstream_repo_specs)
+        done 3< <(upstream_repo_specs)
         mark_done snapshot_state
     fi
 
@@ -1013,14 +1199,14 @@ cmd_cutover() {
         # From here on the host-mounted ./modules may hold new SQL that a
         # (re)started worldserver applies: rollback must restore the databases.
         mark_started SWITCH_CODE_STARTED
-        while IFS='|' read -r label rel url branch rev; do
+        while IFS='|' read -r label rel url branch rev <&3; do
             if [ "$label" != core ]; then run git -C "$STACK_DIR/$rel" checkout -q -- .; fi
             if [ "$DRY_RUN" = true ]; then
                 run checkout_pinned_rev "$STACK_DIR/$rel" "$url" "$branch" "$rev"
             else
                 checkout_pinned_rev "$STACK_DIR/$rel" "$url" "$branch" "$rev"
             fi
-        done < <(upstream_repo_specs)
+        done 3< <(upstream_repo_specs)
         run "$SCRIPT_DIR/apply-local-patches.sh" "$STACK_DIR"
         mark_done switch_code
     fi
@@ -1044,6 +1230,14 @@ cmd_cutover() {
         vol="$(client_data_volume)"
         target_vol="$(cutover_fact CLIENT_DATA_TARGET_VOLUME)"
         if [ -n "$target_vol" ]; then
+            # The delete below is undone only from the rollback copy: verify it
+            # again right before. Once a switch began the live volume is partly
+            # the new data, so only the copy's own marker can vouch for it.
+            live_cmp="$vol"
+            if started CLIENT_DATA_SWITCH_STARTED; then live_cmp=""; fi
+            problem="$(rollback_copy_problem "$(cutover_fact CLIENT_DATA_ROLLBACK_VOLUME)" "$(cutover_fact CLIENT_DATA_LIVE)" \
+                "acore/ac-wotlk-client-data:${CANDIDATE_TAG}" ${live_cmp:+"$live_cmp"})" \
+                || die "client-data rollback copy: ${problem}; the live client data was not touched"
             log "Installing client data $(cutover_fact CLIENT_DATA_TARGET) into $vol"
             mark_started CLIENT_DATA_SWITCH_STARTED
             run docker run --rm --network none --user 0 -v "$target_vol:/src:ro" -v "$vol:/dst" \
@@ -1068,6 +1262,11 @@ cmd_cutover() {
         mark_done switch_images
     fi
 
+    # From the boot to the end of verification, an unexpected failure (a count
+    # query, a step marker) must stop the realm like a failed check does: never
+    # half-up on an unverified version.
+    set -E
+    trap 'boot_failure_trap boot' ERR
     if ! step_done boot; then
         log "Validating the merged Compose configuration"
         run compose config -q
@@ -1093,6 +1292,7 @@ cmd_cutover() {
         mark_done boot
     fi
 
+    trap 'boot_failure_trap verify' ERR
     if ! step_done verify; then
         # A resumed verify finds the realm stopped by the failed attempt: start it
         # (a no-op when it is running) and wait for this boot before verifying.
@@ -1118,12 +1318,18 @@ cmd_cutover() {
         fi
         mark_done verify
     fi
+    trap - ERR
+    set +E
 
     if ! step_done admin; then
-        log "Redeploying the admin app against the upgraded server"
-        mark_started ADMIN_STEP_STARTED
-        run docker start azerothcore-admin
-        run "$REPO_DIR/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh"
+        if [ "$ADMIN_PRESENT" = true ]; then
+            log "Redeploying the admin app against the upgraded server"
+            mark_started ADMIN_STEP_STARTED
+            run docker start azerothcore-admin
+            run "$REPO_DIR/wow-server-sp-admin/scripts/redeploy-azerothcore-admin.sh"
+        else
+            log "The admin app is not installed; nothing to redeploy"
+        fi
         mark_done admin
     fi
     state_mark CUTOVER_OK
@@ -1149,10 +1355,10 @@ rollback_restores_client_data() {
 
 # rollback_preconditions TS
 rollback_preconditions() {
-    local ts="$1" label rel url branch rev svc vol live found
-    while IFS='|' read -r label rel url branch rev; do
+    local ts="$1" label rel url branch rev svc vol problem
+    while IFS='|' read -r label rel url branch rev <&3; do
         [ -n "$(state_get "OLD_REV_${label//-/_}")" ] || die "no recorded pre-upgrade revision for $label in $STATE_DIR"
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
     if step_done snapshot_state; then
         if [ ! -f "$STATE_DIR/docker-compose.override.yml" ] || [ ! -d "$STATE_DIR/configs" ]; then
             die "configuration copies missing from $STATE_DIR"
@@ -1166,18 +1372,14 @@ rollback_preconditions() {
         die "client data was switched but no rollback volume is recorded in $STATE_DIR"
     fi
     # `docker run -v` would create a missing volume empty, and the copy would
-    # then empty the live client data.
+    # then empty the live client data. An empty or partial copy (an interrupted
+    # stage) must be caught before the realm stops, not by the copy's own guard
+    # afterwards. The live volume may hold the new data now: the copy's
+    # completion marker is the reference.
     if rollback_restores_client_data; then
         vol="$(state_get CLIENT_DATA_ROLLBACK_VOLUME)"
-        docker volume inspect "$vol" >/dev/null 2>&1 \
-            || die "client-data rollback volume $vol is missing; restore it before rolling back"
-        # An empty or partial copy (an interrupted stage) must be caught before
-        # the realm stops, not by the copy's own guard afterwards.
-        live="$(state_get CLIENT_DATA_LIVE)"
-        found="$(volume_data_version "$vol" "acore/ac-wotlk-client-data:preupgrade-$ts" || true)"
-        if [ -z "$live" ] || [ "$found" != "$live" ]; then
-            die "client-data rollback volume $vol holds '${found:-no data-version}', not the recorded pre-upgrade version '${live:-unknown}'; restore it before rolling back"
-        fi
+        problem="$(rollback_copy_problem "$vol" "$(state_get CLIENT_DATA_LIVE)" "acore/ac-wotlk-client-data:preupgrade-$ts")" \
+            || die "client-data rollback volume: ${problem}; restore it before rolling back"
     fi
     if started ADMIN_STEP_STARTED; then
         [ -f "$STATE_DIR/admin-stack/docker-compose.yml" ] || die "admin compose file copy missing from $STATE_DIR"
@@ -1241,7 +1443,7 @@ cmd_rollback() {
     run compose stop ac-authserver
 
     log "Restoring source checkouts"
-    while IFS='|' read -r label rel url branch rev; do
+    while IFS='|' read -r label rel url branch rev <&3; do
         old="$(state_get "OLD_REV_${label//-/_}")"
         # Tracked module changes are discarded only once snapshot_state saved
         # them (patches-live/); before that the code was never switched.
@@ -1253,7 +1455,7 @@ cmd_rollback() {
         if [ -s "$STATE_DIR/patches-live/${label}.diff" ]; then
             run git -C "$STACK_DIR/$rel" apply "$STATE_DIR/patches-live/${label}.diff"
         fi
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
 
     if step_done snapshot_state; then
         log "Restoring configuration files"
@@ -1278,7 +1480,7 @@ cmd_rollback() {
         log "Restoring client data $(state_get CLIENT_DATA_LIVE) from $rollback_vol"
         run docker run --rm --network none --user 0 -v "$rollback_vol:/src:ro" -v "$vol:/dst" \
             --entrypoint sh "acore/ac-wotlk-client-data:preupgrade-$ts" \
-            -c 'test -f /src/data-version || { echo "ERROR: source volume has no data-version; client data left untouched" >&2; exit 1; }; find /dst -mindepth 1 -delete && cp -a /src/. /dst/'
+            -c 'test -f /src/data-version || { echo "ERROR: source volume has no data-version; client data left untouched" >&2; exit 1; }; find /dst -mindepth 1 -delete && cp -a /src/. /dst/ && rm -f /dst/.acup-complete'
     else
         log "Client data untouched"
     fi
@@ -1321,6 +1523,8 @@ cmd_rollback() {
     elif [ "$(state_get ADMIN_WAS_RUNNING)" = true ] || [ "$admin_was_up" = true ]; then
         log "Starting the admin app again (it was only stopped)"
         run docker start azerothcore-admin
+    elif [ "$(state_get ADMIN_PRESENT)" = false ]; then
+        log "The admin app is not installed; nothing to restore"
     else
         log "Admin app left as it was"
     fi
@@ -1361,9 +1565,9 @@ cmd_finalize() {
         # Re-runnable: a volume a previous finalize already removed is skipped.
         if [ -n "$vol" ] && docker volume inspect "$vol" >/dev/null 2>&1; then run docker volume rm "$vol"; fi
     done
-    while IFS='|' read -r label rel url branch rev; do
+    while IFS='|' read -r label rel url branch rev <&3; do
         run git -C "$STACK_DIR/$rel" tag -d "preupgrade-$ts" || true
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
     run rm -rf -- "$(staging_src)"
     state_mark FINALIZED
     log "Finalized. Move or delete $STATE_DIR (it holds the pre-upgrade archive) when you no longer need it."

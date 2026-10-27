@@ -954,14 +954,14 @@ if [ -f "${VERIFY_SCRIPT_DIR}/upstream-versions.env" ] && [ -f "${VERIFY_SCRIPT_
     # shellcheck disable=SC1091
     source "${VERIFY_SCRIPT_DIR}/lib/upstream-versions.sh"
     if load_upstream_versions "${VERIFY_SCRIPT_DIR}/upstream-versions.env"; then
-        while IFS='|' read -r label rel _url _branch rev; do
+        while IFS='|' read -r label rel _url _branch rev <&3; do
             head_rev="$(git -C "${STACK_DIR}/${rel}" -c safe.directory='*' rev-parse HEAD 2>/dev/null || echo unknown)"
             if [ "$head_rev" = "$rev" ]; then
                 ok "${label} at pinned revision ${rev:0:12}"
             else
                 fail "${label} is at ${head_rev:0:12}, pinned ${rev:0:12} (scripts/upstream-versions.env)"
             fi
-        done < <(upstream_repo_specs)
+        done 3< <(upstream_repo_specs)
         if "${VERIFY_SCRIPT_DIR}/apply-local-patches.sh" "$STACK_DIR" --check >/dev/null 2>&1; then
             ok "local source patches applied"
         else

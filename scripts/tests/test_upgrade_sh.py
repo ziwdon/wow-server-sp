@@ -7,6 +7,7 @@ host Docker daemon or /opt/stacks.
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -250,7 +251,18 @@ def _stub_docker(bind: Path) -> None:
     and `compose up` clears), missing volumes (FAKE_MISSING_VOLUMES), the db-import
     exit code (FAKE_DBIMPORT_EXIT), crash-looping containers (FAKE_RESTARTING), the
     data-version a volume read reports (FAKE_DATA_VERSION, default v19), and the
-    cutover's *_STARTED markers as they stood in PEEK_STATE when each call was made."""
+    cutover's *_STARTED markers as they stood in PEEK_STATE when each call was made.
+
+    Final-review additions: ac-db-import is a one-shot container (exited unless
+    FAKE_RESTARTING); FAKE_RESTARTED containers report a StartedAt after any stop;
+    FAKE_UNSTOPPABLE containers ignore `compose stop`; the worldserver's exit code
+    (FAKE_WORLD_EXIT) and OOM flag (FAKE_OOM); a failing database (FAKE_DB_FAIL) or
+    volume probe (FAKE_PROBE_FAIL); per-volume probe facts keyed by the volume name
+    with non-alphanumerics as "_": FAKE_VERSION_<vol>, FAKE_TREE_<vol> ("FILES BYTES",
+    default "100 4096") and FAKE_MARKER_<vol> (the .acup-complete numbers, default
+    the volume's own; empty = no marker) — a volume a copy wrote to (`-v VOL:/dst`)
+    always carries a valid marker; and the rehearsal's compose render
+    (FAKE_COMPOSE_JSON), isolated containers and rehearsal database answers."""
     _executable(bind / "docker", r"""#!/bin/bash
 markers=""
 if [ -n "${PEEK_STATE:-}" ] && [ -f "$PEEK_STATE" ]; then
@@ -260,22 +272,52 @@ echo "docker $* | markers: $markers" >> "$UPGRADE_CALLS"
 args="$*"
 last="${args##* }"
 stopped="${UPGRADE_CALLS}.stopped"
+copied="${UPGRADE_CALLS}.copied"
 case "$*" in
   "compose up "*) : > "$stopped" ;;
-  "compose stop "*) for a in "$@"; do case "$a" in ac-*) echo "$a" >> "$stopped" ;; esac; done ;;
+  "compose stop "*)
+    for a in "$@"; do
+      case "$a" in ac-*)
+        case " ${FAKE_UNSTOPPABLE:-} " in *" $a "*) ;; *) echo "$a" >> "$stopped" ;; esac ;;
+      esac
+    done ;;
   "stop "*) echo "$last" >> "$stopped" ;;
   "inspect -f {{.State.Status}} "*)
     case " ${FAKE_RESTARTING:-} " in *" $last "*) echo restarting; exit 0 ;; esac
     if grep -qx "$last" "$stopped" 2>/dev/null; then echo exited; exit 0; fi
-    case " ${FAKE_STOPPED:-} " in *" $last "*) echo exited ;; *) echo running ;; esac ;;
-  "inspect -f {{.State.StartedAt}} "*) echo 2026-10-27T08:00:00Z ;;
+    case " ${FAKE_STOPPED:-} ac-db-import " in *" $last "*) echo exited ;; *) echo running ;; esac ;;
+  "inspect -f {{.State.StartedAt}} "*)
+    case " ${FAKE_RESTARTED:-} " in *" $last "*) echo 2099-01-01T00:00:00Z ;; *) echo 2026-10-27T08:00:00Z ;; esac ;;
+  "inspect -f {{.State.ExitCode}} ac-worldserver") echo "${FAKE_WORLD_EXIT:-0}" ;;
   "inspect -f {{.State.ExitCode}} "*) echo "${FAKE_DBIMPORT_EXIT:-0}" ;;
+  "inspect -f {{.State.OOMKilled}} "*) echo "${FAKE_OOM:-false}" ;;
+  "inspect -f {{.HostConfig.NetworkMode}}"*) echo "acup-rehearsal-net|{}|volume:acup-x:/y:false;" ;;
   "logs --since "*) echo "WORLD: World Initialized In 10 seconds" ;;
-  "exec ac-database "*) echo "${FAKE_HUMANS_ONLINE:-0}" ;;
+  "exec ac-database "*) [ -z "${FAKE_DB_FAIL:-}" ] || exit 1; echo "${FAKE_HUMANS_ONLINE:-0}" ;;
+  "exec -i -e MYSQL_PWD="*)
+    case "$*" in *playerbots_speech*) echo 0 ;; *"column_name='id'"*) echo 1 ;; *) echo 42 ;; esac ;;
   "image inspect "*) echo sha256:abc ;;
-  "run --rm --network none --user 0 -v "*":/d:ro --entrypoint sh "*) echo "INSTALLED_VERSION=${FAKE_DATA_VERSION-v19}" ;;
+  "run --rm --network none --user 0 -v "*":/src:ro -v "*":/dst "*)
+    dst="${args#*:/src:ro -v }"; echo "${dst%%:/dst *}" >> "$copied" ;;
+  "run --rm --network none --user 0 -v "*":/d:ro --entrypoint sh "*)
+    [ -z "${FAKE_PROBE_FAIL:-}" ] || exit 1
+    vol="${args#*--user 0 -v }"; vol="${vol%%:/d:ro *}"
+    key="$(printf '%s' "$vol" | tr -c 'A-Za-z0-9' '_')"
+    ver="FAKE_VERSION_$key"; tree="FAKE_TREE_$key"; marker="FAKE_MARKER_$key"
+    echo "INSTALLED_VERSION=${!ver-${FAKE_DATA_VERSION-v19}}"
+    tree="${!tree:-100 4096}"
+    if grep -qx "$vol" "$copied" 2>/dev/null; then marker="$tree"; else marker="${!marker-$tree}"; fi
+    if [ -n "$marker" ]; then echo "MARKER_FILES=${marker% *}"; echo "MARKER_BYTES=${marker#* }"; fi
+    echo "TREE_FILES=${tree% *}"; echo "TREE_BYTES=${tree#* }" ;;
+  "run -d --name acup-rehearsal-dbimport "*)
+    for a in "$@"; do
+      case "$a" in *:/azerothcore/env/dist/etc) cp "$FAKE_WORLD_CONF" "${a%%:*}/worldserver.conf" ;; esac
+    done ;;
   "volume inspect "*)
     case " ${FAKE_MISSING_VOLUMES:-} " in *" $last "*) exit 1 ;; esac ;;
+  "network inspect "*|"container inspect "*) exit 1 ;;
+  "compose --env-file "*" config --format json") cat "$FAKE_COMPOSE_JSON" ;;
+  "wait "*) echo 0 ;;
 esac
 exit 0
 """)
@@ -997,3 +1039,412 @@ def test_n4_resume_treats_a_restarting_realm_as_running(tmp_path):
     assert r.returncode == 1
     assert "restarted" in r.stderr and "restarting" in r.stderr
     assert not any(m in _calls(tmp_path) for m in MUTATING)
+
+
+# ---------------------------------------------------------------------------
+# Final PR2 review fixes (F1-F21). Same stub-only PATH; nothing reaches Docker.
+
+STAGE_SVCS = ("worldserver", "authserver", "db_import", "client_data")
+LIVE_VOL = "azerothcore_ac-client-data"
+ROLLBACK_VOL = "acup-client-data-rollback-v19"
+TARGET_VOL = "acup-client-data-v20.0"
+CLIENT_FACTS = {"CLIENT_DATA_LIVE": "v19", "CLIENT_DATA_TARGET": "v20.0",
+                "CLIENT_DATA_ROLLBACK_VOLUME": ROLLBACK_VOL, "CLIENT_DATA_TARGET_VOLUME": TARGET_VOL}
+
+
+def _key(volume: str) -> str:
+    """The docker stub's per-volume knob suffix."""
+    return re.sub(r"[^A-Za-z0-9]", "_", volume)
+
+
+def _fingerprint(tools: Path) -> str:
+    """The build fingerprint as upgrade-azerothcore.sh computes it."""
+    versions_file = tools / "upstream-versions.env"
+    versions = dict(line.split("=", 1) for line in versions_file.read_text().splitlines()
+                    if "=" in line and not line.startswith("#"))
+    listing = "".join(f"{key}={versions[key]}\n" for key in (
+        "AC_CORE_REV", "MOD_PLAYERBOTS_REV", "MOD_AHBOT_REV", "MOD_IP_REV", "CLIENT_DATA_VERSION"))
+    listing += f"VERSIONS_SHA256={hashlib.sha256(versions_file.read_bytes()).hexdigest()}\n"
+    patches = tools / "patches"
+    for rel in sorted(str(p.relative_to(patches)) for p in patches.rglob("*.patch") if p.is_file()):
+        listing += f"PATCH {rel} {hashlib.sha256((patches / rel).read_bytes()).hexdigest()}\n"
+    return hashlib.sha256(listing.encode()).hexdigest()
+
+
+def _stage_env(tmp_path: Path, tools: Path, core_rev: str, fingerprint=None, **facts) -> Path:
+    """The stage env `stage` leaves for the currently pinned versions."""
+    staging = tmp_path / "work" / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    lines = [f"CANDIDATE_TAG=upgrade-{core_rev[:12]}", f"STAGING_SRC={staging / ('src-' + core_rev[:12])}",
+             f"BUILD_FINGERPRINT={_fingerprint(tools) if fingerprint is None else fingerprint}"]
+    lines += [f"CANDIDATE_ID_{svc}=sha256:abc" for svc in STAGE_SVCS]
+    lines += [f"{key}={value}" for key, value in facts.items()]
+    path = staging / f"stage-{core_rev[:12]}.env"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _no_mutation(tmp_path: Path) -> None:
+    """Nothing mutating ran; read-only volume probes (`-v VOL:/d:ro`) are allowed."""
+    calls = _calls(tmp_path)
+    assert not any(m in calls for m in MUTATING if m != "docker run"), calls
+    runs = [line for line in calls.splitlines() if line.startswith("docker run ")]
+    assert all(":/d:ro --entrypoint sh " in line for line in runs), runs
+
+
+# F1 + F19 -------------------------------------------------------------------
+
+ENV_AC = ("AC_CCACHE=true\nAC_RESTARTER_BINPATH=/azerothcore/env/dist/bin\n"
+          "AC_RESTARTER_BINFILE=worldserver\nAC_RESTARTER_WITHGDB=false\n# comment\n")
+
+
+def _rehearse_fixture(tmp_path: Path, admin_extra: dict | None = None):
+    """A stage plus the staging tree, overlays and stubs a rehearsal reads."""
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    core = _git("rev-parse", "HEAD", cwd=stack)
+    _stage_env(tmp_path, tools, core)
+    src = tmp_path / "work" / "staging" / f"src-{core[:12]}"
+    (src / "conf/dist").mkdir(parents=True)
+    (src / "conf/dist/env.ac").write_text(ENV_AC)
+    dists = {"mod-playerbots": ("playerbots", "Playerbots.Enabled = 1\nPlayerbots.MinRandomBots = 500\n"
+                                              "Playerbots.MaxRandomBots = 500\n"),
+             "mod-individual-progression": ("individualProgression", "IndividualProgression.Enable = 1\n"),
+             "mod-ah-bot-plus": ("mod_ahbot", "A = 1\nAuctionHouseBot.GUIDs = 0\n")}
+    for module, (name, text) in dists.items():
+        (src / "modules" / module / "conf").mkdir(parents=True)
+        (src / "modules" / module / "conf" / f"{name}.conf.dist").write_text(text)
+    services = tmp_path / "repo/wow-server-sp-admin/app/services"
+    services.mkdir(parents=True)
+    shutil.copy(SCRIPTS_DIR.parent / "wow-server-sp-admin/app/services/env_var.py", services / "env_var.py")
+    (stack / "docker-compose.override.yml").write_text(
+        "services:\n  ac-worldserver:\n    environment:\n"
+        '      AC_PLAYERBOTS_ENABLED: "1"\n      AC_PLAYERBOTS_MIN_RANDOM_BOTS: "500"\n')
+    admin_env = {"AC_RATE_XP_KILL": "2", "AC_DUNGEON_FINDER_OPTIONS_MASK": "5", **(admin_extra or {})}
+    (stack / "docker-compose.admin.yml").write_text(
+        "services:\n  ac-worldserver:\n    environment:\n"
+        + "".join(f"      {key}: '{value}'\n" for key, value in admin_env.items()))
+    environment = {**dict(line.split("=", 1) for line in ENV_AC.splitlines() if line.startswith("AC_")),
+                   "AC_DATA_DIR": "/azerothcore/env/dist/data", "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+                   "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;livepw;acore_auth",
+                   "AC_PLAYERBOTS_ENABLED": "1", "AC_PLAYERBOTS_MIN_RANDOM_BOTS": "500", **admin_env}
+    (tmp_path / "compose.json").write_text(json.dumps({"services": {"ac-worldserver": {"environment": environment}}}))
+    (tmp_path / "worldserver.conf").write_text("Rate.XP.Kill = 1\nDungeonFinder.OptionsMask = 7\n")
+    _executable(tools / "restore-drill.sh", '#!/bin/bash\necho "restore-drill.sh $*" >> "$UPGRADE_CALLS"\n'
+                'while [ $# -gt 0 ]; do case "$1" in --password-file) echo drillpw > "$2"; shift 2 ;; *) shift ;; esac; done\n')
+    _executable(tools / "migrate-ac-env.sh", '#!/bin/bash\necho "migrate-ac-env.sh $*" >> "$UPGRADE_CALLS"\n')
+    archive = tmp_path / "azerothcore-backup-daily-x.tar.gz"
+    archive.write_bytes(b"archive")
+    env = {"FAKE_COMPOSE_JSON": str(tmp_path / "compose.json"), "FAKE_WORLD_CONF": str(tmp_path / "worldserver.conf"),
+           "MIN_REHEARSAL_MEM_GB": "0"}
+    return tools, stack, bind, archive, env
+
+
+def _rehearsal_dir(tmp_path: Path) -> Path:
+    found = sorted((tmp_path / "work").glob("rehearsal-2*"))
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_f1_rehearsal_checks_only_overlay_keys_not_env_ac(tmp_path):
+    # env.ac's AC_CCACHE / AC_RESTARTER_* map to no config key; they are not overrides.
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[OK]   every AC_* override maps to a loaded config key" in r.stdout
+    assert "Rehearsal PASSED" in r.stdout
+
+
+def test_f1_rehearsal_still_reports_an_unmapped_overlay_key(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path, admin_extra={"AC_NOT_A_KEY": "1"})
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 1
+    line = next(line for line in r.stdout.splitlines() if "unmapped AC_* overrides" in line)
+    assert "AC_NOT_A_KEY" in line and "AC_CCACHE" not in line and "AC_RESTARTER" not in line
+
+
+def test_f19_rehearsal_keeps_no_rendered_compose_file_with_the_live_password(tmp_path):
+    tools, stack, bind, archive, env = _rehearse_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "rehearse", "--archive", str(archive), **env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    work = _rehearsal_dir(tmp_path)
+    assert not (work / "compose.json").exists()
+    assert stat.S_IMODE((work / "world.env").stat().st_mode) == 0o600
+    assert not any("livepw" in p.read_text(errors="replace") for p in work.rglob("*") if p.is_file())
+
+
+# F2 -------------------------------------------------------------------------
+
+def _stage_fixture(tmp_path: Path):
+    """A prepared staging checkout so `stage` stays offline (no clone, no fetch)."""
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    _stub_script(tools / "apply-local-patches.sh", "apply-local-patches.sh")
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    staging = tmp_path / "work" / "staging" / f"src-{core12}"
+    shutil.copytree(stack, staging, symlinks=True)
+    (staging / "modules/mod-ah-bot-plus/conf").mkdir()
+    shutil.copy(stack / "configs/modules/mod_ahbot.conf.dist", staging / "modules/mod-ah-bot-plus/conf")
+    return tools, stack, bind, staging
+
+
+def test_f2_stage_recopies_a_rollback_volume_without_a_completion_marker(tmp_path):
+    # An interrupted copy leaves the volume behind; it must never count as the rollback copy.
+    tools, stack, bind, staging = _stage_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": "",
+                                                      f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    copies = [line for line in _calls(tmp_path).splitlines() if f"-v {ROLLBACK_VOL}:/dst " in line]
+    assert len(copies) == 1, copies
+    assert f"-v {LIVE_VOL}:/src:ro" in copies[0]
+    assert "find /dst -mindepth 1 -delete" in copies[0] and ".acup-complete" in copies[0]
+    core12 = _git("rev-parse", "--short=12", "HEAD", cwd=stack)
+    assert f"CLIENT_DATA_ROLLBACK_VOLUME={ROLLBACK_VOL}" in (staging.parent / f"stage-{core12}.env").read_text()
+
+
+def test_f2_stage_keeps_a_complete_rollback_copy(tmp_path):
+    tools, stack, bind, _ = _stage_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "stage", **{f"FAKE_VERSION_{_key(TARGET_VOL)}": "v20.0"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"-v {ROLLBACK_VOL}:/dst " not in _calls(tmp_path)
+
+
+@pytest.mark.parametrize("env, reason", [
+    ({f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": ""}, "completion marker"),
+    ({f"FAKE_TREE_{_key(LIVE_VOL)}": "101 4096"}, "live client data"),
+    ({f"FAKE_TREE_{_key(ROLLBACK_VOL)}": "99 4096", f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": "100 4096"}, "marker"),
+    ({f"FAKE_VERSION_{_key(ROLLBACK_VOL)}": "v18"}, "v18"),
+    ({"FAKE_MISSING_VOLUMES": ROLLBACK_VOL}, "missing"),
+])
+def test_f2_cutover_verifies_the_rollback_copy_before_confirming(tmp_path, env, reason):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack), **CLIENT_FACTS)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--skip-rehearsal", **env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert ROLLBACK_VOL in r.stderr and reason in r.stderr
+    assert "Type UPGRADE" not in r.stdout + r.stderr
+    _no_mutation(tmp_path)
+    assert not (tmp_path / "work" / "current").exists()
+
+
+def test_f2_cutover_rechecks_the_rollback_copy_right_before_switching_client_data(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_client_data", **CLIENT_FACTS)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             **{f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": ""})
+    assert r.returncode == 1
+    assert ROLLBACK_VOL in r.stderr and "completion marker" in r.stderr
+    assert "CLIENT_DATA_SWITCH_STARTED" not in (state / "state.env").read_text()
+    assert f"-v {LIVE_VOL}:/dst" not in _calls(tmp_path)
+
+
+def test_f2_resumed_client_data_switch_compares_the_copy_with_its_marker_not_the_live_volume(tmp_path):
+    # After an interrupted switch the live volume is half v20: only the marker can vouch for the copy.
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_client_data", CLIENT_DATA_SWITCH_STARTED="1",
+                                                **CLIENT_FACTS)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             **{f"FAKE_TREE_{_key(LIVE_VOL)}": "7 9"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "CUTOVER_OK=1" in (state / "state.env").read_text()
+
+
+def test_f2_rollback_refuses_a_rollback_volume_without_a_completion_marker(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(tools / "restore-azerothcore.sh", "restore-azerothcore.sh")
+    state = _cutover_state(tmp_path, stack, _before("switch_client_data"), ADMIN_WAS_RUNNING="true",
+                           CLIENT_DATA_SWITCH_STARTED="1", **CLIENT_FACTS)
+    r = _run(tmp_path, tools, stack, bind, "rollback", "--state", str(state), "--yes",
+             **{f"FAKE_MARKER_{_key(ROLLBACK_VOL)}": ""})
+    assert r.returncode == 1
+    assert ROLLBACK_VOL in r.stderr and "completion marker" in r.stderr
+    calls = _calls(tmp_path)
+    assert not any(m in calls for m in MUTATING if m != "docker run")
+    assert all(f"-v {ROLLBACK_VOL}:/d:ro " in line for line in calls.splitlines() if line.startswith("docker run "))
+    assert "ROLLBACK_STARTED" not in (state / "state.env").read_text()
+
+
+# F8 -------------------------------------------------------------------------
+
+def test_f8_dry_run_cutover_without_the_admin_stack_plans_no_admin_steps(tmp_path):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack))
+    assert not (tmp_path / "admin").exists()
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--skip-rehearsal", "--dry-run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "docker tag azerothcore-admin" not in r.stdout
+    assert "docker start azerothcore-admin" not in r.stdout
+    assert "redeploy-azerothcore-admin.sh" not in r.stdout
+    assert "admin app is not installed" in r.stdout
+
+
+def test_f8_resumed_stop_step_without_the_admin_stack_skips_the_admin_snapshot(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(stack / "backup.sh", "backup.sh")
+    state = _cutover_state(tmp_path, stack, ("snapshot_tooling",), ADMIN_WAS_RUNNING="false",
+                           ADMIN_PRESENT="false")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             FAKE_STOPPED="azerothcore-admin")
+    assert "pre-upgrade archive not found" in r.stderr, r.stdout + r.stderr
+    calls = _calls(tmp_path)
+    assert "docker tag azerothcore-admin" not in calls and "backup.sh --label preupgrade" in calls
+
+
+# F9 -------------------------------------------------------------------------
+
+def test_f9_stage_explains_an_unreadable_live_client_data_volume(tmp_path):
+    tools, stack, bind, _ = _stage_fixture(tmp_path)
+    r = _run(tmp_path, tools, stack, bind, "stage", FAKE_PROBE_FAIL="1")
+    assert r.returncode == 1
+    assert "cannot read the live client data version" in r.stderr
+    assert "volume create" not in _calls(tmp_path)
+
+
+# F13 ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("env, shown", [({"FAKE_WORLD_EXIT": "137"}, "code 137"),
+                                        ({"FAKE_OOM": "true"}, "OOM")])
+def test_f13_stop_step_refuses_a_worldserver_that_did_not_exit_cleanly(tmp_path, env, shown):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(stack / "backup.sh", "backup.sh")
+    (tmp_path / "admin").mkdir()
+    (tmp_path / "admin/docker-compose.yml").write_text("services: {}\n")
+    state = _cutover_state(tmp_path, stack, ("snapshot_tooling",), ADMIN_WAS_RUNNING="true")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", **env)
+    assert r.returncode == 1
+    assert "did not exit cleanly" in r.stderr and shown in r.stderr
+    assert "saveall may be incomplete" in r.stderr
+    assert "backup.sh" not in _calls(tmp_path)
+    assert "STEP_stop" not in (state / "state.env").read_text()
+
+
+# F14 ------------------------------------------------------------------------
+
+def _stops_after_up(tmp_path: Path) -> bool:
+    lines = _calls(tmp_path).splitlines()
+    up = _index(lines, "docker compose up -d --no-build")
+    return any(i > up for i, line in enumerate(lines) if line.startswith("docker compose stop -t "))
+
+
+def test_f14_a_failing_count_query_stops_the_realm(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", FAKE_DB_FAIL="1")
+    assert r.returncode == 1
+    assert _stops_after_up(tmp_path), _calls(tmp_path)
+    assert "Server is stopped" in r.stderr
+    assert "STEP_verify" not in (state / "state.env").read_text()
+
+
+def test_f14_a_failing_step_marker_stops_the_realm(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    _stub_script(bind / "sync", "sync", rc=1)  # state_mark cannot flush: `mark_done verify` fails
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 1
+    assert _stops_after_up(tmp_path), _calls(tmp_path)
+    assert "Server is stopped" in r.stderr
+
+
+def test_f14_a_stop_that_fails_is_reported_as_still_running(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "verify", BOOT_STARTED="1")
+    _stub_script(tools / "verify-azerothcore.sh", "new-verifier", rc=1)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes",
+             FAKE_UNSTOPPABLE="ac-worldserver")
+    assert r.returncode == 1
+    assert "STILL RUNNING: ac-worldserver" in r.stderr
+    assert "Server is stopped" not in r.stderr
+
+
+# F15 ------------------------------------------------------------------------
+
+STOPPED_AT = "1793091600"  # 2026-10-27T09:00:00Z, after the stub's StartedAt (08:00)
+
+
+@pytest.mark.parametrize("restarted", ["ac-db-import", "ac-worldserver", "ac-authserver"])
+def test_f15_resume_refuses_a_container_started_after_the_stop_step(tmp_path, restarted):
+    # Started and stopped again (e.g. a reboot ran db-import): the status alone reads "exited".
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    state = _cutover_state(tmp_path, stack, _before("snapshot_state"), ADMIN_WAS_RUNNING="true",
+                           STOPPED_AT=STOPPED_AT)
+    _stopped(tmp_path, "ac-worldserver", "ac-authserver", "azerothcore-admin")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", FAKE_RESTARTED=restarted)
+    assert r.returncode == 1
+    assert "restarted" in r.stderr and restarted in r.stderr
+    _no_mutation(tmp_path)
+
+
+def test_f15_resume_accepts_containers_last_started_before_the_stop_step(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_images", STOPPED_AT=STOPPED_AT)
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_f15_resume_stops_an_admin_app_that_came_back_before_its_step(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    (stack / "docker-compose.override.yml").write_text("services: {}\n")
+    state = _cutover_state(tmp_path, stack, _before("snapshot_state"), ADMIN_WAS_RUNNING="true")
+    _stopped(tmp_path, "ac-worldserver", "ac-authserver")  # azerothcore-admin runs again (reboot)
+    _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    lines = _calls(tmp_path).splitlines()
+    assert _index(lines, "docker stop azerothcore-admin") < _index(lines, "docker tag acore/ac-wotlk-")
+
+
+def test_f15_resume_leaves_the_admin_app_alone_once_its_step_started(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "admin", BOOT_STARTED="1", ADMIN_STEP_STARTED="1")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "docker stop azerothcore-admin" not in _calls(tmp_path)
+
+
+def test_f15_the_stop_step_records_when_it_stopped_the_realm(tmp_path):
+    tools, stack, bind, _ = _addendum_fixture(tmp_path)
+    _stub_script(stack / "backup.sh", "backup.sh")
+    (tmp_path / "admin").mkdir()
+    (tmp_path / "admin/docker-compose.yml").write_text("services: {}\n")
+    state = _cutover_state(tmp_path, stack, ("snapshot_tooling",), ADMIN_WAS_RUNNING="true")
+    _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes")
+    text = (state / "state.env").read_text()
+    assert re.search(r"(?m)^STOPPED_AT=\d{10}$", text), text
+    assert text.index("STOPPED_AT=") < text.index("STEP_stop=1")
+
+
+# F16 ------------------------------------------------------------------------
+
+def test_f16_resume_refuses_inside_the_nightly_backup_window(tmp_path):
+    tools, stack, bind, state = _resume_fixture(tmp_path, "switch_images")
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--state", str(state), "--yes", UPGRADE_NOW_UTC_MIN="180")
+    assert r.returncode == 1
+    assert "02:30-03:45 UTC" in r.stderr
+    _no_mutation(tmp_path)
+
+
+@pytest.mark.parametrize("minute, passes", [("149", True), ("150", False), ("224", False), ("225", True)])
+def test_f16_fresh_cutover_window_uses_the_clock_seam(tmp_path, minute, passes):
+    tools, stack, bind, previous = _addendum_fixture(tmp_path)
+    _stage_env(tmp_path, tools, _git("rev-parse", "HEAD", cwd=stack))
+    r = _run(tmp_path, tools, stack, bind, "cutover", "--previous-repo-rev", previous, "--yes",
+             "--skip-rehearsal", "--dry-run", UPGRADE_NOW_UTC_MIN=minute)
+    assert (r.returncode == 0) == passes, r.stdout + r.stderr
+    assert ("02:30-03:45 UTC overlaps" in r.stdout) != passes
+
+
+# F20 ------------------------------------------------------------------------
+
+def test_f20_a_command_reading_stdin_cannot_swallow_the_repository_list(tmp_path):
+    tools, stack, bind, previous = _fixture(tmp_path)
+    real_git = shutil.which("git")
+    (bind / "git").unlink()
+    _executable(bind / "git", f'#!/bin/bash\ncat > /dev/null\nexec {real_git} "$@"\n')
+    r = subprocess.run(
+        ["/bin/bash", str(tools / "upgrade-azerothcore.sh"), "preflight", "--previous-repo-rev", previous],
+        capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+        env={"PATH": str(bind), "HOME": str(tmp_path), "STACK_DIR": str(stack),
+             "ADMIN_STACK_DIR": str(tmp_path / "admin"), "UPGRADE_ROOT": str(tmp_path / "work"),
+             "UPGRADE_CALLS": str(tmp_path / "calls"), "MIN_FREE_GB": "0", **GIT_ENV})
+    for label in ("core", "mod-playerbots", "mod-ah-bot-plus", "mod-individual-progression"):
+        assert f"[OK]   {label}: " in r.stdout, r.stdout
+
+
+def test_f20_every_repository_spec_loop_reads_the_list_on_fd_3():
+    for script in ("upgrade-azerothcore.sh", "install-azerothcore.sh", "verify-azerothcore.sh"):
+        text = (SCRIPTS_DIR / script).read_text()
+        feeds = re.findall(r"done [0-9]?< <\(upstream_repo_specs\)", text)
+        assert feeds and all(feed == "done 3< <(upstream_repo_specs)" for feed in feeds), (script, feeds)
+        assert text.count("<&3; do") == len(feeds), script

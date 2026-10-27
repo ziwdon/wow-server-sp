@@ -1209,10 +1209,10 @@ clone_or_verify_repo() {
 pin_upstream_checkouts() {
     local label rel url branch rev
     load_upstream_versions "${SCRIPT_SOURCE_DIR}/upstream-versions.env"
-    while IFS='|' read -r label rel url branch rev; do
+    while IFS='|' read -r label rel url branch rev <&3; do
         echo "Pinning ${label} to ${rev:0:12}..."
         checkout_pinned_rev "${STACK_DIR}/${rel}" "$url" "$branch" "$rev"
-    done < <(upstream_repo_specs)
+    done 3< <(upstream_repo_specs)
     "${SCRIPT_SOURCE_DIR}/apply-local-patches.sh" "$STACK_DIR"
 }
 
