@@ -801,9 +801,14 @@ fi
 # ==========================================================================
 # Check 16 — actionable worldserver errors since this boot
 # Errors.log is truncated on boot.  A non-empty file is actionable except for
-# the documented graveyard-zone data gap, which is advisory when it is the
-# only content.  Mixed content still fails so a benign line cannot hide an
-# unrelated runtime error.
+# two documented upstream data gaps, advisory when they are the only content:
+#   - the graveyard_zone "does not have a linked graveyard" line, and
+#   - the "Pool Id N is empty (...). The pool will not be spawned." line (e.g.
+#     pool 1072 "Mirelow" had no members in this server's world DB before the 2026-10 upgrade; newer cores log
+#     it once at startup).
+# The pool pattern is fully anchored (numeric id, exact wording) so a near-miss
+# line is still actionable.  Mixed content still fails so a benign line cannot
+# hide an unrelated runtime error.
 #
 # VERIFY_ERRORS_LOG_ADVISORY: when set, downgrade an otherwise-actionable
 # Errors.log from FAIL to advisory.  Callers that do NOT modify the running AC
@@ -818,9 +823,19 @@ if [ ! -f "$ERRORS_LOG" ]; then
 elif [ ! -s "$ERRORS_LOG" ]; then
     ok "Errors.log is empty (no actionable runtime errors)"
 else
-    actionable_errors="$(grep -vE 'Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard' "$ERRORS_LOG" 2>/dev/null || true)"
+    graveyard_re='Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard'
+    empty_pool_re='^Pool Id [0-9]+ is empty \(has no creatures, no gameobjects, no quests and no valid child pools\)\. The pool will not be spawned\.$'
+    actionable_errors="$(grep -vE -e "$graveyard_re" -e "$empty_pool_re" "$ERRORS_LOG" 2>/dev/null || true)"
     if [ -z "$actionable_errors" ]; then
-        info "Errors.log contains only the known graveyard_zone data-gap warning"
+        if grep -qE "$empty_pool_re" "$ERRORS_LOG" 2>/dev/null; then
+            if grep -qE "$graveyard_re" "$ERRORS_LOG" 2>/dev/null; then
+                info "Errors.log contains only the known graveyard_zone and empty-pool data-gap warnings"
+            else
+                info "Errors.log contains only the known empty-pool data-gap warning (Pool Id N is empty; upstream data gap)"
+            fi
+        else
+            info "Errors.log contains only the known graveyard_zone data-gap warning"
+        fi
     elif [ -n "${VERIFY_ERRORS_LOG_ADVISORY:-}" ]; then
         info "Errors.log has runtime errors, treated as advisory (VERIFY_ERRORS_LOG_ADVISORY set); inspect $ERRORS_LOG"
     else

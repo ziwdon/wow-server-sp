@@ -194,6 +194,63 @@ def test_actionable_errors_log_fails_but_known_graveyard_noise_is_advisory(tmp_p
     _assert_complete_summary(advisory)
 
 
+EMPTY_POOL_LINE = (
+    "Pool Id 1072 is empty (has no creatures, no gameobjects, no quests and no valid child pools). "
+    "The pool will not be spawned.\n"
+)
+GRAVEYARD_LINE = "Table `graveyard_zone` incomplete: Zone 2037 Team 0 does not have a linked graveyard\n"
+
+
+def _errors_log_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
+    return [line for line in result.stdout.splitlines() if "Errors.log" in line]
+
+
+def test_empty_pool_warning_alone_is_advisory_not_a_failure(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("logs", "Errors.log").write_text(EMPTY_POOL_LINE * 2)
+
+    result = _run(stack, _stubs(tmp_path))
+
+    lines = _errors_log_lines(result)
+    assert any(line.startswith("[INFO]") and "empty-pool" in line for line in lines), lines
+    assert not any(line.startswith("[FAIL]") for line in lines), lines
+    assert "Errors.log has actionable runtime errors" not in result.stdout
+    _assert_complete_summary(result)
+
+
+def test_empty_pool_plus_graveyard_warnings_are_both_advisory(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("logs", "Errors.log").write_text(EMPTY_POOL_LINE + GRAVEYARD_LINE)
+
+    result = _run(stack, _stubs(tmp_path))
+
+    lines = _errors_log_lines(result)
+    assert any(
+        line.startswith("[INFO]") and "graveyard_zone" in line and "empty-pool" in line for line in lines
+    ), lines
+    assert not any(line.startswith("[FAIL]") for line in lines), lines
+    _assert_complete_summary(result)
+
+
+def test_empty_pool_warning_does_not_hide_other_errors(tmp_path):
+    stack = _stack(tmp_path)
+    errors = stack / "logs" / "Errors.log"
+    errors.write_text(EMPTY_POOL_LINE + "[ERROR] database connection lost\n")
+
+    mixed = _run(stack, _stubs(tmp_path))
+    assert "[FAIL] Errors.log has actionable runtime errors" in mixed.stdout
+    _assert_complete_summary(mixed)
+
+    # A near-miss pool line (different wording / trailing text) is NOT allow-listed.
+    errors.write_text(EMPTY_POOL_LINE.rstrip("\n") + " Extra unexpected text.\n")
+    near_miss = _run(stack, _stubs(tmp_path))
+    assert "[FAIL] Errors.log has actionable runtime errors" in near_miss.stdout
+
+    errors.write_text("Pool Id abc is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned.\n")
+    non_numeric = _run(stack, _stubs(tmp_path))
+    assert "[FAIL] Errors.log has actionable runtime errors" in non_numeric.stdout
+
+
 def test_errors_log_advisory_flag_downgrades_actionable_errors(tmp_path):
     stack = _stack(tmp_path)
     errors = stack / "logs" / "Errors.log"
