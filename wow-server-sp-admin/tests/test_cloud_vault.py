@@ -195,7 +195,10 @@ def test_modes_do_not_depend_on_the_process_umask(vault):
 
 def test_create_writes_the_expected_files(vault):
     vault.create()
-    assert (vault.gnupg_home / "gpg-agent.conf").read_text() == "allow-preset-passphrase\n"
+    # Presets must outlive the default 10-minute idle expiry for the length of one unlock (R-13).
+    assert (vault.gnupg_home / "gpg-agent.conf").read_text() == (
+        "allow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n"
+    )
     assert vault.sealed_path.read_bytes().startswith(b"FAKE:")
     grips = vault.keygrips_path.read_text().splitlines()
     # A primary key and its encryption subkey, one 40-hex keygrip per line.
@@ -247,6 +250,15 @@ def test_wipe_kills_a_running_agent(vault):
         assert _agent_running(vault)
         vault.wipe()
         assert not vault.secrets_dir.exists()
+
+
+def test_a_failing_agent_kill_is_logged(make_vault, caplog):
+    vault = make_vault(gpgconf="/bin/false")
+    vault.gnupg_home.mkdir(parents=True)
+    with caplog.at_level("WARNING", logger="app.services.cloud_vault"):
+        vault.wipe()
+    assert any("Stopping the key agent exited with status 1" in r.getMessage() for r in caplog.records)
+    assert not vault.secrets_dir.exists()
 
 
 def test_wipe_on_a_missing_vault_is_harmless(vault):

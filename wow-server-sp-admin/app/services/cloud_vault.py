@@ -55,6 +55,12 @@ KEY_LABEL = "wow-server-sp cloud backup"
 UNLOCK_FAILED_MESSAGE = "Can't unlock the stored session — reconnect"
 TPM_TCTI = "device:/dev/tpmrm0"
 
+# allow-preset-passphrase lets gpg-preset-passphrase fill the agent's cache. The two TTLs (24 h) keep a
+# preset entry from expiring while it sits idle between two CLI calls of one unlock (the default is
+# 10 minutes); the CLI would then fail to read its session and look disconnected. The agent is killed at
+# the end of every unlocked() block, so the passphrase never stays cached longer than one run.
+AGENT_CONF = "allow-preset-passphrase\ndefault-cache-ttl 86400\nmax-cache-ttl 86400\n"
+
 _SAFE_PATH = "/usr/local/bin:/usr/bin:/bin"
 _PRIVATE_DIR = 0o700
 _PRIVATE_FILE = 0o600
@@ -195,7 +201,7 @@ class SessionVault:
     def _create(self) -> None:
         for directory in (self.secrets_dir, self.gnupg_home, self.store_dir, self.cli_dir):
             _private_dir(directory)
-        _write_private(self.gnupg_home / "gpg-agent.conf", b"allow-preset-passphrase\n")
+        _write_private(self.gnupg_home / "gpg-agent.conf", AGENT_CONF.encode())
 
         passphrase = secrets.token_urlsafe(32)
         _write_private(self.sealed_path, self._seal(passphrase.encode()))
@@ -334,7 +340,7 @@ class SessionVault:
         if not self.gnupg_home.is_dir():
             return  # no home, no agent (and no reason to let gpgconf touch anything)
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [self._gpgconf, "--kill", "gpg-agent"],
                 env=self._gpg_env(),
                 stdin=subprocess.DEVNULL,
@@ -346,6 +352,9 @@ class SessionVault:
             )
         except Exception as exc:  # noqa: BLE001 - best effort; the caller is already finishing or failing
             log.warning("Could not stop the key agent: %s", exc)
+            return
+        if proc.returncode != 0:
+            log.warning("Stopping the key agent exited with status %s; it may still be running.", proc.returncode)
 
     def _preset_all(self, passphrase: str, keygrips: list[str]) -> None:
         stdin = (passphrase + "\n").encode()
