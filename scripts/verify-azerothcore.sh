@@ -801,11 +801,13 @@ fi
 # ==========================================================================
 # Check 16 — actionable worldserver errors since this boot
 # Errors.log is truncated on boot.  A non-empty file is actionable except for
-# two documented upstream data gaps, advisory when they are the only content:
-#   - the graveyard_zone "does not have a linked graveyard" line, and
-#   - the "Pool Id N is empty (...). The pool will not be spawned." line (e.g.
-#     pool 1072 "Mirelow" had no members in this server's world DB before the 2026-10 upgrade; newer cores log
-#     it once at startup).
+# two documented benign data warnings, advisory when they are the only content:
+#   - the graveyard_zone "does not have a linked graveyard" line (an upstream
+#     data gap), and
+#   - the "Pool Id N is empty (...). The pool will not be spawned." line (pool
+#     1072 "Mirelow": mod-individual-progression's zone_wetlands.sql deletes its
+#     members for a waypoint patrol but keeps the pool_template row; cores since
+#     azerothcore-wotlk #27026 log it once at startup).
 # The pool pattern is fully anchored (numeric id, exact wording) so a near-miss
 # line is still actionable.  Mixed content still fails so a benign line cannot
 # hide an unrelated runtime error.
@@ -829,9 +831,9 @@ else
     if [ -z "$actionable_errors" ]; then
         if grep -qE "$empty_pool_re" "$ERRORS_LOG" 2>/dev/null; then
             if grep -qE "$graveyard_re" "$ERRORS_LOG" 2>/dev/null; then
-                info "Errors.log contains only the known graveyard_zone and empty-pool data-gap warnings"
+                info "Errors.log contains only the known graveyard_zone data-gap and empty-pool warnings"
             else
-                info "Errors.log contains only the known empty-pool data-gap warning (Pool Id N is empty; upstream data gap)"
+                info "Errors.log contains only the known empty-pool warning (Pool Id N is empty; orphaned pool_template row)"
             fi
         else
             info "Errors.log contains only the known graveyard_zone data-gap warning"
