@@ -723,6 +723,7 @@ def test_disconnect_wipes_vault_keeps_config_even_if_logout_fails(rig, problem):
     rig.set_state(
         remote=[RemoteFile(NEW, 1, None)], remote_listed_at=iso(NOW), folder_status="ok",
         cli_version="0.9.0", last_error="old", issues=[{"name": NEW, "kind": "failed", "detail": "x"}],
+        last_result="error", failing_since=iso(NOW - timedelta(hours=30)),
     )
     if problem == "logout_fails":
         rig.cli.logout_error = CloudCliError("failed", "network down")
@@ -737,6 +738,7 @@ def test_disconnect_wipes_vault_keeps_config_even_if_logout_fails(rig, problem):
     assert state.connection == "disconnected"
     assert state.remote == [] and state.remote_listed_at is None and state.issues == []
     assert state.folder_status is None and state.cli_version is None and state.last_error is None
+    assert state.failing_since is None and rig.svc.status().stalled is False
     assert rig.store.load_config() == cfg
     assert rig.cli.count("logout") == (1 if problem == "logout_fails" else 0)
     assert rig.cli.outside_vault_calls == 0 and not locked(rig.svc)
@@ -786,19 +788,21 @@ def test_save_settings_forgets_the_listing_when_the_folder_changes(rig):
         remote=[RemoteFile(NEW, 1, "aa")], remote_listed_at=iso(NOW), folder_status="ok",
         issues=[{"name": NEW, "kind": "conflict", "detail": "d"}],
         next_auto_attempt=iso(NOW + timedelta(hours=1)), last_success=iso(NOW), cli_version="0.9.0",
+        failing_since=iso(NOW - timedelta(hours=2)),
     )
 
     rig.svc.save_settings(CloudConfig(enabled=True, folder=FOLDER + "/", retention_days=10))  # same folder
 
     state = rig.store.load_state()
     assert state.remote and state.folder_status == "ok" and state.issues and state.next_auto_attempt
+    assert state.failing_since
     assert rig.store.load_config().retention_days == 10
 
     rig.svc.save_settings(CloudConfig(enabled=True, folder="/my-files/Other"))
 
     state = rig.store.load_state()
     assert state.remote == [] and state.remote_listed_at is None and state.folder_status is None
-    assert state.issues == [] and state.next_auto_attempt is None
+    assert state.issues == [] and state.next_auto_attempt is None and state.failing_since is None
     assert state.connection == "connected" and state.last_success == iso(NOW) and state.cli_version == "0.9.0"
 
     with pytest.raises(ValueError):
@@ -850,6 +854,71 @@ def test_check_folder_records_what_it_finds(rig, answer, expected):
     assert {key: getattr(state, key) for key in base} == {**base, **expected}
     assert "create" not in rig.vault.calls and "wipe" not in rig.vault.calls
     assert rig.cli.outside_vault_calls == 0 and not locked(rig.svc)
+
+
+STALE_ISSUE = {"name": D27, "kind": "failed", "detail": "Upload failed."}
+STALE_ERROR = "The Drive folder was not found. Create it in Proton Drive or choose another folder."
+
+
+def stale_problems(rig: Rig, **fields) -> None:
+    """A failed run's leftovers: red error text, a back-off, an issue and a log line."""
+    rig.set_state(
+        last_result="error", last_error=STALE_ERROR, next_auto_attempt=iso(NOW + timedelta(minutes=50)),
+        issues=[STALE_ISSUE], **fields,
+    )
+    rig.store.append_log(log_entry(iso(NOW - timedelta(minutes=10)), "error"))
+
+
+def assert_stale_problems_cleared(rig: Rig) -> None:
+    state = rig.store.load_state()
+    assert state.last_error is None and state.next_auto_attempt is None
+    # What the last run did stays on record.
+    assert state.last_result == "error" and state.issues == [STALE_ISSUE]
+    assert [entry.result for entry in rig.store.read_log()] == ["error"]
+
+
+@pytest.mark.parametrize("action", ["check_folder", "create_folder"])
+def test_folder_fix_clears_a_stale_error_and_back_off(rig, action):
+    rig.configure()
+    stale_problems(rig, folder_status="missing")
+
+    getattr(rig.svc, action)()
+
+    assert rig.store.load_state().folder_status == "ok"
+    assert_stale_problems_cleared(rig)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [RemoteEntry("WoW Backups", "file", "u", 3, None), CloudCliError("not_found", "Node not found: WoW Backups")],
+)
+def test_folder_check_that_finds_a_problem_keeps_the_error(rig, answer):
+    rig.configure()
+    stale_problems(rig)
+    if isinstance(answer, Exception):
+        rig.cli.info_error = answer
+    else:
+        rig.cli.info_node = answer
+
+    rig.svc.check_folder()
+
+    state = rig.store.load_state()
+    assert state.folder_status in ("not_folder", "missing")
+    assert state.last_error == STALE_ERROR and state.next_auto_attempt == iso(NOW + timedelta(minutes=50))
+
+
+@pytest.mark.parametrize("folder", [FOLDER, ""])
+def test_sign_in_clears_a_stale_error_and_back_off(rig, folder):
+    rig.configure(folder=folder)
+    stale_problems(rig, connection="disconnected")
+    proc = rig.cli.queue_login()
+    rig.svc.start_sign_in()
+
+    proc.finish(0)
+    assert rig.svc.wait_idle(5)
+
+    assert rig.store.load_state().connection == "connected"
+    assert_stale_problems_cleared(rig)
 
 
 def test_check_folder_does_nothing_without_connection_or_folder(rig):
@@ -945,6 +1014,7 @@ def test_run_records_state_log_and_backoff(rig, monkeypatch):
     assert state.last_attempt == iso(NOW) and state.last_result == "partial"
     assert state.last_success == iso(NOW - timedelta(days=1))  # a partial run is no success
     assert state.next_auto_attempt == iso(end + timedelta(minutes=60))
+    assert state.failing_since == iso(end)
     assert state.last_error == f"{D26}: Upload failed: quota exceeded"
     assert [f.name for f in state.remote] == [NEW, D27] and state.remote_listed_at == iso(end)
     assert state.folder_status == "ok" and state.connection == "connected"
@@ -970,7 +1040,7 @@ def test_run_records_state_log_and_backoff(rig, monkeypatch):
     end2 = end + timedelta(minutes=1)
     state = rig.store.load_state()
     assert state.last_success == iso(end2) and state.next_auto_attempt is None
-    assert state.last_result == "warning" and state.last_error is None
+    assert state.last_result == "warning" and state.last_error is None and state.failing_since is None
     assert [f.name for f in state.remote] == [NEW, D27] and state.remote_listed_at == iso(end)
     assert state.folder_status == "ok"
     assert state.issues == [{"name": D27, "kind": "conflict", "detail": CONFLICT_DETAIL}]
@@ -1009,7 +1079,7 @@ def test_unexpected_run_failure_is_logged_backs_off_and_releases(rig, monkeypatc
     state = rig.store.load_state()
     message = "The cloud run failed unexpectedly — see the admin log."
     assert state.last_result == "error" and state.last_error == message
-    assert state.next_auto_attempt == iso(NOW + timedelta(minutes=60))
+    assert state.next_auto_attempt == iso(NOW + timedelta(minutes=60)) and state.failing_since == iso(NOW)
     assert state.connection == "connected" and [f.name for f in state.remote] == [D27]
     (entry,) = rig.store.read_log()
     assert entry.result == "error" and entry.error == message
@@ -1039,17 +1109,54 @@ def test_stalled_after_26_hours_without_success(rig):
         rig.set_state(**fields)
         return rig.svc.status().stalled
 
-    attempt = iso(NOW - timedelta(minutes=5))
     old, recent = iso(NOW - timedelta(hours=27)), iso(NOW - timedelta(hours=25))
-    assert stalled(last_attempt=attempt, last_result="error", last_success=old) is True
-    assert stalled(last_attempt=attempt, last_result="partial", last_success=old) is True
-    assert stalled(last_attempt=attempt, last_result="error", last_success=None) is True
-    assert stalled(last_attempt=attempt, last_result="error", last_success="not a time") is True
-    assert stalled(last_attempt=attempt, last_result="error", last_success=recent) is False
-    assert stalled(last_attempt=attempt, last_result="warning", last_success=old) is False
-    assert stalled(last_attempt=None, last_result=None, last_success=None) is False
+    # Last success 27 h ago and failing now.
+    assert stalled(last_result="error", last_success=old, failing_since=iso(NOW)) is True
+    assert stalled(last_result="partial", last_success=old) is True
+    # Never a success: counted from the first failure.
+    assert stalled(last_result="error", failing_since=old) is True
+    assert stalled(last_result="error", failing_since=recent) is False
+    assert stalled(last_result="error", last_success="not a time", failing_since=old) is True
+    # A success inside the window means not stalled.
+    assert stalled(last_result="error", last_success=recent) is False
+    # Nothing to count from (unset or unreadable) means not stalled.
+    assert stalled(last_result="error") is False
+    assert stalled(last_result="error", last_success="not a time", failing_since="garbage") is False
+    assert stalled(last_result="warning", last_success=old) is False
+    assert stalled(last_result=None, last_success=None) is False
     rig.configure(enabled=False)
-    assert stalled(last_attempt=attempt, last_result="error", last_success=old) is False
+    assert stalled(last_result="error", last_success=old, failing_since=old) is False
+
+
+def test_first_failure_is_not_stalled_but_26_hours_of_failures_are(rig, monkeypatch):
+    rig.configure(enabled=True)
+    rig.set_state()
+    results = iter(["error", "partial", "ok"])
+
+    def scripted(**kw):
+        rig.clock.advance(minutes=5)
+        return outcome(next(results), folder_status=None, listed=False)
+
+    monkeypatch.setattr(cloud_backup, "run_sync", scripted)
+
+    rig.svc.start_run("auto")
+    assert rig.svc.wait_idle(5)
+    first_end = iso(NOW + timedelta(minutes=5))
+    state = rig.store.load_state()
+    assert state.failing_since == first_end and state.last_success is None
+    assert rig.svc.status().stalled is False  # a fresh setup's first failure is not "stalled"
+
+    rig.clock.advance(hours=27)
+    rig.svc.start_run("manual")
+    assert rig.svc.wait_idle(5)
+    assert rig.store.load_state().failing_since == first_end  # still counted from the first failure
+    assert rig.svc.status().stalled is True
+
+    rig.svc.start_run("manual")
+    assert rig.svc.wait_idle(5)
+    state = rig.store.load_state()
+    assert state.last_result == "ok" and state.failing_since is None
+    assert rig.svc.status().stalled is False
 
 
 # --- when to run ---

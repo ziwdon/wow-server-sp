@@ -110,8 +110,20 @@ HIDDEN_DETAIL = "Proton Drive reported an error (details hidden because they may
 # Field names of the CLI's stored session (spec 2). Text naming one is never kept or shown.
 _SESSION_WORDS = ("userkeypassword", "accesstoken", "refreshtoken", "cachepassword")
 
-# State that describes one Drive folder; dropped when the folder setting changes (R-8).
-_FOLDER_FIELDS = frozenset({"folder_status", "remote", "remote_listed_at", "issues", "next_auto_attempt"})
+# State that describes one Drive folder; reset when the folder setting changes (R-8).
+_FOLDER_FIELDS = frozenset(
+    {"folder_status", "remote", "remote_listed_at", "issues", "next_auto_attempt", "failing_since"}
+)
+
+# Written when a folder check finds the folder, a folder is created or a sign-in succeeds (R-16):
+# the old red error goes away and the next wake-up may run. last_result, issues and the log stay.
+_PROBLEM_FIXED: dict[str, Any] = {"last_error": None, "next_auto_attempt": None}
+
+
+def _folder_reset() -> dict[str, Any]:
+    """``_FOLDER_FIELDS`` at their ``CloudState`` defaults (fresh lists each call)."""
+    defaults = CloudState()
+    return {key: getattr(defaults, key) for key in sorted(_FOLDER_FIELDS)}
 
 
 class CloudBusy(Exception):
@@ -391,10 +403,15 @@ class CloudService:
 
     @staticmethod
     def _stalled(cfg: CloudConfig, state: CloudState, now: datetime) -> bool:
-        if not (cfg.enabled and state.last_attempt and state.last_result in ("partial", "error")):
+        """Failing for more than 26 h with no success since (spec 6.6), never on a first failure.
+
+        Counted from the last success, or, if there never was one, from the first
+        failure (``failing_since``). Nothing readable to count from: not stalled.
+        """
+        if not (cfg.enabled and state.last_result in ("partial", "error")):
             return False
-        success = _parse_time(state.last_success)
-        return success is None or now - success > STALLED_AFTER
+        since = _parse_time(state.last_success) or _parse_time(state.failing_since)
+        return since is not None and now - since > STALLED_AFTER
 
     # --- settings and the folder ---
 
@@ -406,15 +423,7 @@ class CloudService:
             old_folder = self.store.load_config().folder
             self.store.save_config(new)
             if new.folder != old_folder:
-                self._update_state(
-                    {
-                        "remote": [],
-                        "remote_listed_at": None,
-                        "folder_status": None,
-                        "issues": [],
-                        "next_auto_attempt": None,
-                    }
-                )
+                self._update_state(_folder_reset())
 
     def check_folder(self) -> None:
         """``fs info`` the configured folder and record what it is. Errors go to ``last_error``."""
@@ -450,7 +459,7 @@ class CloudService:
                 raise CloudActionError(message) from None
             except ValueError as exc:
                 raise CloudActionError(str(exc)) from None
-            self._update_state({"folder_status": "ok"}, folder=cfg.folder)
+            self._update_state({"folder_status": "ok", **_PROBLEM_FIXED}, folder=cfg.folder)
         finally:
             self._release()
 
@@ -466,7 +475,9 @@ class CloudService:
             return {"last_error": _scrub(exc.message)}
         except ValueError as exc:
             return {"last_error": str(exc)}
-        return {"folder_status": "ok" if node.type == "folder" else "not_folder"}
+        if node.type != "folder":
+            return {"folder_status": "not_folder"}
+        return {"folder_status": "ok", **_PROBLEM_FIXED}
 
     def _require_ready(self) -> CloudConfig:
         """The config, if a run or folder action can go ahead; else ``CloudActionError``."""
@@ -647,7 +658,7 @@ class CloudService:
             version = self.cli.version()
         except CloudCliError as exc:
             log.info("could not read the Proton Drive CLI version: %s", exc.kind)
-        fields: dict[str, Any] = {"connection": "connected", "last_error": None, "cli_version": version}
+        fields: dict[str, Any] = {"connection": "connected", "cli_version": version, **_PROBLEM_FIXED}
         cfg = self.store.load_config()
         if cfg.folder:
             fields.update(self._folder_check(cfg.folder))
@@ -724,15 +735,7 @@ class CloudService:
             if self.vault.secrets_dir.exists():
                 raise CloudActionError(WIPE_FAILED)
             self._update_state(
-                {
-                    "connection": "disconnected",
-                    "remote": [],
-                    "remote_listed_at": None,
-                    "issues": [],
-                    "folder_status": None,
-                    "cli_version": None,
-                    "last_error": None,
-                }
+                {**_folder_reset(), "connection": "disconnected", "cli_version": None, "last_error": None}
             )
             log.info("Proton Drive disconnected; local session deleted")
         finally:
@@ -818,10 +821,12 @@ class CloudService:
             ]
 
         fields: dict[str, Any] = {"last_attempt": _iso(started), "last_result": result, "last_error": error}
+        first_failure: dict[str, Any] = {}
         if result in ("ok", "warning"):
-            fields.update(last_success=_iso(finished), next_auto_attempt=None)
+            fields.update(last_success=_iso(finished), next_auto_attempt=None, failing_since=None)
         else:
             fields["next_auto_attempt"] = _iso(finished + RETRY_AFTER_FAILURE)
+            first_failure["failing_since"] = _iso(finished)  # kept if already failing
         if outcome is not None:
             fields["connection"] = outcome.connection
             if outcome.folder_status is not None:
@@ -831,7 +836,7 @@ class CloudService:
             # An aborted run usually never judged the files: it says nothing about earlier issues.
             if result != "error" or issues:
                 fields["issues"] = issues
-        self._update_state(fields, folder=cfg.folder)
+        self._update_state(fields, folder=cfg.folder, if_unset=first_failure)
 
         entry = CloudLogEntry(
             started=_iso(started),
@@ -920,11 +925,14 @@ class CloudService:
             self._threads.append(thread)
         thread.start()
 
-    def _update_state(self, fields: dict[str, Any], *, folder: str | None = None) -> None:
+    def _update_state(
+        self, fields: dict[str, Any], *, folder: str | None = None, if_unset: dict[str, str] | None = None
+    ) -> None:
         """Apply ``fields`` to state.json (advisory: write errors are logged, never raised).
 
         ``folder`` is the folder the fields were learned from: if the setting has
-        changed since, the folder-specific fields are dropped (R-8).
+        changed since, the folder-specific fields are dropped (R-8). ``if_unset``
+        holds timestamps that are written only when the stored one is unset or unreadable.
         """
         with self._state_mu:
             state = self.store.load_state()
@@ -933,6 +941,11 @@ class CloudService:
                 if key in _FOLDER_FIELDS and not same_folder:
                     continue
                 setattr(state, key, value)
+            for key, value in (if_unset or {}).items():
+                if key in _FOLDER_FIELDS and not same_folder:
+                    continue
+                if _parse_time(getattr(state, key)) is None:
+                    setattr(state, key, value)
             try:
                 self.store.save_state(state)
             except OSError as exc:

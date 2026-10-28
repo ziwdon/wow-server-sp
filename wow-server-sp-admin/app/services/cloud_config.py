@@ -242,6 +242,10 @@ class CloudState:
     remote_listed_at: str | None = None
     issues: list[dict] = field(default_factory=list)
     cli_version: str | None = None
+    # End of the first failed run since the last success; "stalled" counts from it when
+    # there has never been a success (spec 6.6). Cleared by a successful run, a disconnect
+    # and a change of Drive folder.
+    failing_since: str | None = None
 
     @classmethod
     def from_dict(cls, raw: Any) -> "CloudState":
@@ -269,6 +273,7 @@ class CloudState:
             remote_listed_at=_opt_str(raw, "remote_listed_at"),
             issues=[_issue_from_dict(item) for item in issues],
             cli_version=_opt_str(raw, "cli_version"),
+            failing_since=_opt_str(raw, "failing_since"),
         )
 
     def to_dict(self) -> dict[str, Any]:

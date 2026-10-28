@@ -267,6 +267,7 @@ def test_state_round_trips_with_remote_files_rebuilt(tmp_path):
         remote_listed_at="2026-10-28T03:00:09Z",
         issues=[{"name": "x.tar.gz", "kind": "conflict", "detail": "already exists"}],
         cli_version="0.9.0",
+        failing_since="2026-10-27T03:00:09Z",
     )
     store.save_state(state)
     loaded = store.load_state()
@@ -279,6 +280,15 @@ def test_remote_entry_without_size_or_sha1_loads_with_none(tmp_path):
     root = tmp_path / "cloud"; root.mkdir()
     (root / "state.json").write_text(json.dumps({"remote": [{"name": "a"}]}))
     assert CloudStore(tmp_path).load_state().remote == [RemoteFile("a", None, None)]
+
+
+def test_state_written_before_failing_since_existed_loads_with_it_unset(tmp_path):
+    root = tmp_path / "cloud"; root.mkdir()
+    old = CloudState(connection="connected", last_result="error").to_dict()
+    del old["failing_since"]
+    (root / "state.json").write_text(json.dumps(old))
+    loaded = CloudStore(tmp_path).load_state()
+    assert loaded.failing_since is None and loaded.connection == "connected" and loaded.last_result == "error"
 
 
 def test_state_with_unknown_keys_loads_ignoring_them(tmp_path):
@@ -299,6 +309,7 @@ def test_state_with_unknown_keys_loads_ignoring_them(tmp_path):
     {"issues": [{"name": "a", "kind": "failed"}]},
     {"issues": "x"},
     {"last_success": 5},
+    {"failing_since": 5},
     {"cli_version": ["0.9"]},
 ])
 def test_invalid_state_loads_as_defaults_with_warning(tmp_path, caplog, raw):
