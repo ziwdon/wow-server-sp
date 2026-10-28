@@ -10,6 +10,7 @@
       <span class="backup-time">{{ row.created }}</span>
       <span class="backup-badge badge-{{ row.label }}">{{ row.label|capitalize }}</span>
       <span class="backup-badge badge-available">Available</span>
+      {% if row.in_drive %}<span class="backup-badge badge-in-drive">In Drive</span>{% endif %}
       <span class="backup-size">{{ row.size_mb }} MB</span>
       <a class="backup-download" href="/api/backups/download/{{ row.filename }}">Download</a>
     </li>
@@ -22,6 +23,7 @@
 <p class="backups-disclaimer">
   ⚠ Backups are automatically deleted after 7 days — to keep one longer, copy its
   file from <code>/opt/stacks/azerothcore/backups/</code>.
+  {% if cloud_folder %}Copies also go to Proton Drive folder <code>{{ cloud_folder }}</code> and leave it on the same schedule; old copies go to the Drive trash, which you empty yourself.{% endif %}
   <strong>Archives contain database contents and configuration secrets (including
   DB passwords) — store and transfer them securely.</strong>
 </p>

@@ -116,3 +116,63 @@ document.addEventListener('htmx:sseMessage', function (e) {
     if (btn) btn.disabled = true;
   }
 });
+
+// --- Cloud backup panel (the panel itself is server-rendered and swapped by htmx) ---
+
+// Copy the Proton sign-in link. The admin is usually served over plain http, where
+// navigator.clipboard does not exist, so fall back to a hidden textarea + execCommand.
+function cloudCopyLink(button) {
+  var text = button.getAttribute('data-copy') || '';
+  function report(ok) {
+    button.textContent = ok ? 'Copied' : 'Copy failed: select the link instead';
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(function () { report(true); }, function () { report(false); });
+    return;
+  }
+  var area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  var ok = false;
+  try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+  document.body.removeChild(area);
+  report(ok);
+}
+window.cloudCopyLink = cloudCopyLink;
+
+// The summary card and the "In Drive" badges follow the cloud panel: refresh them after an
+// action and when a polled sign-in or run has finished.
+var cloudWasPolling = false;
+document.addEventListener('htmx:afterSwap', function (e) {
+  var target = e.detail && e.detail.target;
+  if (!target) return;
+  if (target.id === 'cloud-panel') {
+    var panel = document.getElementById('cloud-panel');
+    var polling = !!(panel && panel.hasAttribute('hx-trigger'));
+    var verb = e.detail.requestConfig && e.detail.requestConfig.verb;
+    if (verb === 'post' || (cloudWasPolling && !polling)) {
+      ['backups-summary', 'backups-list'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) htmx.trigger(el, 'refresh');
+      });
+    }
+    cloudWasPolling = polling;
+  } else if (target.id === 'backups-list' && window.selectedBackup) {
+    // A re-rendered list must not leave an invisible selection behind.
+    var kept = null;
+    document.querySelectorAll('.backup-row').forEach(function (row) {
+      if (row.dataset.archive === window.selectedBackup) kept = row;
+    });
+    if (kept) {
+      kept.classList.add('selected');
+    } else {
+      window.selectedBackup = null;
+      var restore = document.getElementById('restore-btn');
+      if (restore) restore.disabled = true;
+    }
+  }
+});

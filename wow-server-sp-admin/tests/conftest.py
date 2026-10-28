@@ -16,3 +16,17 @@ def _reset_admin_state():
     except ImportError:
         # Phase B hasn't landed yet; nothing to reset.
         pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_cloud_service():
+    """Drop the process-wide CloudService between tests.
+
+    The Backups partials and the lifespan call ``cloud_backup.get_service()``, which caches one
+    instance wired to whatever ``ADMIN_DATA_DIR``/``AC_STACK_DIR`` were set at its first call; a
+    cached one must not carry one test's paths into the next.
+    """
+    yield
+    from app.services import cloud_backup
+
+    cloud_backup._service = None
