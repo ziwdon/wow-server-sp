@@ -25,6 +25,7 @@ from app.services import backups as backups_svc
 from app.services import app_events
 from app.services import db_stats
 from app.services import docker_client
+from app.services import known_errors as known_errors_svc
 from app.services import logs as logs_svc
 from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
@@ -325,12 +326,13 @@ async def api_logs(request: Request) -> HTMLResponse:
         }
         for event in app_events.events.snapshot()
     ]
+    errors_lines = logs_svc.tail_filtered(logs_dir / "Errors.log", n=40)
     return templates.TemplateResponse(
         request,
         "partials/logs.html",
         {
-            "errors_size": logs_svc.file_size(logs_dir / "Errors.log"),
-            "errors_lines": logs_svc.tail_filtered(logs_dir / "Errors.log", n=40),
+            "errors": known_errors_svc.summarize_errors_log(logs_dir / "Errors.log"),
+            "errors_rows": [(line, known_errors_svc.match_known(line)) for line in errors_lines],
             "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=40),
             "pb_lines": logs_svc.tail_filtered(logs_dir / "Playerbots.log", n=40),
             "app_events": recent_events,

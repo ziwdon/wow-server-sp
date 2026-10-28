@@ -81,9 +81,3 @@ def tail_filtered(
     lines = _decode_tail(chunks, starts_at_line_boundary)
     keep = [line for line in lines if not _is_benign(line)]
     return keep[-n:]
-
-
-def file_size(path: Path) -> int:
-    if not path.exists():
-        return 0
-    return path.stat().st_size

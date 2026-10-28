@@ -5,20 +5,33 @@
 <div class="log-tabs" role="tablist" aria-label="Log sources">
   <button id="server-log-tab" class="log-tab active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="server-log" onclick="switchLog(this, 'server-log')">Server.log</button>
   <button id="playerbots-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="playerbots-log" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
-  <button id="errors-log-tab" class="log-tab{% if errors_size > 0 %} log-tab-dirty{% endif %}" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="errors-log" onclick="switchLog(this, 'errors-log')">Errors.log</button>
+  <button id="errors-log-tab" class="log-tab{% if errors.state == 'dirty' %} log-tab-dirty{% endif %}" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="errors-log" onclick="switchLog(this, 'errors-log')">Errors.log</button>
   <button id="app-events-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="app-events-log" onclick="switchLog(this, 'app-events-log')">App Events</button>
 </div>
-<div class="log-errors-bar {% if errors_size == 0 %}clean{% else %}dirty{% endif %}">
+<div class="log-errors-bar {{ errors.state }}">
   <span class="errors-dot"></span>
-  {% if errors_size == 0 %}
-  ✔ No runtime errors
+  {% if errors.too_large %}
+  ✘ Errors.log is too large to classify ({{ '%.1f' % (errors.size / 1048576) }} MB) — see Errors.log tab
+  {% elif errors.actionable %}
+  ✘ {{ errors.actionable }} runtime error{{ 's' if errors.actionable != 1 }} detected{% if errors.known_total %} (+{{ errors.known_total }} known harmless){% endif %} — see Errors.log tab
+  {% elif errors.known %}
+  Only known harmless warnings ({{ errors.known_total }}) — see Errors.log tab
   {% else %}
-  ✘ Runtime errors detected — see Errors.log tab
+  ✔ No runtime errors
   {% endif %}
 </div>
 <pre id="server-log" class="logview" role="tabpanel" aria-labelledby="server-log-tab">{{ server_lines|join('\n') }}</pre>
 <pre id="playerbots-log" class="logview" role="tabpanel" aria-labelledby="playerbots-log-tab" style="display:none">{{ pb_lines|join('\n') }}</pre>
-<pre id="errors-log" class="logview" role="tabpanel" aria-labelledby="errors-log-tab" style="display:none">{{ errors_lines|join('\n') }}</pre>
+<div id="errors-log" class="logview errors-log-panel" role="tabpanel" aria-labelledby="errors-log-tab" style="display:none">
+  {% if errors.known %}
+  <ul class="known-errors" aria-label="Known harmless warnings">
+    {% for entry, count in errors.known %}
+    <li class="known-error"><span class="known-tag">known</span> <strong>{{ entry.title }}</strong> <span class="known-count">×{{ count }}</span><p>{{ entry.reason }}</p></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <pre class="errors-log-lines">{% for line, known in errors_rows %}{% if known %}<span class="log-line-known" data-known="{{ known.key }}" title="{{ known.title }}"><span class="known-tag">known</span> {{ line }}</span>{% else %}{{ line }}{% endif %}{% if not loop.last %}{{ "\n" }}{% endif %}{% endfor %}</pre>
+</div>
 <div id="app-events-log" class="logview app-events-log" role="tabpanel" aria-labelledby="app-events-log-tab" style="display:none">
   <div class="app-events-toolbar">
     <span>Recent sanitized events since the last app restart</span>
