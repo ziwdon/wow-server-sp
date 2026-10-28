@@ -15,6 +15,7 @@ SAMPLES = [
     "Table `graveyard_zone` incomplete: Zone 3455 Team 1 does not have a linked graveyard",
     "Table `graveyard_zone` incomplete: Zone 2037 Team 2 does not have a linked graveyard",
     "Pool Id 1072 is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned.",
+    "Pool Id 1073 is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned.",
     "Pool Id abc is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned.",
     "Pool Id 1072 is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned. x",
     "SmartScript::ProcessAction: SMART_ACTION_TALK: EntryOrGuid 16878 SourceType 0 EventType 61 TargetType 7 using non-existent Text id 0 for talker 29264, ignored.",

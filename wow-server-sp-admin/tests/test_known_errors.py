@@ -12,7 +12,7 @@ TALK_16878 = (
 
 
 def test_each_known_line_matches_its_entry():
-    assert match_known(EMPTY_POOL).key == "empty-pool"
+    assert match_known(EMPTY_POOL).key == "empty-pool-1072"
     assert match_known(GRAVEYARD).key == "graveyard-zone"
     assert match_known(TALK_16878).key == "smart-talk-16878"
 
@@ -26,6 +26,8 @@ def test_near_misses_are_not_known():
     for line in (
         EMPTY_POOL + " Extra unexpected text.",
         EMPTY_POOL.replace("1072", "abc"),
+        EMPTY_POOL.replace("1072", "1073"),
+        EMPTY_POOL.replace("1072", "10720"),
         "prefix " + EMPTY_POOL,
         TALK_16878.replace("EntryOrGuid 16878", "EntryOrGuid 16879"),
         TALK_16878.replace("Text id 0", "Text id 1"),
@@ -69,10 +71,10 @@ def test_only_known_lines_counts_each_kind_in_list_order(tmp_path):
     assert summary.known_total == 4
     order = [entry.key for entry in KNOWN_ERRORS]
     assert [entry.key for entry, _ in summary.known] == sorted(
-        ["empty-pool", "smart-talk-16878"], key=order.index
+        ["empty-pool-1072", "smart-talk-16878"], key=order.index
     )
     assert dict((entry.key, count) for entry, count in summary.known) == {
-        "empty-pool": 1,
+        "empty-pool-1072": 1,
         "smart-talk-16878": 3,
     }
 

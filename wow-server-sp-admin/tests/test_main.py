@@ -157,6 +157,8 @@ def test_api_logs_clean_bar_when_errors_log_empty(monkeypatch, tmp_path):
     assert "No runtime errors" in body
     assert "log-tab-dirty" not in body
     assert 'class="known-errors"' not in body
+    assert "Summary: known harmless warnings" not in body
+    assert "Raw log: last 40 lines" in body
 
 
 def test_api_logs_known_only_errors_are_marked_not_alarming(monkeypatch, tmp_path):
@@ -168,9 +170,13 @@ def test_api_logs_known_only_errors_are_marked_not_alarming(monkeypatch, tmp_pat
     assert "log-errors-bar known" in bar
     assert "Only known harmless warnings (4)" in bar
     assert "log-tab-dirty" not in body
-    # Summary above the log: one entry per kind, with its reason and count.
+    # Labelled summary above a labelled raw log: one entry per kind, with its reason and count.
+    panel = body[body.index('id="errors-log"'):]
+    assert panel.index("Summary: known harmless warnings") < panel.index('class="known-errors"')
+    assert panel.index('class="known-errors"') < panel.index("Raw log: last 40 lines")
+    assert panel.index("Raw log: last 40 lines") < panel.index('class="errors-log-lines"')
     summary = body[body.index('class="known-errors"'):body.index('class="errors-log-lines"')]
-    assert summary.index("Empty spawn pool") < summary.index("Shattered Hand Berserker emote skipped")
+    assert summary.index("Empty spawn pool 1072") < summary.index("Shattered Hand Berserker emote skipped")
     assert "mod-individual-progression" in summary
     assert "×1" in summary and "×3" in summary
     # Every known line is still shown, dimmed and tagged.

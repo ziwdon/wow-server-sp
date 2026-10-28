@@ -212,7 +212,7 @@ def test_empty_pool_warning_alone_is_advisory_not_a_failure(tmp_path):
     result = _run(stack, _stubs(tmp_path))
 
     lines = _errors_log_lines(result)
-    assert any(line.startswith("[INFO]") and "empty-pool" in line for line in lines), lines
+    assert any(line.startswith("[INFO]") and "empty-pool-1072" in line for line in lines), lines
     assert not any(line.startswith("[FAIL]") for line in lines), lines
     assert "Errors.log has actionable runtime errors" not in result.stdout
     _assert_complete_summary(result)
@@ -226,7 +226,7 @@ def test_empty_pool_plus_graveyard_warnings_are_both_advisory(tmp_path):
 
     lines = _errors_log_lines(result)
     assert any(
-        line.startswith("[INFO]") and "(graveyard-zone, empty-pool)" in line for line in lines
+        line.startswith("[INFO]") and "(graveyard-zone, empty-pool-1072)" in line for line in lines
     ), lines
     assert not any(line.startswith("[FAIL]") for line in lines), lines
     _assert_complete_summary(result)
@@ -245,6 +245,10 @@ def test_empty_pool_warning_does_not_hide_other_errors(tmp_path):
     errors.write_text(EMPTY_POOL_LINE.rstrip("\n") + " Extra unexpected text.\n")
     near_miss = _run(stack, _stubs(tmp_path))
     assert "[FAIL] Errors.log has actionable runtime errors" in near_miss.stdout
+
+    errors.write_text(EMPTY_POOL_LINE.replace("1072", "1073"))
+    other_pool = _run(stack, _stubs(tmp_path))
+    assert "[FAIL] Errors.log has actionable runtime errors" in other_pool.stdout
 
     errors.write_text("Pool Id abc is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned.\n")
     non_numeric = _run(stack, _stubs(tmp_path))
@@ -267,7 +271,7 @@ def test_known_smart_talk_16878_with_empty_pool_is_advisory(tmp_path):
 
     lines = _errors_log_lines(result)
     assert any(
-        line.startswith("[INFO]") and "(empty-pool, smart-talk-16878)" in line for line in lines
+        line.startswith("[INFO]") and "(empty-pool-1072, smart-talk-16878)" in line for line in lines
     ), lines
     assert not any(line.startswith("[FAIL]") for line in lines), lines
     _assert_complete_summary(result)
