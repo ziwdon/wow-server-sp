@@ -102,8 +102,7 @@ def test_api_backups_offloads_status_collection(tmp_path, monkeypatch):
 
 
 def test_api_logs_requests_forty_lines():
-    with patch("app.main.logs_svc.tail_filtered", return_value=[]) as mock_tail, \
-         patch("app.main.logs_svc.file_size", return_value=0):
+    with patch("app.main.logs_svc.tail_filtered", return_value=[]) as mock_tail:
         client = TestClient(app)
         resp = client.get("/api/logs")
     assert resp.status_code == 200
@@ -112,25 +111,103 @@ def test_api_logs_requests_forty_lines():
         assert c.kwargs["n"] == 40
 
 
-def test_api_logs_errors_tab_present_and_dirty_when_errors_exist():
-    with patch("app.main.logs_svc.tail_filtered", return_value=["an error line"]), \
-         patch("app.main.logs_svc.file_size", return_value=172):
-        client = TestClient(app)
-        resp = client.get("/api/logs")
-    assert resp.status_code == 200
-    assert 'id="errors-log"' in resp.text
-    assert "log-tab-dirty" in resp.text
-    assert "Runtime errors detected" in resp.text
+KNOWN_POOL_LINE = (
+    "Pool Id 1072 is empty (has no creatures, no gameobjects, no quests and no valid "
+    "child pools). The pool will not be spawned."
+)
+KNOWN_TALK_LINE = (
+    "SmartScript::ProcessAction: SMART_ACTION_TALK: EntryOrGuid 16878 SourceType 0 "
+    "EventType 61 TargetType 7 using non-existent Text id 0 for talker 29264, ignored."
+)
 
 
-def test_api_logs_clean_bar_when_errors_log_empty():
-    with patch("app.main.logs_svc.tail_filtered", return_value=[]), \
-         patch("app.main.logs_svc.file_size", return_value=0):
-        client = TestClient(app)
-        resp = client.get("/api/logs")
+def _logs_with_errors(monkeypatch, tmp_path, *lines):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "Errors.log").write_text("".join(line + "\n" for line in lines))
+    monkeypatch.setenv("AC_STACK_DIR", str(tmp_path))
+    with patch("app.main.app_events.events.snapshot", return_value=()):
+        resp = TestClient(app).get("/api/logs")
     assert resp.status_code == 200
-    assert "No runtime errors" in resp.text
-    assert "log-tab-dirty" not in resp.text
+    return resp.text
+
+
+def _errors_bar(body):
+    start = body.index('class="log-errors-bar')
+    return body[start:body.index("</div>", start)]
+
+
+def _errors_pre(body):
+    start = body.index('class="errors-log-lines"')
+    return body[start:body.index("</pre>", start)]
+
+
+def test_api_logs_errors_tab_present_and_dirty_when_errors_exist(monkeypatch, tmp_path):
+    body = _logs_with_errors(monkeypatch, tmp_path, "an error line")
+
+    assert 'id="errors-log"' in body
+    assert "log-tab-dirty" in body
+    assert "1 runtime error detected" in _errors_bar(body)
+    assert "known harmless" not in _errors_bar(body)
+
+
+def test_api_logs_clean_bar_when_errors_log_empty(monkeypatch, tmp_path):
+    body = _logs_with_errors(monkeypatch, tmp_path)
+
+    assert "No runtime errors" in body
+    assert "log-tab-dirty" not in body
+    assert 'class="known-errors"' not in body
+
+
+def test_api_logs_known_only_errors_are_marked_not_alarming(monkeypatch, tmp_path):
+    body = _logs_with_errors(
+        monkeypatch, tmp_path, KNOWN_TALK_LINE, KNOWN_POOL_LINE, KNOWN_TALK_LINE, KNOWN_TALK_LINE
+    )
+
+    bar = _errors_bar(body)
+    assert "log-errors-bar known" in bar
+    assert "Only known harmless warnings (4)" in bar
+    assert "log-tab-dirty" not in body
+    # Summary above the log: one entry per kind, with its reason and count.
+    summary = body[body.index('class="known-errors"'):body.index('class="errors-log-lines"')]
+    assert summary.index("Empty spawn pool") < summary.index("Shattered Hand Berserker emote skipped")
+    assert "mod-individual-progression" in summary
+    assert "×1" in summary and "×3" in summary
+    # Every known line is still shown, dimmed and tagged.
+    pre = _errors_pre(body)
+    assert pre.count('class="log-line-known"') == 4
+    assert pre.count('data-known="smart-talk-16878"') == 3
+
+
+def test_api_logs_mixed_errors_stay_dirty_and_only_tag_known_lines(monkeypatch, tmp_path):
+    body = _logs_with_errors(
+        monkeypatch, tmp_path, KNOWN_POOL_LINE, "[ERROR] <b>database</b> lost", "second real error"
+    )
+
+    bar = _errors_bar(body)
+    assert "log-errors-bar dirty" in bar
+    assert "2 runtime errors detected" in bar
+    assert "+1 known harmless" in bar
+    assert "log-tab-dirty" in body
+    pre = _errors_pre(body)
+    assert pre.count('class="log-line-known"') == 1
+    assert "[ERROR] &lt;b&gt;database&lt;/b&gt; lost\nsecond real error" in pre
+    assert "<b>database" not in body
+
+
+def test_api_logs_oversized_errors_log_is_dirty_without_classifying(monkeypatch, tmp_path):
+    from app.services.known_errors import ErrorsLogSummary
+
+    with patch(
+        "app.main.known_errors_svc.summarize_errors_log",
+        return_value=ErrorsLogSummary(size=3 * 1024 * 1024, too_large=True),
+    ):
+        body = _logs_with_errors(monkeypatch, tmp_path, KNOWN_POOL_LINE)
+
+    bar = _errors_bar(body)
+    assert "log-errors-bar dirty" in bar
+    assert "too large to classify (3.0 MB)" in bar
+    assert "log-tab-dirty" in body
 
 
 def test_api_logs_renders_app_events_as_fourth_final_tab_with_safe_fields():
@@ -153,7 +230,6 @@ def test_api_logs_renders_app_events_as_fourth_final_tab_with_safe_fields():
         occurrences=2,
     )
     with patch("app.main.logs_svc.tail_filtered", return_value=[]) as mock_tail, \
-         patch("app.main.logs_svc.file_size", return_value=0), \
          patch("app.main.app_events.events.snapshot", return_value=(error, warning)):
         response = TestClient(app).get("/api/logs")
 
@@ -188,7 +264,6 @@ def test_api_logs_renders_app_events_as_fourth_final_tab_with_safe_fields():
 
 def test_api_logs_renders_empty_app_events_state():
     with patch("app.main.logs_svc.tail_filtered", return_value=[]), \
-         patch("app.main.logs_svc.file_size", return_value=0), \
          patch("app.main.app_events.events.snapshot", return_value=()):
         response = TestClient(app).get("/api/logs")
 

@@ -801,16 +801,22 @@ fi
 # ==========================================================================
 # Check 16 — actionable worldserver errors since this boot
 # Errors.log is truncated on boot.  A non-empty file is actionable except for
-# two documented benign data warnings, advisory when they are the only content:
-#   - the graveyard_zone "does not have a linked graveyard" line (an upstream
-#     data gap), and
-#   - the "Pool Id N is empty (...). The pool will not be spawned." line (pool
-#     1072 "Mirelow": mod-individual-progression's zone_wetlands.sql deletes its
-#     members for a waypoint patrol but keeps the pool_template row; cores since
-#     azerothcore-wotlk #27026 log it once at startup).
-# The pool pattern is fully anchored (numeric id, exact wording) so a near-miss
-# line is still actionable.  Mixed content still fails so a benign line cannot
-# hide an unrelated runtime error.
+# the documented known-harmless lines in KNOWN_ERRORS_LOG_PATTERNS, advisory
+# when they are the only content:
+#   - graveyard-zone: "does not have a linked graveyard" (an upstream data gap);
+#   - empty-pool: "Pool Id N is empty (...)" (pool 1072 "Mirelow":
+#     mod-individual-progression's zone_wetlands.sql deletes its members for a
+#     waypoint patrol but keeps the pool_template row; cores since
+#     azerothcore-wotlk #27026 log it once at startup);
+#   - smart-talk-16878: Shattered Hand Berserker's enrage emote targets the
+#     action invoker, so it is skipped when a bot's guardian summon triggered
+#     it.  Only this verified row; other SMART_ACTION_TALK lines stay actionable.
+# Each entry is "key|ERE".  The list is shared verbatim with KNOWN_ERRORS in
+# wow-server-sp-admin/app/services/known_errors.py (the dashboard marks the same
+# lines); scripts/tests/test_known_errors_parity.py keeps the two identical.
+# Patterns use exact wording and numeric ids, so a near-miss line is still
+# actionable.  Mixed content still fails so a known line cannot hide an
+# unrelated runtime error.  Blank lines are ignored.
 #
 # VERIFY_ERRORS_LOG_ADVISORY: when set, downgrade an otherwise-actionable
 # Errors.log from FAIL to advisory.  Callers that do NOT modify the running AC
@@ -819,24 +825,33 @@ fi
 # admin change cannot have caused it, and the other AC checks still gate.  The
 # standalone post-install run leaves it unset and stays strict.
 # ==========================================================================
+KNOWN_ERRORS_LOG_PATTERNS=(
+    'graveyard-zone|Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard'
+    'empty-pool|^Pool Id [0-9]+ is empty \(has no creatures, no gameobjects, no quests and no valid child pools\)\. The pool will not be spawned\.$'
+    'smart-talk-16878|^SmartScript::ProcessAction: SMART_ACTION_TALK: EntryOrGuid 16878 SourceType 0 EventType 61 TargetType 7 using non-existent Text id 0 for talker [0-9]+, ignored\.$'
+)
 ERRORS_LOG="${STACK_DIR}/logs/Errors.log"
 if [ ! -f "$ERRORS_LOG" ]; then
     fail "Errors.log missing at $ERRORS_LOG"
 elif [ ! -s "$ERRORS_LOG" ]; then
     ok "Errors.log is empty (no actionable runtime errors)"
 else
-    graveyard_re='Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard'
-    empty_pool_re='^Pool Id [0-9]+ is empty \(has no creatures, no gameobjects, no quests and no valid child pools\)\. The pool will not be spawned\.$'
-    actionable_errors="$(grep -vE -e "$graveyard_re" -e "$empty_pool_re" "$ERRORS_LOG" 2>/dev/null || true)"
+    known_grep_args=()
+    for known_entry in "${KNOWN_ERRORS_LOG_PATTERNS[@]}"; do
+        known_grep_args+=(-e "${known_entry#*|}")
+    done
+    actionable_errors="$(grep -vE "${known_grep_args[@]}" "$ERRORS_LOG" 2>/dev/null | grep -v '^[[:space:]]*$' || true)"
     if [ -z "$actionable_errors" ]; then
-        if grep -qE "$empty_pool_re" "$ERRORS_LOG" 2>/dev/null; then
-            if grep -qE "$graveyard_re" "$ERRORS_LOG" 2>/dev/null; then
-                info "Errors.log contains only the known graveyard_zone data-gap and empty-pool warnings"
-            else
-                info "Errors.log contains only the known empty-pool warning (Pool Id N is empty; orphaned pool_template row)"
+        known_present=""
+        for known_entry in "${KNOWN_ERRORS_LOG_PATTERNS[@]}"; do
+            if grep -qE -e "${known_entry#*|}" "$ERRORS_LOG" 2>/dev/null; then
+                known_present="${known_present:+$known_present, }${known_entry%%|*}"
             fi
+        done
+        if [ -z "$known_present" ]; then
+            ok "Errors.log has only blank lines (no actionable runtime errors)"
         else
-            info "Errors.log contains only the known graveyard_zone data-gap warning"
+            info "Errors.log contains only known harmless warnings ($known_present); the admin dashboard explains each"
         fi
     elif [ -n "${VERIFY_ERRORS_LOG_ADVISORY:-}" ]; then
         info "Errors.log has runtime errors, treated as advisory (VERIFY_ERRORS_LOG_ADVISORY set); inspect $ERRORS_LOG"

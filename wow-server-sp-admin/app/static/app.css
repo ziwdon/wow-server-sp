@@ -240,6 +240,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 }
 .log-errors-bar.clean { background: #0e1f0e; color: var(--green); border-color: #2a3a1a; }
 .log-errors-bar.dirty { background: #1f0e0e; color: var(--red);   border-color: #3a1a1a; }
+.log-errors-bar.known { background: var(--sidebar-bg); color: var(--text-muted); }
 .errors-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
@@ -259,6 +260,45 @@ pre.logview {
   background: var(--log-bg);
   min-height: 0;
 }
+.errors-log-panel {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  background: var(--log-bg);
+}
+.errors-log-panel pre.errors-log-lines {
+  font-family: 'Consolas', 'Menlo', monospace;
+  font-size: 0.78rem;
+  color: var(--text-warm);
+  padding: 0.75rem 1rem;
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.known-errors {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.known-error { padding: 0.4rem 0; border-bottom: 1px solid var(--border-dark); font-size: 0.78rem; color: var(--text); }
+.known-error:last-child { border-bottom: 0; }
+.known-error p { margin: 0.2rem 0 0; color: var(--text-muted); font-size: 0.74rem; }
+.known-count { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.known-tag {
+  display: inline-block;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-family: system-ui, sans-serif;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: 0.1em;
+}
+.log-line-known { color: var(--text-dim); }
 .app-events-log {
   overflow-y: auto;
   flex: 1;
@@ -640,6 +680,8 @@ pre.logview {
     max-height: 280px;
   }
   pre.logview { max-height: 240px; word-break: break-all; }
+  .errors-log-panel { max-height: 240px; }
+  .errors-log-panel pre.errors-log-lines { word-break: break-all; }
 
   /* Settings page: single column */
   .settings-page {

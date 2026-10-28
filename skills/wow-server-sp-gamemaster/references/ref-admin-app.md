@@ -33,10 +33,15 @@
 - Server uptime
 
 ### Log Tabs (Dashboard)
-Three log views accessible via tab switcher:
+Four tabs: Server.log, Playerbots.log, Errors.log, App Events.
 - **Server Log** (`Server.log`) — boot/init log; quiet after world init (frozen mtime is normal)
 - **Playerbots Log** (`Playerbots.log`) — bot activity; chatty and mostly benign
-- **Errors Log** (`Errors.log`) — runtime errors; **0 bytes = clean server**
+- **Errors Log** (`Errors.log`) — runtime errors. The bar above the tabs has three states:
+  - green **No runtime errors** — the file is empty;
+  - neutral **Only known harmless warnings (N)** — every line is a documented harmless one (graveyard gap, empty pool 1072, the Shattered Hand Berserker emote). The tab shows a "Known harmless" list with each one's reason and count, and the matching lines are dimmed with a KNOWN tag. Nothing to do;
+  - red **N runtime errors detected** — at least one line is not known. Known lines in the same file stay dimmed, so the real error stands out. Also red when the file is over 1 MB (not classified).
+  The same list drives `verify-azerothcore.sh` Check 16 (INFO instead of FAIL).
+- **App Events** — the admin app's own warnings/errors since its last restart
 
 ### Actions (Dashboard)
 - **Restart** — graceful restart (announce → saveall → stop → wait → start)

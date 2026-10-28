@@ -190,7 +190,7 @@ def test_actionable_errors_log_fails_but_known_graveyard_noise_is_advisory(tmp_p
         "Table `graveyard_zone` incomplete: Zone 2037 Team 0 does not have a linked graveyard\n"
     )
     advisory = _run(stack, _stubs(tmp_path))
-    assert "known graveyard_zone data-gap warning" in advisory.stdout
+    assert "only known harmless warnings (graveyard-zone)" in advisory.stdout
     _assert_complete_summary(advisory)
 
 
@@ -226,7 +226,7 @@ def test_empty_pool_plus_graveyard_warnings_are_both_advisory(tmp_path):
 
     lines = _errors_log_lines(result)
     assert any(
-        line.startswith("[INFO]") and "graveyard_zone" in line and "empty-pool" in line for line in lines
+        line.startswith("[INFO]") and "(graveyard-zone, empty-pool)" in line for line in lines
     ), lines
     assert not any(line.startswith("[FAIL]") for line in lines), lines
     _assert_complete_summary(result)
@@ -249,6 +249,52 @@ def test_empty_pool_warning_does_not_hide_other_errors(tmp_path):
     errors.write_text("Pool Id abc is empty (has no creatures, no gameobjects, no quests and no valid child pools). The pool will not be spawned.\n")
     non_numeric = _run(stack, _stubs(tmp_path))
     assert "[FAIL] Errors.log has actionable runtime errors" in non_numeric.stdout
+
+
+SMART_TALK_16878_LINE = (
+    "SmartScript::ProcessAction: SMART_ACTION_TALK: EntryOrGuid 16878 SourceType 0 EventType 61 "
+    "TargetType 7 using non-existent Text id 0 for talker 29264, ignored.\n"
+)
+
+
+def test_known_smart_talk_16878_with_empty_pool_is_advisory(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("logs", "Errors.log").write_text(
+        SMART_TALK_16878_LINE * 3 + EMPTY_POOL_LINE + SMART_TALK_16878_LINE.replace("29264", "19668")
+    )
+
+    result = _run(stack, _stubs(tmp_path))
+
+    lines = _errors_log_lines(result)
+    assert any(
+        line.startswith("[INFO]") and "(empty-pool, smart-talk-16878)" in line for line in lines
+    ), lines
+    assert not any(line.startswith("[FAIL]") for line in lines), lines
+    _assert_complete_summary(result)
+
+
+def test_other_smart_talk_lines_stay_actionable(tmp_path):
+    stack = _stack(tmp_path)
+    errors = stack / "logs" / "Errors.log"
+    for line in (
+        SMART_TALK_16878_LINE.replace("EntryOrGuid 16878", "EntryOrGuid 17000"),
+        SMART_TALK_16878_LINE.replace("Text id 0", "Text id 2"),
+        SMART_TALK_16878_LINE.replace("TargetType 7", "TargetType 1"),
+    ):
+        errors.write_text(line)
+        result = _run(stack, _stubs(tmp_path))
+        assert "[FAIL] Errors.log has actionable runtime errors" in result.stdout, line
+
+
+def test_blank_only_errors_log_is_not_reported_as_known_warnings(tmp_path):
+    stack = _stack(tmp_path)
+    stack.joinpath("logs", "Errors.log").write_text("\n\n")
+
+    result = _run(stack, _stubs(tmp_path))
+
+    lines = _errors_log_lines(result)
+    assert any(line.startswith("[OK]") for line in lines), lines
+    assert not any("known harmless" in line for line in lines), lines
 
 
 def test_errors_log_advisory_flag_downgrades_actionable_errors(tmp_path):
