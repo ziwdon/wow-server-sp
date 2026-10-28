@@ -81,6 +81,7 @@ class FakeCli:
         self.upload_stores: dict[str, bytes | None] = {}  # name -> bytes to store; None = store nothing
         self.store_despite_error: set[str] = set()  # the upload raises, but the file did land
         self.trash_errors: dict[str, Exception] = {}
+        self.trash_noop: set[str] = set()  # trash "succeeds" but the file stays in the folder
         self.outside_vault_calls = 0
 
     def _enter(self, op: str, folder: str, *extra) -> None:
@@ -118,7 +119,8 @@ class FakeCli:
         self._enter("trash", folder, name)
         if name in self.trash_errors:
             raise self.trash_errors[name]
-        self.entries = [e for e in self.entries if e.name != name]
+        if name not in self.trash_noop:
+            self.entries = [e for e in self.entries if e.name != name]
 
     # --- views for assertions ---
 
@@ -469,9 +471,10 @@ def test_failed_trash_is_partial_and_does_not_stop_the_other_trashes(rig):
     assert out.result == "partial"
     assert out.failed == []
     assert out.error is not None and "trash" in out.error.lower()
-    assert "Proton Drive did not move it to the trash." in out.error
+    assert f"{D19}: Proton Drive did not move it to the trash." in out.error  # names the file
     assert D19 in [f.name for f in out.remote]  # still in the Drive
     assert D20 not in [f.name for f in out.remote]
+    assert rig.cli.count("list") == 2  # the folder is checked again after the trash calls
 
 
 def test_refused_trash_is_recorded_like_a_failed_one(rig):
@@ -485,7 +488,61 @@ def test_refused_trash_is_recorded_like_a_failed_one(rig):
 
     assert out.trashed == [D20]
     assert out.result == "partial"
+    assert out.error is not None and D19 in out.error
+
+
+def test_trash_reported_ok_but_still_listed_is_not_trashed(rig):
+    rig.local(NEW, "2026-10-28T03:00:00")
+    rig.remote(NEW)
+    rig.remote(D19)
+    rig.remote(D20)
+    rig.cli.trash_noop.add(D19)  # exit 0, ok: true -- and the file is still there
+
+    out = rig.run()
+
+    assert rig.cli.names("trash") == [D19, D20]
+    assert out.trashed == [D20]
+    assert out.result == "partial"
+    assert out.error is not None and D19 in out.error and D20 not in out.error
+    assert "still in the Drive folder" in out.error
+    assert out.failed == []
+    # `remote` comes from the listing taken after the trash calls.
+    assert sorted(f.name for f in out.remote) == [D19, NEW]
+    assert rig.cli.count("list") == 2
+
+
+def test_post_trash_listing_failure_is_partial_and_trashed_keeps_the_reported_names(rig):
+    rig.local(NEW, "2026-10-28T03:00:00")
+    rig.remote(NEW)
+    rig.remote(D19)
+    rig.remote(D20)
+    rig.cli.list_errors[2] = CloudCliError("failed", "Proton Drive reported an error.")  # the list after trashing
+
+    out = rig.run()
+
+    assert out.trashed == [D19, D20]  # as reported by the CLI; nothing confirmed them
+    assert out.result == "partial"
     assert out.error is not None
+    assert "not confirmed" in out.error and "Proton Drive reported an error." in out.error
+    assert out.uploaded == [] and out.failed == []
+    # No listing after the trash calls: the earlier one, minus what the CLI said it moved.
+    assert [f.name for f in out.remote] == [NEW]
+    assert out.listed is True
+
+
+def test_auth_error_on_the_post_trash_listing_aborts_the_run(rig):
+    rig.local(NEW, "2026-10-28T03:00:00")
+    rig.remote(NEW)
+    rig.remote(D19)
+    rig.cli.list_errors[2] = CloudCliError("auth", AUTH)
+
+    out = rig.run()
+
+    assert out.result == "error"
+    assert out.connection == "disconnected"
+    assert out.error == AUTH
+    assert out.trashed == [D19]  # reported before the session went away
+    assert [f.name for f in out.remote] == [NEW]
 
 
 def test_auth_error_while_trashing_aborts_the_run(rig):
@@ -718,3 +775,22 @@ def test_remote_holds_only_plain_backup_files(rig):
         RemoteFile(NEW, len(NEW), sha1(NEW.encode())),
         RemoteFile(D27, None, None),
     ]
+
+
+@pytest.mark.parametrize(
+    ("uploads", "trashes", "lists"),
+    [(False, False, 1), (True, False, 2), (False, True, 2), (True, True, 3)],
+)
+def test_the_folder_is_listed_again_only_after_uploads_and_after_trash_calls(rig, uploads, trashes, lists):
+    rig.local(NEW, "2026-10-28T03:00:00")
+    if not uploads:
+        rig.remote(NEW)
+    if trashes:
+        rig.remote(D19)
+
+    out = rig.run()
+
+    assert out.result == "ok"
+    assert bool(rig.cli.names("upload")) is uploads
+    assert bool(rig.cli.names("trash")) is trashes
+    assert rig.cli.count("list") == lists

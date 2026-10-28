@@ -14,7 +14,9 @@ The run, with the vault open only for its duration:
 3. upload every candidate the listing lacks, newest first, then (only if an
    upload was attempted) list again and judge each candidate by that listing;
 4. only if the newest candidate is confirmed present, trash what retention
-   allows from the final listing;
+   allows from the final listing, then (if any trash call was made) list once
+   more: a file the CLI reported trashed but that is still listed was not
+   trashed (spec 2a: "check ok, then re-list to confirm");
 5. report.
 
 Rules that keep this safe:
@@ -61,6 +63,7 @@ _UPLOAD_REFUSED = "The app refused to upload it: it is not a regular backup arch
 _UPLOAD_NOT_LISTED = "Proton Drive reported the upload as done, but the file is not in the Drive folder."
 _GONE = "The file is no longer in the Drive folder."
 _TRASH_REFUSED = "The app refused to move it to the trash."
+_STILL_LISTED = "Proton Drive said it was moved to the trash, but it is still in the Drive folder."
 
 
 @dataclass(frozen=True)
@@ -78,17 +81,21 @@ class RunOutcome:
 
     ``uploaded`` / ``conflicts`` / ``failed`` (newest first) are filled once the
     final listing is known, so an aborted run before that reports none of them;
-    ``uploaded`` holds only files the listing shows complete. ``trashed`` is
-    always what was really moved to the trash. ``failure_details`` maps each
-    ``failed`` name to a short reason.
+    ``uploaded`` holds only files the listing shows complete. ``trashed`` holds
+    the files the CLI reported moved to the trash and that the listing taken
+    afterwards no longer shows; if that last listing could not be taken (result
+    ``partial``) or the run was aborted during the trash step, it is only what the
+    CLI reported. ``failure_details`` maps each ``failed`` name to a short reason.
 
     ``remote`` is the plain backup files (``type == "file"``, a backup-archive
-    name) of the final listing, minus anything this run trashed; ``listed`` says
-    whether any listing succeeded (``remote == []`` alone cannot tell an empty
-    folder from a run that never saw it). On an abort after the first listing it
-    is that first listing. ``error`` is the abort reason, or, for a ``partial``
-    run, what went wrong while trashing (upload problems are in
-    ``failure_details``); ``None`` otherwise.
+    name) of the last successful listing of the run -- the one taken after the
+    trash calls when there were any. If that listing is missing (it failed, or
+    the run aborted after the trash calls), names the CLI reported trashed are
+    left out. ``listed`` says whether any listing succeeded (``remote == []``
+    alone cannot tell an empty folder from a run that never saw it). On an abort
+    after the first listing it is that first listing. ``error`` is the abort
+    reason, or, for a ``partial`` run, what went wrong while trashing (it names
+    the files; upload problems are in ``failure_details``); ``None`` otherwise.
     """
 
     result: str
@@ -130,7 +137,9 @@ class _Run:
     failed: list[str] = field(default_factory=list)
     failure_details: dict[str, str] = field(default_factory=dict)
     trashed: list[str] = field(default_factory=list)
-    trash_problems: list[str] = field(default_factory=list)  # one message per name that was not trashed
+    trash_problems: list[str] = field(default_factory=list)  # "<name>: <reason>", one per file not trashed
+    trash_unconfirmed: str | None = None  # why the listing after the trash calls could not be taken
+    trash_checked: bool = False  # `listing` was taken after the trash calls
     listing: list[RemoteEntry] = field(default_factory=list)
     listed: bool = False
 
@@ -141,13 +150,14 @@ class _Run:
     def outcome(self) -> RunOutcome:
         if self.error is not None:
             result, error = "error", self.error
-        elif self.failed or self.trash_problems:
+        elif self.failed or self.trash_problems or self.trash_unconfirmed:
             result, error = "partial", self._trash_note()
         elif self.conflicts:
             result, error = "warning", None
         else:
             result, error = "ok", None
-        gone = set(self.trashed)
+        # Only a listing that predates the trash calls needs the reported names taken out.
+        gone = set() if self.trash_checked else set(self.trashed)
         remote = [
             RemoteFile(name=e.name, size=e.size, sha1=e.sha1)
             for e in self.listing
@@ -168,11 +178,17 @@ class _Run:
         )
 
     def _trash_note(self) -> str | None:
-        if not self.trash_problems:
-            return None
-        count = len(self.trash_problems)
-        what = "1 old backup" if count == 1 else f"{count} old backups"
-        return f"Could not move {what} to the Drive trash. First problem: {self.trash_problems[0]}"
+        parts = []
+        if self.trash_problems:
+            count = len(self.trash_problems)
+            what = "1 old backup" if count == 1 else f"{count} old backups"
+            parts.append(f"Could not move {what} to the Drive trash. First problem: {self.trash_problems[0]}")
+        if self.trash_unconfirmed:
+            parts.append(
+                "The Drive folder could not be checked after moving old backups to the trash, "
+                f"so the move is not confirmed: {self.trash_unconfirmed}"
+            )
+        return " ".join(parts) or None
 
 
 def run_sync(
@@ -335,14 +351,32 @@ def _sync(run: _Run, cli: ProtonDriveCli, cfg: CloudConfig, backups_dir: Path, t
     # 4. Retention, only once the newest candidate is proven to be in the Drive right now.
     if not candidates or candidates[0].filename not in present:
         return
-    for name in plan_retention(final, cfg, today):
+    doomed = plan_retention(final, cfg, today)
+    for name in doomed:
         try:
             cli.trash(folder, name)
         except CloudCliError as exc:
             if exc.kind == "auth":
                 raise
-            run.trash_problems.append(exc.message)
+            run.trash_problems.append(f"{name}: {exc.message}")
         except ValueError:
-            run.trash_problems.append(_TRASH_REFUSED)
+            run.trash_problems.append(f"{name}: {_TRASH_REFUSED}")
         else:
-            run.trashed.append(name)
+            run.trashed.append(name)  # what the CLI reported; the listing below has the last word
+    if not doomed:
+        return
+
+    # The CLI exits 0 even for an item that was not moved: only the folder says what happened.
+    try:
+        after = cli.list_folder(folder)
+    except CloudCliError as exc:
+        if exc.kind == "auth":
+            raise
+        run.trash_unconfirmed = exc.message
+        return
+    run.listing = after
+    run.trash_checked = True
+    still_there = {e.name for e in after if e.type == "file" and e.name is not None}
+    for name in [n for n in run.trashed if n in still_there]:
+        run.trashed.remove(name)
+        run.trash_problems.append(f"{name}: {_STILL_LISTED}")
