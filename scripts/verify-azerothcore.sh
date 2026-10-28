@@ -804,10 +804,11 @@ fi
 # the documented known-harmless lines in KNOWN_ERRORS_LOG_PATTERNS, advisory
 # when they are the only content:
 #   - graveyard-zone: "does not have a linked graveyard" (an upstream data gap);
-#   - empty-pool: "Pool Id N is empty (...)" (pool 1072 "Mirelow":
+#   - empty-pool-1072: "Pool Id 1072 is empty (...)" ("Mirelow":
 #     mod-individual-progression's zone_wetlands.sql deletes its members for a
 #     waypoint patrol but keeps the pool_template row; cores since
-#     azerothcore-wotlk #27026 log it once at startup);
+#     azerothcore-wotlk #27026 log it once at startup).  Only pool 1072; any
+#     other empty pool stays actionable;
 #   - smart-talk-16878: Shattered Hand Berserker's enrage emote targets the
 #     action invoker, so it is skipped when a bot's guardian summon triggered
 #     it.  Only this verified row; other SMART_ACTION_TALK lines stay actionable.
@@ -827,7 +828,7 @@ fi
 # ==========================================================================
 KNOWN_ERRORS_LOG_PATTERNS=(
     'graveyard-zone|Table .*graveyard_zone.* incomplete: Zone [0-9]+ Team [01] does not have a linked graveyard'
-    'empty-pool|^Pool Id [0-9]+ is empty \(has no creatures, no gameobjects, no quests and no valid child pools\)\. The pool will not be spawned\.$'
+    'empty-pool-1072|^Pool Id 1072 is empty \(has no creatures, no gameobjects, no quests and no valid child pools\)\. The pool will not be spawned\.$'
     'smart-talk-16878|^SmartScript::ProcessAction: SMART_ACTION_TALK: EntryOrGuid 16878 SourceType 0 EventType 61 TargetType 7 using non-existent Text id 0 for talker [0-9]+, ignored\.$'
 )
 ERRORS_LOG="${STACK_DIR}/logs/Errors.log"

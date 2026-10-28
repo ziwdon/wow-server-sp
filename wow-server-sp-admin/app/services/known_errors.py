@@ -42,16 +42,16 @@ KNOWN_ERRORS: tuple[KnownError, ...] = (
         ),
     ),
     KnownError(
-        key="empty-pool",
+        key="empty-pool-1072",
         pattern=(
-            r"^Pool Id [0-9]+ is empty \(has no creatures, no gameobjects, no quests "
+            r"^Pool Id 1072 is empty \(has no creatures, no gameobjects, no quests "
             r"and no valid child pools\)\. The pool will not be spawned\.$"
         ),
-        title="Empty spawn pool",
+        title="Empty spawn pool 1072 (Mirelow)",
         reason=(
-            "Pool 1072 (Mirelow): mod-individual-progression replaced its spawn "
-            "points with one patrolling Mirelow but left the empty pool behind. "
-            "Mirelow still spawns; logged once per boot."
+            "mod-individual-progression replaced Mirelow's spawn points with one "
+            "patrolling Mirelow but left the empty pool behind. Mirelow still "
+            "spawns; logged once per boot."
         ),
     ),
     KnownError(

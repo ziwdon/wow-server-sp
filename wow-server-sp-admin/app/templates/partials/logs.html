@@ -24,12 +24,16 @@
 <pre id="playerbots-log" class="logview" role="tabpanel" aria-labelledby="playerbots-log-tab" style="display:none">{{ pb_lines|join('\n') }}</pre>
 <div id="errors-log" class="logview errors-log-panel" role="tabpanel" aria-labelledby="errors-log-tab" style="display:none">
   {% if errors.known %}
-  <ul class="known-errors" aria-label="Known harmless warnings">
-    {% for entry, count in errors.known %}
-    <li class="known-error"><span class="known-tag">known</span> <strong>{{ entry.title }}</strong> <span class="known-count">×{{ count }}</span><p>{{ entry.reason }}</p></li>
-    {% endfor %}
-  </ul>
+  <section class="known-errors-summary" aria-labelledby="known-errors-title">
+    <h3 id="known-errors-title" class="errors-section-title">Summary: known harmless warnings <span class="errors-section-note">these lines need no action</span></h3>
+    <ul class="known-errors">
+      {% for entry, count in errors.known %}
+      <li class="known-error"><span class="known-tag">known</span> <strong>{{ entry.title }}</strong> <span class="known-count">×{{ count }}</span><p>{{ entry.reason }}</p></li>
+      {% endfor %}
+    </ul>
+  </section>
   {% endif %}
+  <h3 class="errors-section-title">Raw log: last 40 lines</h3>
   <pre class="errors-log-lines">{% for line, known in errors_rows %}{% if known %}<span class="log-line-known" data-known="{{ known.key }}" title="{{ known.title }}"><span class="known-tag">known</span> {{ line }}</span>{% else %}{{ line }}{% endif %}{% if not loop.last %}{{ "\n" }}{% endif %}{% endfor %}</pre>
 </div>
 <div id="app-events-log" class="logview app-events-log" role="tabpanel" aria-labelledby="app-events-log-tab" style="display:none">
