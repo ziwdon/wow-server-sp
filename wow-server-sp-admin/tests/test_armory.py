@@ -2,8 +2,13 @@
 
 The DBC-backed helpers take any object with the ``DbcStore`` accessors; these tests use a
 small in-memory fake built from the real ``dbc`` record types, never real DBC files.
+The viewer-mapping tests use the three real characters of the 2026-10-29 spike
+(``tests/data/armory/spike_characters.json``).
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from app.services import wow_reference as wr
 from app.services.armory import (
@@ -11,13 +16,20 @@ from app.services.armory import (
     ENCHANT_PERM,
     ENCHANT_PRISMATIC,
     ENCHANT_SOCKETS,
+    OPTION_NAME_MAP,
+    Appearance,
+    EquippedItem,
     GlyphRow,
+    ViewerItem,
     glyph_rows,
+    map_customization,
+    model_id,
     normalize_search,
     parse_enchantments,
     split_specs,
     stats_rows,
     talent_trees,
+    viewer_items,
 )
 from app.services.dbc import Glyph, Spell, Talent, TalentTab
 
@@ -337,3 +349,264 @@ def test_every_class_has_a_power_type_with_a_name():
     assert set(wr.CLASS_POWER_TYPE) == set(wr.CLASSES)
     for power_type in wr.CLASS_POWER_TYPE.values():
         assert power_type in wr.POWER_NAMES
+
+
+# --- 3D viewer mapping (spec §2 "Mapping facts", §7.3) ---
+
+_SPIKE = json.loads(
+    (Path(__file__).parent / "data" / "armory" / "spike_characters.json").read_text("utf-8")
+)
+
+
+def _spike(name):
+    return next(c for c in _SPIKE["characters"] if c["name"] == name)
+
+
+def _gear(name):
+    return [EquippedItem(**piece) for piece in _spike(name)["gear"]]
+
+
+def _appearance(name):
+    c = _spike(name)
+    return Appearance(skin=c["skin"], face=c["face"], hair_style=c["hairStyle"],
+                      hair_color=c["hairColor"], facial_style=c["facialStyle"])
+
+
+def _option(name, option_id, n_choices):
+    """An ``Options[]`` entry; the choice ids are synthetic (option id * 100 + index):
+    the spike recorded the names, option ids and choice counts, not the choice ids."""
+    return {"Name": name, "Id": option_id,
+            "Choices": [{"Id": option_id * 100 + i, "Name": ""} for i in range(n_choices)]}
+
+
+def _pairs(items):
+    return [[v.inventory_type, v.display_id] for v in items]
+
+
+def _item(slot, inventory_type, display_id=1000, **kw):
+    return EquippedItem(slot=slot, entry=50000 + slot, name=f"Item {slot}",
+                        display_id=display_id, inventory_type=inventory_type, **kw)
+
+
+def test_model_id_uses_db_gender_as_is():
+    assert model_id(6, 1) == 12  # Tauren female
+    assert model_id(4, 0) == 7   # Night Elf male
+    assert model_id(7, 1) == 14  # Gnome female
+    assert model_id(1, 0) == 1 and model_id(11, 1) == 22  # Human male .. Draenei female
+    # the three spike characters (each rendered with exactly this id)
+    for name, expected in (("Vegivaca", 12), ("Sariel", 7), ("Pitokax", 14)):
+        c = _spike(name)
+        assert model_id(c["race"], c["gender"]) == expected, name
+
+
+def test_option_name_map_is_the_spike_table():
+    # spec §2 / spike page.html map=fixed; "Horn Style" is facial unless Tauren (see below)
+    assert OPTION_NAME_MAP == {
+        "Skin Color": "skin",
+        "Face": "face",
+        "Hair Style": "hair_style",
+        "Hair Color": "hair_color",
+        "Horn Color": "hair_color",
+        "Horn Style": "facial_style",
+        "Facial Hair": "facial_style",
+        "Piercings": "facial_style",
+        "Markings": "facial_style",
+        "Features": "facial_style",
+        "Earrings": "facial_style",
+        "Tusks": "facial_style",
+        "Hair": "facial_style",
+    }
+
+
+def test_map_customization_tauren_horns_by_name():
+    # Tauren female (model 12) Options[] in the measured order (x1-vegivaca-mapfix: face is
+    # 5th), plus an option the table does not know, inserted to check the order is kept.
+    options_json = [
+        _option("Skin Color", 74, 18),
+        _option("Horn Style", 77, 12),
+        _option("Horn Color", 78, 4),
+        _option("Hair", 79, 5),
+        _option("Body Size", 999, 3),
+        _option("Face", 379, 8),
+    ]
+    # Vegivaca: skin 1, face 1, hairStyle 2, hairColor 1, facialStyle 2
+    options, unknown = map_customization(options_json, 6, _appearance("Vegivaca"))
+    assert options == [
+        {"optionId": 74, "choiceId": 7401},    # skin 1
+        {"optionId": 77, "choiceId": 7702},    # Horn Style = hairStyle 2 (Tauren, "Long")
+        {"optionId": 78, "choiceId": 7801},    # Horn Color = hairColor 1
+        {"optionId": 79, "choiceId": 7902},    # Hair (braids) = facialStyle 2 ("Loops")
+        {"optionId": 999, "choiceId": 99900},  # unknown: first choice
+        {"optionId": 379, "choiceId": 37901},  # face 1
+    ]
+    assert unknown == ["Body Size"]
+
+
+def test_map_customization_human_names():
+    looks = Appearance(skin=3, face=5, hair_style=7, hair_color=2, facial_style=4)
+    human = [  # synthetic ids, the names every non-Tauren race shares
+        _option("Skin Color", 1, 10),
+        _option("Face", 2, 12),
+        _option("Hair Style", 3, 13),
+        _option("Hair Color", 4, 10),
+        _option("Facial Hair", 5, 9),
+    ]
+    assert map_customization(human, 1, looks) == ([
+        {"optionId": 1, "choiceId": 103},
+        {"optionId": 2, "choiceId": 205},
+        {"optionId": 3, "choiceId": 307},
+        {"optionId": 4, "choiceId": 402},
+        {"optionId": 5, "choiceId": 504},
+    ], [])
+
+    # the measured Night Elf male (r2-sariel) and Gnome female (x5-pitokax) option ids
+    night_elf = [_option("Skin Color", 40, 13), _option("Face", 41, 18),
+                 _option("Hair Style", 42, 12), _option("Hair Color", 43, 12),
+                 _option("Facial Hair", 44, 6)]
+    assert map_customization(night_elf, 4, _appearance("Sariel")) == ([
+        {"optionId": 40, "choiceId": 4004}, {"optionId": 41, "choiceId": 4101},
+        {"optionId": 42, "choiceId": 4200}, {"optionId": 43, "choiceId": 4300},
+        {"optionId": 44, "choiceId": 4402},
+    ], [])
+    gnome = [_option("Skin Color", 85, 11), _option("Face", 86, 14),
+             _option("Hair Style", 87, 12), _option("Hair Color", 88, 13),
+             _option("Earrings", 89, 7)]
+    assert map_customization(gnome, 7, _appearance("Pitokax")) == ([
+        {"optionId": 85, "choiceId": 8503}, {"optionId": 86, "choiceId": 8600},
+        {"optionId": 87, "choiceId": 8700}, {"optionId": 88, "choiceId": 8808},
+        {"optionId": 89, "choiceId": 8904},  # Earrings = facialStyle 4 ("Full Earrings")
+    ], [])
+
+
+def test_map_customization_horn_style_is_facial_except_for_tauren():
+    looks = Appearance(skin=0, face=0, hair_style=1, hair_color=0, facial_style=3)
+    horns = [_option("Horn Style", 7, 6)]
+    assert map_customization(horns, 6, looks)[0] == [{"optionId": 7, "choiceId": 701}]
+    assert map_customization(horns, 11, looks)[0] == [{"optionId": 7, "choiceId": 703}]
+
+
+def test_map_customization_out_of_range_choice_falls_back_and_odd_data_is_skipped():
+    looks = Appearance(skin=20, face=-1, hair_style=0, hair_color=0, facial_style=0)
+    options_json = [
+        _option("Skin Color", 1, 4),          # 20 is past the end: Choices[0]
+        _option("Face", 2, 4),                # negative never indexes from the end
+        {"Name": "Hair Style", "Id": 3, "Choices": []},  # no choices: no entry
+        {"Name": "Tattoo", "Id": 4, "Choices": []},      # unknown but empty: not reported
+        "not an option",
+        {"Name": "Hair Color", "Choices": [{"Id": 9}]},  # no option id
+        {"Name": "Facial Hair", "Id": 5, "Choices": ["x", {"Id": 501}]},  # no usable choice
+    ]
+    options, unknown = map_customization(options_json, 1, looks)
+    assert options == [{"optionId": 1, "choiceId": 100}, {"optionId": 2, "choiceId": 200}]
+    assert unknown == []
+    # an unknown name is reported once however often it appears
+    twice = [_option("Body Size", 8, 2), _option("Body Size", 9, 2)]
+    assert map_customization(twice, 1, looks) == (
+        [{"optionId": 8, "choiceId": 800}, {"optionId": 9, "choiceId": 900}], ["Body Size"])
+    assert map_customization([], 1, looks) == ([], [])
+
+
+def test_equipped_item_needs_only_the_identifying_fields():
+    item = EquippedItem(slot=15, entry=19364, name="Ashkandi",
+                        display_id=32000, inventory_type=17)
+    assert (item.item_class, item.subclass, item.quality, item.item_level) == (0, 0, 0, 0)
+    assert item.stat_types == () and item.stat_values == ()
+    assert item.socket_colors == () and item.spell_ids == () and item.spell_triggers == ()
+    assert item.enchantments == {} and item.random_property_id == 0
+    assert item.allowable_class == -1 and item.description == ""
+    assert item.holy_res == item.arcane_res == 0
+
+
+def test_viewer_items_tauren_warrior_matches_spike():
+    # Vegivaca: two-hander + bow + tabard + shirt all sent; the bow is sent because the
+    # off hand (slot 16) is empty. Exactly the items x1-vegivaca-mapfix rendered.
+    items, omitted = viewer_items(_gear("Vegivaca"))
+    assert _pairs(items) == [
+        [1, 32493], [3, 28351], [4, 9995], [5, 33983], [6, 31924], [7, 28716],
+        [8, 31914], [9, 33818], [10, 34298], [16, 34329], [17, 32000], [15, 33857],
+        [19, 20621],
+    ]
+    assert [v.slot for v in items] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 17, 18]
+    assert omitted == [1, 10, 11, 12, 13]  # neck, rings, trinkets
+    assert items[0] == ViewerItem(slot=0, inventory_type=1, display_id=32493)
+
+
+def test_viewer_items_druid_matches_spike():
+    # Sariel (r2-sariel): two-hander, no off hand, no ranged
+    items, omitted = viewer_items(_gear("Sariel"))
+    assert _pairs(items) == [
+        [1, 27234], [3, 27236], [5, 31074], [6, 28177], [7, 27235], [8, 31070],
+        [9, 30805], [10, 31071], [16, 27087], [17, 31817], [19, 20621],
+    ]
+    assert omitted == [1, 10, 11, 12, 13]
+
+
+def test_viewer_items_rogue_daggers_keep_thrown_out():
+    # Pitokax: dagger in each hand + a thrown axe (type 25 = the main-hand key). Sent, the
+    # axe replaced the main-hand dagger (r3-pitokax); without it (x5) both daggers render.
+    items, omitted = viewer_items(_gear("Pitokax"))
+    assert _pairs(items) == [
+        [1, 33743], [3, 27652], [4, 9906], [5, 31105], [6, 31339], [7, 31340],
+        [8, 31109], [9, 31106], [10, 31503], [16, 29824], [13, 31606], [22, 3363],
+    ]
+    assert [v.slot for v in items][-2:] == [15, 16]
+    assert omitted == [1, 10, 11, 12, 13, 17]
+
+
+def test_viewer_items_bow_sent_when_offhand_empty_and_dropped_when_shield():
+    gear = _gear("Vegivaca")  # two-hander in 15, bow (type 15) in 17, nothing in 16
+    items, omitted = viewer_items(gear)
+    assert [15, 33857] in _pairs(items) and 17 not in omitted
+
+    shield = _item(16, 14, 40000, item_class=4, subclass=6)
+    items, omitted = viewer_items(gear + [shield])
+    assert [14, 40000] in _pairs(items)
+    assert [15, 33857] not in _pairs(items)
+    assert omitted == [1, 10, 11, 12, 13, 17]
+
+
+def test_viewer_items_thrown_and_gun_only_without_a_main_hand():
+    for ranged_type in (25, 26):  # thrown; gun/crossbow/wand
+        ranged = _item(17, ranged_type, 7000)
+        assert viewer_items([ranged]) == ([ViewerItem(17, ranged_type, 7000)], [])
+        # an off-hand item does not block it (different hand key)
+        items, omitted = viewer_items([ranged, _item(16, 23, 6000)])
+        assert _pairs(items) == [[23, 6000], [ranged_type, 7000]] and omitted == []
+        # a main-hand item does
+        items, omitted = viewer_items([_item(15, 21, 5000), ranged])
+        assert _pairs(items) == [[21, 5000]] and omitted == [17]
+
+
+def test_viewer_items_offhand_types():
+    def offhand(inventory_type):
+        items, omitted = viewer_items([_item(16, inventory_type, 3363)])
+        assert omitted == []
+        return items[0].inventory_type
+
+    assert offhand(14) == 14  # shield
+    assert offhand(23) == 23  # held in off hand
+    assert offhand(13) == 22  # one-hander
+    assert offhand(22) == 22  # off-hand weapon
+    assert offhand(17) == 22  # Titan's Grip two-hander
+    # the main hand keeps its own type whatever it is
+    for main_type in (13, 17, 21):
+        assert viewer_items([_item(15, main_type)])[0][0].inventory_type == main_type
+
+
+def test_viewer_items_relic_never_sent():
+    relic = _item(17, 28, 4444)
+    assert viewer_items([relic]) == ([], [17])
+    items, omitted = viewer_items([_item(15, 17, 5000), relic])
+    assert _pairs(items) == [[17, 5000]] and omitted == [17]
+    # any other type in the ranged slot (should not happen) is left out too
+    assert viewer_items([_item(17, 13)]) == ([], [17])
+
+
+def test_viewer_items_sorted_by_slot_and_robe_sent_as_is():
+    robe = _item(4, 20, 8888)
+    gear = [g for g in reversed(_gear("Pitokax")) if g.slot != 4] + [robe]
+    items, omitted = viewer_items(gear)
+    assert [v.slot for v in items] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16]
+    assert omitted == [1, 10, 11, 12, 13, 17]
+    assert ViewerItem(4, 20, 8888) in items
+    assert viewer_items([]) == ([], [])
