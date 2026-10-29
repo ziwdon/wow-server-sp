@@ -131,10 +131,10 @@ Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that co
 - Archives found in the Drive get an **In Drive** badge in the backups list. After a failed run the next automatic attempt waits 60 minutes (**Upload now** ignores that); failing for over 26 hours with no success shows **Stalled**.
 - The panel's "Recent cloud runs" lists the last runs (`ok`, `warning` = conflicts only, `partial` = some files failed, `error` = the run stopped).
 
-**Connect** (needs a TPM 2.0 chip; with none the panel says **Not available** and why, and there is no software-only fallback)
+**Connect** (needs a TPM 2.0 chip; with none the panel says **Not available** and why, and there is no software-only fallback; a chip that failed only briefly is checked again about hourly, and **Disconnect** stays available there while a session is stored)
 1. Click **Connect to Proton Drive**, open the link on your own device (copyable; it expires in 10 minutes), sign in on Proton's page and approve. The Proton password is never typed on the server.
 2. Set the **Drive folder** (e.g. `/my-files/WoW Backups`; must start with `/my-files/` or `/shared-with-me/`). If it does not exist, **Create folder** makes the last part of the path (the folders above must exist).
-3. Tick *Copy new backups to Proton Drive automatically*, optionally pick which backup kinds to copy and the keep-for days, **Save cloud settings**. **Upload now** works as soon as the connection and folder are good, even with automatic copying off.
+3. Tick *Copy new backups to Proton Drive automatically*, optionally pick which backup kinds to copy and the keep-for days, **Save cloud settings**. **Upload now** works as soon as the connection and folder are good, even with automatic copying off. The folder cannot be changed while an upload, folder check or Create folder is running (the panel says it is busy; other settings still save).
 
 **Disconnect** deletes the stored session from this server and stops the copies (settings are kept). It does **not** end the session at Proton: revoke it in the Proton account's session list. The same applies after uninstalling the admin app (the uninstaller prints the reminder).
 
@@ -148,7 +148,7 @@ Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that co
 - Safer later: a separate Proton account with one folder shared to it as editor (folder `/shared-with-me/…`), so the worst case is a damaged backups folder.
 - Only Proton receives data; its CLI sends crash reports/telemetry per the account's preference.
 
-**Troubleshooting:** "Can't unlock the stored session — reconnect" = the TPM seal no longer opens (TPM cleared, or the data folder was copied to another machine): press **Reconnect**. A stale `TPM_DEVICE=/dev/tpmrm0` in `azerothcore-admin/.env` on a host without that device stops the admin container from starting — set `TPM_DEVICE=/dev/null` (or delete the line and redeploy). `verify-azerothcore-admin.sh` prints a single advisory `[INFO] cloud backup: …` line; it never fails the verify.
+**Troubleshooting:** "Can't unlock the stored session — reconnect" = the TPM seal no longer opens (TPM cleared, or the data folder was copied to another machine): press **Reconnect**. A stale `TPM_DEVICE=/dev/tpmrm0` in `azerothcore-admin/.env` on a host without that device stops the admin container from starting — set `TPM_DEVICE=/dev/null` (or delete the line and redeploy). "Could not save the cloud status file — check that the admin data folder is writable." = `azerothcore-admin/data/cloud/state.json` cannot be written; the panel still shows the latest result from memory until a write works (a restart loses it). `verify-azerothcore-admin.sh` prints a single advisory `[INFO] cloud backup: …` line (when connected, with the last success's age, e.g. `last success 5h ago (<time>)`); it never fails the verify.
 
 ## Key Architecture Notes
 

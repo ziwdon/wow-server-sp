@@ -17,6 +17,11 @@ for the design.
 ./scripts/verify-azerothcore-admin.sh
 ```
 
+The verifier also prints one advisory `[INFO] cloud backup: …` line (off,
+connected with how long ago the last success was, e.g. `last success 5h ago
+(<time>)`, or the connection state and last result). It never counts as a
+failure: a problem at Proton must not fail a verify.
+
 ## Development tests
 
 The production image installs only `requirements.txt`. Run the test suite in a
@@ -48,10 +53,6 @@ or server credentials. It covers keyboard/focus/dialog/mobile/filter controls, H
 status swaps, Apply/Rollback SSE completion, fetch failures, and focused axe/
 HTML semantics.
 
-The verifier also prints one advisory `[INFO] cloud backup: …` line (off,
-connected with the last success, or the connection state and last result). It
-never counts as a failure: a problem at Proton must not fail a verify.
-
 ## Cloud backup (Proton Drive)
 
 Optional. It copies each backup archive to a folder in your own Proton Drive,
@@ -75,7 +76,9 @@ is set up in the **Cloud backup · Proton Drive** panel on the **Backups** tab.
 **Connecting**
 
 1. The server needs a TPM 2.0 chip. Without one the panel says **Not
-   available** and why; there is no software-only fallback.
+   available** and why; there is no software-only fallback. If the chip only
+   failed for a moment, the app checks it again about every hour. **Disconnect**
+   still shows there while a session is stored on this server.
 2. Click **Connect to Proton Drive**, open the link on your own device (you can
    copy it), sign in on Proton's page and approve. Your Proton password is typed
    only there, never on the server.
@@ -86,6 +89,8 @@ is set up in the **Cloud backup · Proton Drive** panel on the **Backups** tab.
 
 **Settings:** automatic copy on or off, the Drive folder, which kinds of backup
 to copy (all of them by default), and how many days copies stay in the Drive.
+The folder cannot be changed while an upload, a folder check or **Create
+folder** is running (the panel says it is busy); the other settings can.
 
 **Disconnect** removes the stored session from this server and stops the
 copies; your settings are kept. It does **not** end the session at Proton: to do
