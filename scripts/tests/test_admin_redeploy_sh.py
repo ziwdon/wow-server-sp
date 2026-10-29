@@ -1,5 +1,6 @@
 import fcntl
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -17,7 +18,7 @@ def _executable(path: Path, body: str) -> None:
 def _stack(tmp_path: Path) -> Path:
     stack = tmp_path / "admin-stack"
     (stack / "build" / "app" / "static").mkdir(parents=True)
-    for name in ("htmx.min.js", "htmx-sse.js"):
+    for name in ("htmx.min.js", "htmx-sse.js", "jquery.min.js"):
         (stack / "build" / "app" / "static" / name).write_bytes(b"x" * 201)
     stack.joinpath("docker-compose.yml").write_text("old-compose\n")
     stack.joinpath(".env").write_text("TAILSCALE_IP=100.64.0.5\nADMIN_PORT=8765\n")
@@ -41,6 +42,10 @@ if [ "$1" = compose ]; then
     exit 0
 fi
 if [ "$1" = image ]; then
+    exit 0
+fi
+if [ "$1 $2" = "volume inspect" ]; then
+    if [ "${ADMIN_REDEPLOY_CASE:-healthy}" = no-client-data ]; then exit 1; fi
     exit 0
 fi
 if [ "$1" = inspect ]; then
@@ -77,6 +82,22 @@ if [ -n "${ADMIN_REDEPLOY_SUDO_LOG:-}" ]; then echo "$@" >> "$ADMIN_REDEPLOY_SUD
 exec "$@"
 """)
     _executable(bind / "sleep", "#!/bin/sh\nexit 0\n")
+    # curl: logs each call; writes a 300-byte body to -o, or fails (ADMIN_REDEPLOY_CURL=fail).
+    _executable(bind / "curl", """#!/bin/bash
+echo "curl $*" >> "${ADMIN_REDEPLOY_CURL_LOG:-/dev/null}"
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ "${ADMIN_REDEPLOY_CURL:-ok}" = fail ]; then
+    echo "curl: (6) Could not resolve host: unpkg.com" >&2
+    exit 6
+fi
+head -c 300 /dev/zero | tr '\\0' j > "$out"
+""")
     return bind
 
 
@@ -237,3 +258,96 @@ def test_redeploy_uses_sudo_to_create_missing_data_dir(tmp_path):
         f"chown {uid_gid} {stack}/data",
     ]
     assert (stack / "data").is_dir()
+
+
+def test_missing_client_data_volume_stops_before_anything_is_staged(tmp_path):
+    stack = _stack(tmp_path)
+    result, calls = _run(stack, _stubs(tmp_path), "no-client-data")
+
+    assert result.returncode == 1
+    assert (
+        "client-data volume azerothcore_ac-client-data not found — install AzerothCore first "
+        "(Phase 4 creates it)"
+    ) in result.stderr
+    assert calls == "volume inspect azerothcore_ac-client-data\n"
+    assert not [p for p in stack.glob(".redeploy.*") if p.is_dir()]  # no stage dir (the lock file stays)
+    assert stack.joinpath("docker-compose.yml").read_text() == "old-compose\n"
+
+
+JQUERY_URL = "https://unpkg.com/jquery@3.7.1/dist/jquery.min.js"
+
+
+def _without_jquery(stack: Path, placeholder: bool) -> Path:
+    """An install from before the Armory: the HTMX files, no (or only a placeholder) jquery.min.js."""
+    kept = stack / "build" / "app" / "static" / "jquery.min.js"
+    if placeholder:
+        kept.write_text("// placeholder; real jQuery 3.7.1 vendored at install time\n")
+    else:
+        kept.unlink()
+    return kept
+
+
+def test_redeploy_backfills_jquery_once_from_the_pinned_url(tmp_path):
+    for placeholder in (False, True):
+        root = tmp_path / ("placeholder" if placeholder else "missing")
+        root.mkdir()
+        stack = _stack(root)
+        kept = _without_jquery(stack, placeholder)
+        bind = _stubs(root)
+        curl_log = bind / "curl.log"
+        assert shutil.which("curl", path=f"{bind}:{os.environ['PATH']}") == str(bind / "curl")
+
+        result, calls = _run(stack, bind, "healthy", extra_env={"ADMIN_REDEPLOY_CURL_LOG": str(curl_log)})
+
+        assert result.returncode == 0, result.stderr
+        fetches = curl_log.read_text().splitlines()
+        assert len(fetches) == 1 and fetches[0].endswith(" " + JQUERY_URL)
+        # Bounded while redeploy holds .redeploy.lock: a stalled unpkg cannot keep it.
+        assert fetches[0].startswith("curl -sSfL --connect-timeout 15 --max-time 120 -o "), fetches[0]
+        assert f"-o {stack}/build/app/static/jquery.min.js " not in fetches[0]  # a temp file, moved into place
+        assert calls.count(" up") == 1, f"calls={calls!r}\nstderr={result.stderr}"
+        # A copy is kept for the next redeploys, readable like the installer's curl output.
+        assert kept.read_bytes() == b"j" * 300
+        assert stat.S_IMODE(kept.stat().st_mode) == 0o644
+        assert not list(kept.parent.glob(".jquery.min.js.*"))
+
+        # The next redeploy carries the kept copy: no second fetch.
+        (root / "again").mkdir()
+        again_bind = _stubs(root / "again")
+        again_log = again_bind / "curl.log"
+        again, _ = _run(stack, again_bind, "healthy", extra_env={"ADMIN_REDEPLOY_CURL_LOG": str(again_log)})
+        assert again.returncode == 0, again.stderr
+        assert not again_log.exists()
+
+
+def test_failed_jquery_fetch_aborts_before_any_build(tmp_path):
+    stack = _stack(tmp_path)
+    kept = _without_jquery(stack, placeholder=False)
+    bind = _stubs(tmp_path)
+    result, calls = _run(
+        stack, bind, "healthy",
+        extra_env={"ADMIN_REDEPLOY_CURL": "fail", "ADMIN_REDEPLOY_CURL_LOG": str(bind / "curl.log")},
+    )
+
+    assert result.returncode == 1
+    assert len((bind / "curl.log").read_text().splitlines()) == 1  # fetched once, never retried
+    assert "WARNING: could not fetch jquery.min.js." in result.stderr
+    assert "ERROR: jquery.min.js is a placeholder (0 bytes)" in result.stderr
+    assert f'curl -sSfL -o "{stack}/build/app/static/jquery.min.js" "{JQUERY_URL}"' in result.stderr
+    assert " build" not in calls and " up" not in calls and " down" not in calls
+    assert stack.joinpath("docker-compose.yml").read_text() == "old-compose\n"
+    assert not kept.exists()
+
+
+def test_redeploy_never_fetches_htmx(tmp_path):
+    stack = _stack(tmp_path)
+    (stack / "build" / "app" / "static" / "htmx.min.js").unlink()
+    bind = _stubs(tmp_path)
+    curl_log = bind / "curl.log"
+    result, calls = _run(stack, bind, "healthy", extra_env={"ADMIN_REDEPLOY_CURL_LOG": str(curl_log)})
+
+    assert result.returncode == 1
+    assert not curl_log.exists()
+    assert "ERROR: htmx.min.js is a placeholder (0 bytes)" in result.stderr
+    assert '"https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js"' in result.stderr
+    assert " build" not in calls and " up" not in calls

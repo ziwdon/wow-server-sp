@@ -1,4 +1,4 @@
-"""Static WoW 3.3.5a reference names for admin stats display."""
+"""Static WoW 3.3.5a reference names for the admin's stats, players and armory pages."""
 
 import time
 from datetime import datetime, timezone
@@ -284,6 +284,219 @@ ZONES = {
     4896: "The Frozen Throne",
     4897: "The Sanctum of Blood",
     4987: "The Ruby Sanctum",
+}
+
+# --- Armory: items, stats and powers (WoW 3.3.5a) ---
+# Ids are the pinned core's enums (rev 3f2969dd); names are what the 3.3.5 client shows.
+
+# SharedDefines.h ItemQualities / ItemQualityColors (7 = heirloom shares the artifact colour)
+QUALITY_COLORS = {
+    0: "#9d9d9d",
+    1: "#ffffff",
+    2: "#1eff00",
+    3: "#0070dd",
+    4: "#a335ee",
+    5: "#ff8000",
+    6: "#e6cc80",
+    7: "#e6cc80",
+}
+
+QUALITY_NAMES = {
+    0: "Poor",
+    1: "Common",
+    2: "Uncommon",
+    3: "Rare",
+    4: "Epic",
+    5: "Legendary",
+    6: "Artifact",
+    7: "Heirloom",
+}
+
+# ItemTemplate.h InventoryType -> the client's INVTYPE_* strings (the tooltip's slot line;
+# the weapon/armour kind, e.g. "Shield" or "Bow", comes from ITEM_SUBCLASS_NAMES)
+INVENTORY_TYPE_NAMES = {
+    0: "Non-equippable",
+    1: "Head",
+    2: "Neck",
+    3: "Shoulder",
+    4: "Shirt",
+    5: "Chest",
+    6: "Waist",
+    7: "Legs",
+    8: "Feet",
+    9: "Wrist",
+    10: "Hands",
+    11: "Finger",
+    12: "Trinket",
+    13: "One-Hand",
+    14: "Off Hand",          # INVTYPE_SHIELD
+    15: "Ranged",            # INVTYPE_RANGED (bows)
+    16: "Back",
+    17: "Two-Hand",
+    18: "Bag",
+    19: "Tabard",
+    20: "Chest",             # INVTYPE_ROBE
+    21: "Main Hand",
+    22: "Off Hand",
+    23: "Held In Off-hand",
+    24: "Ammo",
+    25: "Thrown",
+    26: "Ranged",            # INVTYPE_RANGEDRIGHT (guns, crossbows, wands)
+    27: "Quiver",
+    28: "Relic",
+}
+
+# (item class, subclass): ItemTemplate.h ItemSubclassWeapon (class 2) / ItemSubclassArmor (4)
+ITEM_SUBCLASS_NAMES = {
+    (2, 0): "Axe",
+    (2, 1): "Axe",
+    (2, 2): "Bow",
+    (2, 3): "Gun",
+    (2, 4): "Mace",
+    (2, 5): "Mace",
+    (2, 6): "Polearm",
+    (2, 7): "Sword",
+    (2, 8): "Sword",
+    (2, 9): "Obsolete",
+    (2, 10): "Staff",
+    (2, 11): "Exotic",
+    (2, 12): "Exotic",
+    (2, 13): "Fist Weapon",
+    (2, 14): "Miscellaneous",
+    (2, 15): "Dagger",
+    (2, 16): "Thrown",
+    (2, 17): "Spear",
+    (2, 18): "Crossbow",
+    (2, 19): "Wand",
+    (2, 20): "Fishing Pole",
+    (4, 0): "Miscellaneous",
+    (4, 1): "Cloth",
+    (4, 2): "Leather",
+    (4, 3): "Mail",
+    (4, 4): "Plate",
+    (4, 5): "Buckler",
+    (4, 6): "Shield",
+    (4, 7): "Libram",
+    (4, 8): "Idol",
+    (4, 9): "Totem",
+    (4, 10): "Sigil",
+}
+
+# ItemTemplate.h ItemModType (item_template.stat_typeN); 40 (feral AP) is "not in 3.3" there
+STAT_NAMES = {
+    0: "Mana",
+    1: "Health",
+    3: "Agility",
+    4: "Strength",
+    5: "Intellect",
+    6: "Spirit",
+    7: "Stamina",
+    12: "Defense Rating",
+    13: "Dodge Rating",
+    14: "Parry Rating",
+    15: "Block Rating",
+    16: "Melee Hit Rating",
+    17: "Ranged Hit Rating",
+    18: "Spell Hit Rating",
+    19: "Melee Critical Strike Rating",
+    20: "Ranged Critical Strike Rating",
+    21: "Spell Critical Strike Rating",
+    22: "Melee Hit Avoidance Rating",
+    23: "Ranged Hit Avoidance Rating",
+    24: "Spell Hit Avoidance Rating",
+    25: "Melee Critical Avoidance Rating",
+    26: "Ranged Critical Avoidance Rating",
+    27: "Spell Critical Avoidance Rating",
+    28: "Melee Haste Rating",
+    29: "Ranged Haste Rating",
+    30: "Spell Haste Rating",
+    31: "Hit Rating",
+    32: "Critical Strike Rating",
+    33: "Hit Avoidance Rating",
+    34: "Critical Strike Avoidance Rating",
+    35: "Resilience Rating",
+    36: "Haste Rating",
+    37: "Expertise Rating",
+    38: "Attack Power",
+    39: "Ranged Attack Power",
+    41: "Spell Healing",
+    42: "Spell Damage",
+    43: "Mana Regeneration",
+    44: "Armor Penetration Rating",
+    45: "Spell Power",
+    46: "Health Regeneration",
+    47: "Spell Penetration",
+    48: "Block Value",
+}
+
+# SharedDefines.h SpellSchools (item_template.dmg_typeN)
+DAMAGE_TYPE_NAMES = {
+    0: "Physical",
+    1: "Holy",
+    2: "Fire",
+    3: "Nature",
+    4: "Frost",
+    5: "Shadow",
+    6: "Arcane",
+}
+
+# Player.h EquipmentSlots: character_inventory.slot for bag 0, slots 0-18
+EQUIP_SLOT_NAMES = {
+    0: "Head",
+    1: "Neck",
+    2: "Shoulder",
+    3: "Shirt",
+    4: "Chest",
+    5: "Waist",
+    6: "Legs",
+    7: "Feet",
+    8: "Wrist",
+    9: "Hands",
+    10: "Finger 1",
+    11: "Finger 2",
+    12: "Trinket 1",
+    13: "Trinket 2",
+    14: "Back",
+    15: "Main Hand",
+    16: "Off Hand",
+    17: "Ranged",
+    18: "Tabard",
+}
+
+# ItemTemplate.h ItemBondingType (0 = no bind, no line); 5 is "not used in game" there
+BONDING_NAMES = {
+    1: "Binds when picked up",
+    2: "Binds when equipped",
+    3: "Binds when used",
+    4: "Quest Item",
+    5: "Quest Item",
+}
+
+# SharedDefines.h Powers: character_stats.maxpower<N> holds power type N - 1
+POWER_NAMES = {
+    0: "Mana",
+    1: "Rage",
+    2: "Focus",
+    3: "Energy",
+    4: "Happiness",
+    5: "Runes",
+    6: "Runic power",
+}
+
+# The power bar each class shows (ChrClasses.dbc DisplayPower). Every player saves max
+# rage and max energy whatever its class (Player::InitStatsForLevel), so the class, not a
+# non-zero value, decides which one the armory shows.
+CLASS_POWER_TYPE = {
+    1: 1,   # Warrior: rage
+    2: 0,   # Paladin: mana
+    3: 0,   # Hunter
+    4: 3,   # Rogue: energy
+    5: 0,   # Priest
+    6: 6,   # Death Knight: runic power
+    7: 0,   # Shaman
+    8: 0,   # Mage
+    9: 0,   # Warlock
+    11: 0,  # Druid (caster form)
 }
 
 

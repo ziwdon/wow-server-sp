@@ -16,9 +16,9 @@ from app.services.players import (
 )
 
 
-def _raw(username, name, class_id, race_id, level, online, zone, latency=10, logout_time=0):
+def _raw(username, name, class_id, race_id, level, online, zone, latency=10, logout_time=0, guid=1):
     """A roster row as the SQL SELECT returns it."""
-    return (username, name, class_id, race_id, level, online, zone, latency, logout_time)
+    return (username, name, class_id, race_id, level, online, zone, latency, logout_time, guid)
 
 
 def test_char_row_maps_names_colors_faction():
@@ -35,6 +35,19 @@ def test_char_row_maps_names_colors_faction():
     assert c.online is False
     assert c.zone_name == "Orgrimmar"
     assert c.last_logout == 1716000000
+
+
+def test_char_row_and_rank_rows_carry_guid():
+    """The armory links use the guid the SQL selected (c.guid), never one inferred from a name."""
+    from app.services.players import pvp_rank_rows
+    assert char_row(_raw("CARLOS", "Sariel", 11, 4, 25, 1, 1519, guid=2506)).guid == 2506
+    pve = rank_rows([("Vegivaca", 1, 6, 58, 37, 31), ("Sariel", 11, 4, 25, None, 2506)])
+    assert [(r.name, r.guid) for r in pve] == [("Vegivaca", 31), ("Sariel", 2506)]
+    pvp = pvp_rank_rows([("Pitocas", 3, 3, 42, 1500, 44)])
+    assert [(r.name, r.guid) for r in pvp] == [("Pitocas", 44)]
+    # apply_presence rebuilds the rows; the guid survives it.
+    rows = apply_presence([char_row(_raw("CARLOS", "Sariel", 11, 4, 25, 1, 1519, guid=2506))], {})
+    assert rows[0].online_now is True and rows[0].guid == 2506
 
 
 def test_char_row_starts_not_online_now():
@@ -121,10 +134,10 @@ def test_group_by_account_groups_az_and_orders_within_level_then_name():
 
 
 def test_rank_rows_assigns_ranks_and_preserves_none_ilvl():
-    # pre-ordered top rows: (name, class_id, race_id, level, avg_ilvl)
+    # pre-ordered top rows: (name, class_id, race_id, level, avg_ilvl, guid)
     rows = [
-        ("Vegivaca", 1, 6, 58, 37),
-        ("Sariel", 11, 4, 25, None),  # no gear → None preserved (renders "—")
+        ("Vegivaca", 1, 6, 58, 37, 31),
+        ("Sariel", 11, 4, 25, None, 2506),  # no gear → None preserved (renders "—")
     ]
     ranked = rank_rows(rows)
     assert [r.rank for r in ranked] == [1, 2]
@@ -141,8 +154,8 @@ def test_rank_rows_assigns_ranks_and_preserves_none_ilvl():
 
 def test_pvp_rank_rows_derive_faction():
     from app.services.players import pvp_rank_rows
-    # (name, class_id, race_id, kills, honor)
-    rows = [("Vegivaca", 1, 6, 42, 1500), ("Sariel", 11, 4, 11, 300)]
+    # (name, class_id, race_id, kills, honor, guid)
+    rows = [("Vegivaca", 1, 6, 42, 1500, 31), ("Sariel", 11, 4, 11, 300, 2506)]
     ranked = pvp_rank_rows(rows)
     assert ranked[0].faction == "Horde"
     assert ranked[0].faction_color == "#C03030"
@@ -156,18 +169,18 @@ def test_collect_players_builds_snapshot(mock_connect):
     # fetchall order matches collect_players: roster, top PvE, top PvP.
     cur.fetchall.side_effect = [
         [
-            ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637, 0, 1716000000),
-            ("carlos", "Sariel", 11, 4, 25, 1, 1519, 8, 0),
-            ("carlos", "Tester", 1, 1, 1, 0, 12, 0, 0),
-            ("EDUARDO", "Pitocas", 3, 3, 24, 0, 1519, 0, 1715000000),
+            ("EDUARDO", "Vegivaca", 1, 6, 58, 0, 1637, 0, 1716000000, 31),
+            ("carlos", "Sariel", 11, 4, 25, 1, 1519, 8, 0, 2506),
+            ("carlos", "Tester", 1, 1, 1, 0, 12, 0, 0, 17),
+            ("EDUARDO", "Pitocas", 3, 3, 24, 0, 1519, 0, 1715000000, 44),
         ],
         [
-            ("Vegivaca", 1, 6, 58, 37),
-            ("Sariel", 11, 4, 25, None),
+            ("Vegivaca", 1, 6, 58, 37, 31),
+            ("Sariel", 11, 4, 25, None, 2506),
         ],
         [
-            ("Pitocas", 3, 3, 42, 1500),
-            ("Sariel", 11, 4, 11, 300),
+            ("Pitocas", 3, 3, 42, 1500, 44),
+            ("Sariel", 11, 4, 11, 300, 2506),
         ],
     ]
     # fetchone is the (2) headline aggregate: total, cap60, cap70, cap80.
@@ -199,6 +212,19 @@ def test_collect_players_builds_snapshot(mock_connect):
     # All-characters card "Last online" needs logout_time in the roster query.
     assert snap.all_groups[1].chars[0].last_logout == 1716000000  # Vegivaca
     assert snap.all_groups[0].chars[0].last_logout == 0           # Sariel (online)
+
+    # Every row carries the guid its query selected (the armory link target).
+    assert [c.guid for c in snap.online_now] == [2506]
+    assert [[c.guid for c in g.chars] for g in snap.all_groups] == [[2506, 17], [31, 44]]
+    assert [r.guid for r in snap.top_pve] == [31, 2506]
+    assert [r.guid for r in snap.top_pvp] == [44, 2506]
+
+    roster_sql, _headline_sql, pve_sql, pvp_sql = (call.args[0] for call in cur.execute.call_args_list)
+    assert "c.logout_time, c.guid FROM" in roster_sql
+    assert "AS avg_ilvl, c.guid FROM" in pve_sql
+    # ONLY_FULL_GROUP_BY: the selected c.guid is (and was) the first GROUP BY column.
+    assert "GROUP BY c.guid, c.name, c.class, c.race, c.level " in pve_sql
+    assert "c.totalHonorPoints, c.guid FROM" in pvp_sql
 
     executed_sql = " ".join(call.args[0] for call in cur.execute.call_args_list)
     assert "c.logout_time" in executed_sql
@@ -232,10 +258,10 @@ def test_collect_players_uses_presence_for_online_now_and_headline(mock_connect)
     cur = MagicMock()
     cur.fetchall.side_effect = [
         [
-            ("CARLOS", "Armando", 1, 1, 80, 1, 1519, 0, 0),   # just logged in: latency 0
-            ("CARLOS", "Altbot", 1, 1, 70, 1, 1519, 0, 0),    # summoned alt-bot
-            ("EDUARDO", "Vegivaca", 1, 6, 58, 1, 1637, 9, 0), # no tracker memory → latency
-            ("EDUARDO", "Pitocas", 3, 3, 24, 1, 1519, 0, 0),
+            ("CARLOS", "Armando", 1, 1, 80, 1, 1519, 0, 0, 1),   # just logged in: latency 0
+            ("CARLOS", "Altbot", 1, 1, 70, 1, 1519, 0, 0, 2),    # summoned alt-bot
+            ("EDUARDO", "Vegivaca", 1, 6, 58, 1, 1637, 9, 0, 3), # no tracker memory → latency
+            ("EDUARDO", "Pitocas", 3, 3, 24, 1, 1519, 0, 0, 4),
         ],
         [], [],
     ]
@@ -282,7 +308,7 @@ def _sample_snapshot():
         account="CARLOS", name="Sariel", class_name="Druid", class_color="#FF7C0A",
         race_name="Night Elf", faction="Alliance", faction_color="#4080C0",
         level=25, online=True, zone_name="Stormwind City", latency=8, last_logout=0,
-        online_now=True,
+        guid=2506, online_now=True,
     )
     return PlayersSnapshot(
         fetched_at=1716144665.0,
@@ -290,9 +316,9 @@ def _sample_snapshot():
         cap_vanilla=1, cap_tbc=0, cap_wotlk=0,
         online_now=(sariel,),
         all_groups=(AccountGroup("CARLOS", (sariel,)),),
-        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 25, None),),
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 25, None, 2506),),
         top_pvp=(
-            PvpRankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 12, 450),
+            PvpRankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 12, 450, 2506),
         ),
     )
 
@@ -309,7 +335,10 @@ def test_api_players_data_renders_with_snapshot():
     assert "#FF7C0A" in body                       # class color applied
     assert "CARLOS" in body                        # account group header
     # Online now: "Account (Character)" like the in-game announcement
-    assert 'Carlos (<span style="color: #FF7C0A">Sariel</span>)' in body
+    assert (
+        'Carlos (<a class="char-link" href="/armory/2506"><span style="color: #FF7C0A">Sariel</span></a>)'
+        in body
+    )
     assert "Vanilla 60" in body                    # expansion-cap breakdown
     assert 'id="players-last-refreshed"' in body and 'hx-swap-oob="true"' in body
     assert "—" in body                             # None avg_ilvl → dash

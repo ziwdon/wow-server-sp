@@ -1,0 +1,69 @@
+{
+ "_comment": "Three real characters from this server's DB, copied verbatim from the 2026-10-29 armory viewer spike (docs/superpowers/spikes/2026-10-29-armory-viewer/chars.json and characters.tsv; docs/ is not in the repo). Per character: guid, name, race, class, gender (DB value: 0 male, 1 female), level and the five characters-table appearance columns (skin, face, hairStyle, hairColor, facialStyle). gear = one entry per equipped item: slot (character_inventory.slot, bag 0, 0-18), entry, display_id (item_template.displayid), inventory_type (InventoryType), item_class (class), subclass, name. Spike renders: Vegivaca x1-vegivaca-mapfix, Sariel r2-sariel, Pitokax x5-pitokax-noranged-mapfix (with the thrown axe sent it replaced the dagger).",
+ "characters": [
+  {"guid": 2506, "name": "Vegivaca", "race": 6, "class": 1, "gender": 1, "level": 60, "skin": 1, "face": 1, "hairStyle": 2, "hairColor": 1, "facialStyle": 2,
+   "gear": [
+    {"slot": 0, "entry": 19372, "display_id": 32493, "inventory_type": 1, "item_class": 4, "subclass": 4, "name": "Helm of Endless Rage"},
+    {"slot": 1, "entry": 21664, "display_id": 34274, "inventory_type": 2, "item_class": 4, "subclass": 0, "name": "Barbed Choker"},
+    {"slot": 2, "entry": 13066, "display_id": 28351, "inventory_type": 3, "item_class": 4, "subclass": 4, "name": "Wyrmslayer Spaulders"},
+    {"slot": 3, "entry": 6125, "display_id": 9995, "inventory_type": 4, "item_class": 4, "subclass": 0, "name": "Brawler's Harness"},
+    {"slot": 4, "entry": 16966, "display_id": 33983, "inventory_type": 5, "item_class": 4, "subclass": 4, "name": "Breastplate of Wrath"},
+    {"slot": 5, "entry": 19392, "display_id": 31924, "inventory_type": 6, "item_class": 4, "subclass": 4, "name": "Girdle of the Fallen Crusader"},
+    {"slot": 6, "entry": 13075, "display_id": 28716, "inventory_type": 7, "item_class": 4, "subclass": 4, "name": "Direwing Legguards"},
+    {"slot": 7, "entry": 19387, "display_id": 31914, "inventory_type": 8, "item_class": 4, "subclass": 4, "name": "Chromatic Boots"},
+    {"slot": 8, "entry": 21457, "display_id": 33818, "inventory_type": 9, "item_class": 4, "subclass": 4, "name": "Bracers of Brutality"},
+    {"slot": 9, "entry": 21674, "display_id": 34298, "inventory_type": 10, "item_class": 4, "subclass": 4, "name": "Gauntlets of Steadfast Determination"},
+    {"slot": 10, "entry": 19384, "display_id": 31908, "inventory_type": 11, "item_class": 4, "subclass": 0, "name": "Master Dragonslayer's Ring"},
+    {"slot": 11, "entry": 22722, "display_id": 30661, "inventory_type": 11, "item_class": 4, "subclass": 0, "name": "Seal of the Gurubashi Berserker"},
+    {"slot": 12, "entry": 19341, "display_id": 31843, "inventory_type": 12, "item_class": 4, "subclass": 0, "name": "Lifegiving Gem"},
+    {"slot": 13, "entry": 19406, "display_id": 31936, "inventory_type": 12, "item_class": 4, "subclass": 0, "name": "Drake Fang Talisman"},
+    {"slot": 14, "entry": 21701, "display_id": 34329, "inventory_type": 16, "item_class": 4, "subclass": 1, "name": "Cloak of Concentrated Hatred"},
+    {"slot": 15, "entry": 19364, "display_id": 32000, "inventory_type": 17, "item_class": 2, "subclass": 8, "name": "Ashkandi, Greatsword of the Brotherhood"},
+    {"slot": 17, "entry": 21478, "display_id": 33857, "inventory_type": 15, "item_class": 2, "subclass": 2, "name": "Bow of Taut Sinew"},
+    {"slot": 18, "entry": 5976, "display_id": 20621, "inventory_type": 19, "item_class": 4, "subclass": 0, "name": "Guild Tabard"}
+   ]
+  },
+  {"guid": 4957, "name": "Sariel", "race": 4, "class": 11, "gender": 0, "level": 60, "skin": 4, "face": 1, "hairStyle": 0, "hairColor": 0, "facialStyle": 2,
+   "gear": [
+    {"slot": 0, "entry": 16424, "display_id": 27234, "inventory_type": 1, "item_class": 4, "subclass": 2, "name": "Lieutenant Commander's Dragonhide Shroud"},
+    {"slot": 1, "entry": 18404, "display_id": 9860, "inventory_type": 2, "item_class": 4, "subclass": 0, "name": "Onyxia Tooth Pendant"},
+    {"slot": 2, "entry": 16423, "display_id": 27236, "inventory_type": 3, "item_class": 4, "subclass": 2, "name": "Lieutenant Commander's Dragonhide Epaulets"},
+    {"slot": 4, "entry": 16421, "display_id": 31074, "inventory_type": 5, "item_class": 4, "subclass": 2, "name": "Knight-Captain's Dragonhide Tunic"},
+    {"slot": 5, "entry": 16713, "display_id": 28177, "inventory_type": 6, "item_class": 4, "subclass": 2, "name": "Shadowcraft Belt"},
+    {"slot": 6, "entry": 16422, "display_id": 27235, "inventory_type": 7, "item_class": 4, "subclass": 2, "name": "Knight-Captain's Dragonhide Leggings"},
+    {"slot": 7, "entry": 16393, "display_id": 31070, "inventory_type": 8, "item_class": 4, "subclass": 2, "name": "Knight-Lieutenant's Dragonhide Footwraps"},
+    {"slot": 8, "entry": 18454, "display_id": 30805, "inventory_type": 9, "item_class": 4, "subclass": 2, "name": "Sergeant Major's Dragonhide Armsplints"},
+    {"slot": 9, "entry": 16397, "display_id": 31071, "inventory_type": 10, "item_class": 4, "subclass": 2, "name": "Knight-Lieutenant's Dragonhide Gloves"},
+    {"slot": 10, "entry": 19325, "display_id": 31616, "inventory_type": 11, "item_class": 4, "subclass": 0, "name": "Don Julio's Band"},
+    {"slot": 11, "entry": 13098, "display_id": 23608, "inventory_type": 11, "item_class": 4, "subclass": 0, "name": "Painweaver Band"},
+    {"slot": 12, "entry": 13965, "display_id": 24776, "inventory_type": 12, "item_class": 4, "subclass": 0, "name": "Blackhand's Breadth"},
+    {"slot": 13, "entry": 18863, "display_id": 37840, "inventory_type": 12, "item_class": 4, "subclass": 0, "name": "Insignia of the Alliance"},
+    {"slot": 14, "entry": 16342, "display_id": 27087, "inventory_type": 16, "item_class": 4, "subclass": 1, "name": "Sergeant's Cape"},
+    {"slot": 15, "entry": 19323, "display_id": 31817, "inventory_type": 17, "item_class": 2, "subclass": 5, "name": "The Unstoppable Force"},
+    {"slot": 18, "entry": 5976, "display_id": 20621, "inventory_type": 19, "item_class": 4, "subclass": 0, "name": "Guild Tabard"}
+   ]
+  },
+  {"guid": 7138, "name": "Pitokax", "race": 7, "class": 4, "gender": 1, "level": 60, "skin": 3, "face": 0, "hairStyle": 0, "hairColor": 8, "facialStyle": 4,
+   "gear": [
+    {"slot": 0, "entry": 16908, "display_id": 33743, "inventory_type": 1, "item_class": 4, "subclass": 2, "name": "Bloodfang Hood"},
+    {"slot": 1, "entry": 18404, "display_id": 9860, "inventory_type": 2, "item_class": 4, "subclass": 0, "name": "Onyxia Tooth Pendant"},
+    {"slot": 2, "entry": 14678, "display_id": 27652, "inventory_type": 3, "item_class": 4, "subclass": 2, "name": "Pridelord Pauldrons"},
+    {"slot": 3, "entry": 49, "display_id": 9906, "inventory_type": 4, "item_class": 4, "subclass": 0, "name": "Footpad's Shirt"},
+    {"slot": 4, "entry": 16820, "display_id": 31105, "inventory_type": 5, "item_class": 4, "subclass": 2, "name": "Nightslayer Chestpiece"},
+    {"slot": 5, "entry": 16827, "display_id": 31339, "inventory_type": 6, "item_class": 4, "subclass": 2, "name": "Nightslayer Belt"},
+    {"slot": 6, "entry": 16822, "display_id": 31340, "inventory_type": 7, "item_class": 4, "subclass": 2, "name": "Nightslayer Pants"},
+    {"slot": 7, "entry": 16824, "display_id": 31109, "inventory_type": 8, "item_class": 4, "subclass": 2, "name": "Nightslayer Boots"},
+    {"slot": 8, "entry": 16825, "display_id": 31106, "inventory_type": 9, "item_class": 4, "subclass": 2, "name": "Nightslayer Bracelets"},
+    {"slot": 9, "entry": 16826, "display_id": 31503, "inventory_type": 10, "item_class": 4, "subclass": 2, "name": "Nightslayer Gloves"},
+    {"slot": 10, "entry": 18103, "display_id": 24022, "inventory_type": 11, "item_class": 4, "subclass": 0, "name": "Band of Rumination"},
+    {"slot": 11, "entry": 7686, "display_id": 9834, "inventory_type": 11, "item_class": 4, "subclass": 0, "name": "Ironspine's Eye"},
+    {"slot": 12, "entry": 13965, "display_id": 24776, "inventory_type": 12, "item_class": 4, "subclass": 0, "name": "Blackhand's Breadth"},
+    {"slot": 13, "entry": 13213, "display_id": 16209, "inventory_type": 12, "item_class": 4, "subclass": 0, "name": "Smolderweb's Eye"},
+    {"slot": 14, "entry": 17102, "display_id": 29824, "inventory_type": 16, "item_class": 4, "subclass": 1, "name": "Cloak of the Shrouded Mists"},
+    {"slot": 15, "entry": 19100, "display_id": 31606, "inventory_type": 13, "item_class": 2, "subclass": 15, "name": "Electrified Dagger"},
+    {"slot": 16, "entry": 5267, "display_id": 3363, "inventory_type": 13, "item_class": 2, "subclass": 15, "name": "Scarlet Kris"},
+    {"slot": 17, "entry": 28972, "display_id": 23723, "inventory_type": 25, "item_class": 2, "subclass": 16, "name": "Flightblade Throwing Axe"}
+   ]
+  }
+ ]
+}

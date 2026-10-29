@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{# Armory (spec 5): the search box, then either nothing (/armory), the character view
+   (/armory/<guid>, partials/armory_character.html), a 404 note or the DB error banner, and the
+   footer strip in both views. armory.js is referenced only here, and only with a character
+   loaded: it drives the tabs, the tooltips and the 3D model panel. jQuery comes first because
+   Wowhead's viewer needs it (Task 13's browser run). No inline script. #}
+{% block main %}
+<div class="dashboard-content armory-page">
+
+  <div class="armory-search" role="search">
+    <input id="armory-q" name="q" type="search" value="{{ q }}"
+           placeholder="Search a character by name" aria-label="Search a character by name"
+           autocomplete="off" spellcheck="false" maxlength="64"
+           hx-get="/api/armory/search"
+           hx-trigger="keyup changed delay:200ms, search{% if q %}, load{% endif %}"
+           hx-target="#armory-results"
+           autofocus>
+    <div id="armory-results" class="armory-results" aria-live="polite"></div>
+  </div>
+
+  {% if error %}<div class="banner error">Could not load the character: {{ error }}</div>{% endif %}
+
+  {% if not_found %}
+  <p class="empty-state armory-not-found">No character with id {{ guid }}. Search for one by name above.</p>
+  {% endif %}
+
+  {% if view %}
+  {% include "partials/armory_character.html" %}
+  {% endif %}
+
+  <div id="armory-footer" class="armory-footer" hx-get="/api/armory/footer" hx-trigger="load">
+    <p class="loading">Loading the 3D viewer status…</p>
+  </div>
+
+</div>
+{% if view %}<script src="/static/jquery.min.js" defer></script>
+<script src="/static/armory.js?v={{ armory_js_ver }}" defer></script>{% endif %}
+{% endblock %}

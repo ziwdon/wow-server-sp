@@ -1,0 +1,14 @@
+{# Armory search results (GET /api/armory/search): at most 20 rows, humans first. Always 200. #}
+{% if error %}
+<p class="armory-search-msg armory-search-error" role="alert">Search failed: {{ error }}</p>
+{% elif short %}
+{% if q %}<p class="armory-search-msg">Type at least 2 letters of a character name.</p>{% endif %}
+{% elif not hits %}
+<p class="armory-search-msg">No character name starts with “{{ q }}”.</p>
+{% else %}
+<ul class="armory-hits">
+  {% for hit in hits %}
+  <li><a class="armory-hit" href="/armory/{{ hit.guid }}"><span style="color: {{ hit.class_color }}">{{ hit.name }}</span> · Lvl {{ hit.level }} · {{ hit.race_name }} {{ hit.class_name }}{% if hit.is_bot %} <span class="armory-bot">bot</span>{% endif %}</a></li>
+  {% endfor %}
+</ul>
+{% endif %}

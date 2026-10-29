@@ -180,7 +180,13 @@ stage_conf_dists() {
 
 # --- Step 6: copy compose + dist into stack ---
 cp "$REPO_DIR/docker-compose.yml" "$STACK_DIR/"
-rsync -a --delete "$REPO_DIR/" "$STACK_DIR/build/"
+# The vendor files are excluded like in the redeploy: the repo holds only
+# placeholders, and they are fetched below.
+rsync -a --delete \
+    --exclude='app/static/htmx.min.js' \
+    --exclude='app/static/htmx-sse.js' \
+    --exclude='app/static/jquery.min.js' \
+    "$REPO_DIR/" "$STACK_DIR/build/"
 
 # Stage .conf.dist files under build/ so the Dockerfile can `COPY dist/`.
 mkdir -p "$STACK_DIR/build/dist"
@@ -193,12 +199,18 @@ cp "$REPO_DIR/../scripts/backup.sh" "$STACK_DIR/build/backup.sh"
 # 404s during Phase A/B/C even though the SSE-consuming UI lands in Phase D.
 HTMX_VERSION=2.0.3
 HTMX_SSE_VERSION=2.2.2
-curl -sSfL -o "$STACK_DIR/build/app/static/htmx.min.js" \
+curl -sSfL --connect-timeout 15 --max-time 120 -o "$STACK_DIR/build/app/static/htmx.min.js" \
     "https://unpkg.com/htmx.org@${HTMX_VERSION}/dist/htmx.min.js"
 # Upstream `htmx-ext-sse` ships `sse.js` (unminified) at the version-pinned
 # path; save it as `htmx-sse.js` (no `.min`) so the filename is honest.
-curl -sSfL -o "$STACK_DIR/build/app/static/htmx-sse.js" \
+curl -sSfL --connect-timeout 15 --max-time 120 -o "$STACK_DIR/build/app/static/htmx-sse.js" \
     "https://unpkg.com/htmx-ext-sse@${HTMX_SSE_VERSION}/sse.js"
+# jQuery: Wowhead's model viewer (Armory page only) needs it at load time
+# (`jQuery.support`, `$.getJSON`, `$.ajaxTransport`); armory.html loads it
+# from /static/jquery.min.js before armory.js.
+JQUERY_VERSION=3.7.1
+curl -sSfL --connect-timeout 15 --max-time 120 -o "$STACK_DIR/build/app/static/jquery.min.js" \
+    "https://unpkg.com/jquery@${JQUERY_VERSION}/dist/jquery.min.js"
 
 # --- Step 7: write .env ---
 # DOCKER_GID is the host's docker-group GID. The admin container runs as
@@ -234,6 +246,12 @@ EOF
 chmod 600 "$STACK_DIR/.env"
 
 # --- Step 8: build image and bring up ---
+# The Armory mounts AC's client-data volume (docker-compose.yml, external), which
+# the AC installer's Phase 4 creates; check it here rather than after a full build.
+if ! docker volume inspect azerothcore_ac-client-data >/dev/null 2>&1; then
+    echo "ERROR: client-data volume azerothcore_ac-client-data not found — install AzerothCore first (Phase 4 creates it)" >&2
+    exit 1
+fi
 cd "$STACK_DIR"
 docker compose --project-directory "$STACK_DIR/build" --env-file "$STACK_DIR/.env" build
 docker compose --env-file "$STACK_DIR/.env" up -d

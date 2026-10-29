@@ -155,6 +155,9 @@ def _rank_rows(value: Any) -> tuple[RankRow, ...]:
                 faction_color=str(item["faction_color"]),
                 level=int(item["level"]),
                 avg_ilvl=None if avg_ilvl is None else int(avg_ilvl),
+                # Required: a cache written before rank rows had a guid fails to load
+                # (KeyError) and the stale check refreshes it; no guid is made up.
+                guid=int(item["guid"]),
             )
         )
     return tuple(rows)
@@ -178,6 +181,7 @@ def _pvp_rank_rows(value: Any) -> tuple[PvpRankRow, ...]:
                 faction_color=str(item["faction_color"]),
                 honor_kills=int(item["honor_kills"]),
                 honor=int(item["honor"]),
+                guid=int(item["guid"]),
             )
         )
     return tuple(rows)

@@ -1483,3 +1483,452 @@ pre.logview {
 }
 .custom-preview .nav-brand { margin-right: 0; }
 .custom-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+/* Armory */
+/* The Armory page (spec 5): search, character header, 3D model panel + paper-doll, the
+   Talents / Glyphs / Stats tabs, the tooltip and the footer strip. Item-quality, class and
+   faction colours arrive as inline styles (wow_reference); everything else uses :root tokens.
+   The paper-doll card is left slots | 3D model | right slots above 768px; below it the model
+   comes first and the two slot columns sit side by side under it (the mobile block at the end). */
+.armory-page { overflow-y: auto; }
+.armory-page > * { flex-shrink: 0; }
+.armory-page [hidden],
+.armory-tooltip[hidden] { display: none !important; }
+
+.armory-search { position: relative; width: 100%; max-width: 520px; }
+#armory-q {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  font: inherit;
+  font-size: 0.95rem;
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+#armory-q:focus { outline: none; border-color: var(--gold); }
+.armory-results { margin-top: 0.35rem; }
+.armory-hits {
+  list-style: none;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.armory-hit {
+  display: block;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.88rem;
+  color: var(--text-warm);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-dark);
+}
+.armory-hits li:last-child .armory-hit { border-bottom: none; }
+.armory-hit:hover,
+.armory-hit:focus-visible { background: var(--yellow-bg); outline: none; }
+.armory-search-msg { padding: 0.35rem 0.1rem; font-size: 0.85rem; color: var(--text-muted); }
+.armory-search-error { color: var(--red); }
+.armory-bot {
+  padding: 0 4px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.armory-not-found { text-align: left; padding-left: 0; }
+
+/* Character header. The section stops at 1360px (what a 1400px window gives it) so that on a
+   wider screen the paper-doll card, whose content is at most ~1150px, does not grow empty
+   margins; it stays left-aligned like the search box. */
+.armory-character { display: flex; flex-direction: column; gap: 1rem; width: 100%; max-width: 1360px; }
+.armory-header { display: flex; flex-direction: column; gap: 0.2rem; }
+.armory-name { font-size: 1.6rem; font-weight: 700; letter-spacing: 0.02em; }
+.armory-subtitle { font-size: 0.88rem; color: var(--text-warm); }
+.armory-online { color: var(--green); }
+
+/* Paper-doll card: left slots | 3D model | right slots, then the weapon row and the foot
+   (the two 3D-view toggles, average item level) under all three. The model column grows
+   with the viewport up to 420px; the slot columns are capped at 340px and the three are centred, so a
+   wide screen gets margins at the card's edges instead of gaps between names and model. Each
+   slot column spreads its eight slots over the model's height, like the game's character frame. */
+.paperdoll {
+  display: grid;
+  grid-template-columns: minmax(0, 340px) clamp(240px, 30vw, 420px) minmax(0, 340px);
+  grid-template-areas: "left model right" "bottom bottom bottom" "foot foot foot";
+  justify-content: center;
+  gap: 0.75rem 1.5rem;
+  padding: 0.75rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.paperdoll > .armory-model { grid-area: model; align-self: center; }
+.armory-model {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  background: var(--log-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.armory-model-canvas { position: absolute; inset: 0; }
+.armory-model-canvas canvas { display: block; }
+.armory-model-msg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  text-align: center;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+.armory-model[data-state="rendered"] .armory-model-msg { display: none; }
+.armory-model[data-state="unavailable"] .armory-model-text { color: var(--orange); }
+.armory-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: armory-spin 0.9s linear infinite;
+}
+.armory-model:not([data-state="loading"]) .armory-spinner { display: none; }
+@keyframes armory-spin { to { transform: rotate(360deg); } }
+.armory-model-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.75rem;
+  color: var(--orange);
+  background: var(--sidebar-bg);
+  border-top: 1px solid var(--border);
+}
+.paperdoll-foot {
+  grid-area: foot;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem 2rem;
+}
+/* The 3D-view toggles (Sheathe weapons, Hide tabard); armory.js disables Hide tabard when
+   the model has no tabard. */
+.armory-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-warm);
+  cursor: pointer;
+}
+.armory-toggle input { accent-color: var(--gold); }
+.armory-toggle:has(input:disabled) { opacity: 0.5; cursor: default; }
+
+.paperdoll-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.paperdoll-left { grid-area: left; }
+.paperdoll-right { grid-area: right; }
+.paperdoll-bottom {
+  grid-area: bottom;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 220px));
+  justify-content: center;
+  gap: 0.5rem 1rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border-dark);
+}
+.slot {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  min-height: 44px;
+  padding: 2px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+}
+button.slot { cursor: pointer; }
+button.slot:hover,
+button.slot:focus-visible { background: var(--yellow-bg); outline: none; }
+.paperdoll-right .slot { flex-direction: row-reverse; text-align: right; }
+.paperdoll-right .slot-text { align-items: flex-end; }
+.paperdoll-bottom .slot { flex-direction: column; gap: 0.3rem; text-align: center; }
+.paperdoll-bottom .slot-text { align-items: center; }
+.slot-icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  background: var(--input-bg);
+  border: 2px solid var(--border);
+  border-radius: 4px;
+}
+.slot--empty .slot-icon { border-style: dashed; border-color: var(--border-dark); }
+.armory-icon { display: block; width: 100%; height: 100%; border-radius: 2px; }
+.armory-icon--empty,
+.slot-icon--empty { background: radial-gradient(circle at 50% 42%, var(--border-dark) 0 30%, var(--input-bg) 72%); }
+.slot-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.slot-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.paperdoll-bottom .slot-name {
+  display: -webkit-box;
+  white-space: normal;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.slot-label { font-size: 0.7rem; color: var(--text-dim); }
+.no-3d {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  padding: 0 3px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--orange);
+  background: var(--bg);
+  border: 1px solid var(--orange);
+  border-radius: 3px;
+}
+.armory-avg-ilvl { font-size: 0.85rem; color: var(--text-warm); text-align: center; }
+.armory-avg-ilvl b { color: var(--gold-bright); font-variant-numeric: tabular-nums; }
+
+/* Talents · Glyphs · Stats */
+.armory-tabs,
+.armory-subtabs { display: flex; flex-wrap: wrap; gap: 0.25rem; border-bottom: 1px solid var(--border); }
+.armory-tab,
+.armory-subtab {
+  margin-bottom: -1px;
+  padding: 0.45rem 1rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.armory-subtab { padding: 0.3rem 0.8rem; font-size: 0.8rem; }
+.armory-tab:hover,
+.armory-subtab:hover { color: var(--gold-bright); }
+.armory-tab[aria-selected="true"],
+.armory-subtab[aria-selected="true"] { color: var(--gold-bright); border-bottom-color: var(--gold); }
+.armory-tab:focus-visible,
+.armory-subtab:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: -2px; }
+.armory-tabpanel { padding: 0.5rem 0 0.75rem; }
+.armory-tabpanel:focus-visible { outline: 1px dotted var(--border); outline-offset: 2px; }
+.armory-unavailable { font-size: 0.85rem; color: var(--text-muted); }
+
+.talent-summary { margin: 0.6rem 0 0.75rem; font-size: 0.88rem; color: var(--text-warm); }
+.talent-summary b { color: var(--gold-bright); font-variant-numeric: tabular-nums; }
+.talent-trees { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.talent-tree-box {
+  min-width: 0;
+  padding: 0.6rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.talent-tree-title {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+.talent-tree-points { color: var(--gold-bright); font-variant-numeric: tabular-nums; }
+.talent-tree {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px 6px;
+  justify-items: center;
+}
+.talent {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  background: var(--input-bg);
+  border: 2px solid var(--green);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.talent--maxed { border-color: var(--gold-bright); }
+.talent--unlearned { border-color: var(--border); opacity: 0.4; filter: grayscale(1); }
+.talent:focus-visible { outline: 2px solid var(--gold-bright); outline-offset: 2px; }
+.talent-rank {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  padding: 0 3px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  color: var(--green);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.talent--maxed .talent-rank { color: var(--gold-bright); }
+.talent--unlearned .talent-rank { color: var(--text-muted); }
+
+.glyph-specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+.glyph-spec {
+  padding: 0.6rem 0.75rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.glyph-spec-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+.glyph-group-title {
+  margin: 0.55rem 0 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.glyph-list { display: flex; flex-direction: column; gap: 0.35rem; list-style: none; }
+.glyph { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--text); }
+.glyph-icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+.glyph--empty .glyph-icon { border-style: dashed; }
+.glyph--empty .glyph-name { font-style: italic; color: var(--text-dim); }
+
+.armory-stats-asof { margin-bottom: 0.6rem; font-size: 0.8rem; color: var(--text-muted); }
+.armory-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.2rem 1.5rem; }
+.armory-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 3px 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border-dark);
+}
+.armory-stat dt { color: var(--text-warm); }
+.armory-stat dd { color: var(--text); font-variant-numeric: tabular-nums; }
+.armory-stats-note { max-width: 60rem; font-size: 0.88rem; line-height: 1.55; color: var(--text-warm); }
+.armory-stats-note code {
+  padding: 0 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+  color: var(--gold-bright);
+  background: var(--input-bg);
+  border-radius: 3px;
+}
+.armory-stats-note a { color: var(--gold-bright); }
+
+/* The one tooltip (position: fixed, placed by armory.js inside the viewport) */
+.armory-tooltip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 950;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--log-bg);
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px #000a;
+}
+.tt-line { white-space: pre-line; overflow-wrap: anywhere; }
+.tt-name { font-size: 0.92rem; font-weight: 700; }
+.tt-pair { display: flex; justify-content: space-between; gap: 1rem; }
+.tt-yellow { color: var(--yellow); }
+.tt-green { color: var(--green); }
+.tt-dim { color: var(--text-muted); }
+.tt-gap { margin-top: 0.35rem; }
+
+/* Footer strip (both views) */
+.armory-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: auto;
+  padding-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+}
+.armory-footer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.5rem; }
+.armory-footer-item { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.armory-footer-msg { font-size: 0.8rem; }
+.armory-footer-warn { color: var(--orange); }
+.armory-footer-error { color: var(--red); }
+.armory-footer-ok { color: var(--green); }
+
+/* Character names elsewhere (Players page) that link here: no visible change but on hover. */
+.char-link { color: inherit; text-decoration: none; }
+.char-link:hover { text-decoration: underline; cursor: pointer; }
+/* A linked Players-page name cell is the <a> grid item. The coloured span inside it gets the
+   .player-row > span clipping, so the "…" of a clipped name keeps the class colour as before
+   the link (an ellipsis takes the colour of the box that clips); the <a> only clips. */
+.player-row > .char-link { min-width: 0; overflow: hidden; }
+.player-row > .char-link > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .armory-spinner { animation-duration: 3s; }
+}
+
+@media (max-width: 768px) {
+  .armory-page { overflow: visible; }
+  .armory-search { max-width: none; }
+  .armory-name { font-size: 1.3rem; }
+  .paperdoll {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas: "model model" "left right" "bottom bottom" "foot foot";
+    gap: 0.5rem 0.75rem;
+    padding: 0.5rem;
+  }
+  .paperdoll > .armory-model { max-width: 420px; margin: 0 auto 0.25rem; }
+  .slot-icon { width: 36px; height: 36px; }
+  .talent-trees { grid-template-columns: 1fr; }
+  .armory-tab { padding: 0.45rem 0.8rem; }
+}

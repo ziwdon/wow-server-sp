@@ -35,7 +35,7 @@
         </div>
         {% for c in snap.online_now %}
         <div class="player-row player-row--online">
-          <span>{{ c.account.capitalize() }} (<span style="color: {{ c.class_color }}">{{ c.name }}</span>)</span>
+          <span>{{ c.account.capitalize() }} (<a class="char-link" href="/armory/{{ c.guid }}"><span style="color: {{ c.class_color }}">{{ c.name }}</span></a>)</span>
           <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
           <span>{{ c.race_name }}</span>
           <span>{{ c.level }}</span>
@@ -64,7 +64,7 @@
             </div>
             {% for c in g.chars %}
             <div class="player-row player-row--all">
-              <span style="color: {{ c.class_color }}">{{ c.name }}</span>
+              <a class="char-link" href="/armory/{{ c.guid }}"><span style="color: {{ c.class_color }}">{{ c.name }}</span></a>
               <span style="color: {{ c.class_color }}">{{ c.class_name }}</span>
               <span>{{ c.race_name }}</span>
               <span>{{ c.level }}</span>
@@ -96,7 +96,7 @@
             {% for r in snap.top_pve %}
             <div class="player-row player-row--rank">
               <span>{{ r.rank }}</span>
-              <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
+              <a class="char-link" href="/armory/{{ r.guid }}"><span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span></a>
               <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
               <span>{{ r.race_name }}</span>
               <span style="color: {{ r.faction_color }}">{{ r.faction }}</span>
@@ -121,7 +121,7 @@
             {% for r in snap.top_pvp %}
             <div class="player-row player-row--rank-pvp">
               <span>{{ r.rank }}</span>
-              <span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span>
+              <a class="char-link" href="/armory/{{ r.guid }}"><span style="color: {{ r.class_color }}">{% if r.rank == 1 %}🥇 {% elif r.rank == 2 %}🥈 {% elif r.rank == 3 %}🥉 {% elif loop.last %}💩 {% endif %}{{ r.name }}</span></a>
               <span style="color: {{ r.class_color }}">{{ r.class_name }}</span>
               <span>{{ r.race_name }}</span>
               <span style="color: {{ r.faction_color }}">{{ r.faction }}</span>
