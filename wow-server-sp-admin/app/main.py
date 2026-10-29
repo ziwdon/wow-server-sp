@@ -11,9 +11,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from pydantic import BaseModel, StrictBool
 
 import datetime as dt
@@ -25,6 +26,7 @@ from app.services import backups as backups_svc
 from app.services import app_events
 from app.services import cloud_backup
 from app.services import cloud_config as cloud_cfg
+from app.services import customization as customization_svc
 from app.services import db_stats
 from app.services import docker_client
 from app.services import known_errors as known_errors_svc
@@ -136,6 +138,7 @@ templates.env.globals["js_ver"] = _file_hash("settings.js")
 templates.env.globals["backups_js_ver"] = _file_hash("backups.js")
 templates.env.globals["stats_js_ver"] = _file_hash("stats.js")
 templates.env.globals["last_online"] = wow_ref.relative_last_online
+templates.env.globals["branding"] = lambda: customization_svc.store_from_env().branding()
 
 
 @app.exception_handler(HTTPException)
@@ -166,7 +169,7 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"title": "azerothcore-admin"},
+        {"title": None},
     )
 
 
@@ -379,7 +382,7 @@ async def backups_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "backups.html",
-        {"title": "azerothcore-admin · backups"},
+        {"title": "Backups"},
     )
 
 
@@ -395,7 +398,7 @@ async def maintenance_page(request: Request) -> HTMLResponse:
         request,
         "maintenance.html",
         {
-            "title": "azerothcore-admin · maintenance",
+            "title": "Maintenance",
             "config": config,
             "log": store.read_log(),
             "hours": list(range(24)),
@@ -423,6 +426,59 @@ async def post_presence(payload: PresencePayload) -> dict:
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"could not save presence config: {e}")
     return asdict(cfg)
+
+
+@app.get("/customization", response_class=HTMLResponse)
+async def customization_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "customization.html",
+        {
+            "title": "Customization",
+            "current": customization_svc.store_from_env().branding(),
+            "max_name_length": customization_svc.MAX_NAME_LENGTH,
+            "default_name": customization_svc.DEFAULT_NAME,
+            "error": request.query_params.get("error"),
+            "saved": request.query_params.get("saved") == "1",
+        },
+    )
+
+
+@app.post("/api/customization")
+async def post_customization(request: Request):
+    # Read the form by hand: an empty file input may arrive as a plain "" field, not a file.
+    form = await request.form()
+    name = form.get("name", "")
+    logo = form.get("logo")
+    data = None
+    if isinstance(logo, StarletteUploadFile) and logo.filename:
+        # One byte over the limit is enough to refuse it; never read an oversized upload whole.
+        data = await logo.read(customization_svc.MAX_LOGO_BYTES + 1)
+    try:
+        customization_svc.store_from_env().save(
+            name=name if isinstance(name, str) else "",
+            logo=data,
+            remove_logo=form.get("remove_logo") is not None,
+        )
+    except (OSError, customization_svc.CustomizationError) as e:
+        from urllib.parse import quote
+        message = str(e) if isinstance(e, customization_svc.CustomizationError) else f"Could not save: {e}"
+        return RedirectResponse(f"/customization?error={quote(message)}", status_code=303)
+    return RedirectResponse("/customization?saved=1", status_code=303)
+
+
+@app.get("/customization/logo")
+async def customization_logo() -> Response:
+    logo = customization_svc.store_from_env().logo()
+    if logo is None:
+        raise HTTPException(status_code=404, detail="no logo")
+    data, media_type = logo
+    return Response(
+        content=data,
+        media_type=media_type,
+        # The URL carries ?v=<sha256 prefix>, so a changed logo gets a new URL.
+        headers={"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.get("/api/maintenance")
@@ -1088,7 +1144,7 @@ async def stream_action(id: str | None = None):
 @app.get("/players", response_class=HTMLResponse)
 async def players_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
-        request, "players.html", {"title": "azerothcore-admin · players"},
+        request, "players.html", {"title": "Players"},
     )
 
 
@@ -1120,7 +1176,7 @@ async def api_players_data(request: Request) -> HTMLResponse:
 @app.get("/stats", response_class=HTMLResponse)
 async def stats_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
-        request, "stats.html", {"title": "azerothcore-admin · stats"},
+        request, "stats.html", {"title": "Stats"},
     )
 
 
@@ -1139,7 +1195,7 @@ async def progression_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "progression.html",
-        {"title": "azerothcore-admin · progression"},
+        {"title": "Progression"},
     )
 
 
@@ -1251,7 +1307,7 @@ async def settings_page(request: Request) -> HTMLResponse:
         request,
         "settings.html",
         {
-            "title": "azerothcore-admin · settings",
+            "title": "Settings",
         },
     )
 

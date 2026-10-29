@@ -110,6 +110,10 @@ The Progression page (`/progression`) lets you advance individual characters thr
 - **Player Announcements** — one checkbox, saves immediately. The admin always polls `acore_characters.characters.online` every 15 s for real accounts (not `RNDBOT%`/`ahbot`) to track who is in (this feeds the Players tab and the dashboard "Online" card); when the checkbox is on it also sends `announce Player <Account> (<Character>) is online.` / `… has gone offline.` over the worldserver console (account name title-cased; the character is omitted only when two characters appeared in the same poll). Presence is tracked **per account**: the first character to come online is the human, so alt-bots summoned from your own account are never announced; "offline" needs two consecutive empty polls, so a quick character swap is silent. Nothing is announced around admin Stop/Restart or worldserver boots (state reseeds silently). Config: `azerothcore-admin/data/presence.json`; API: `GET/POST /api/presence`.
 - **Scheduled Restart** / **Stop / Start Window** — daily UTC-hour jobs run by the in-app scheduler (`maintenance.json`); the log below shows the last 20 runs.
 
+## Customization Page
+
+Changes the header brand shown on every page (issue #45). **Name** (up to 32 characters, no line breaks or control characters; empty = "AzerothCore Admin") is shown in the header and in browser tab titles (`<name> · <page>`). **Logo**: upload a PNG, JPG, WebP or GIF up to 512 KB (SVG is refused because it can carry script); it is shown at 36×36 in the header and also used as the browser tab icon. Without a logo the header shows ⚔. A live preview updates as you type or pick an image; nothing changes until **Save**. **Reset to defaults** clears the name and the logo (also needs Save). Stored in `azerothcore-admin/data/customization/` (`config.json` + `logo.<ext>`), so redeploys keep it; not included in backup archives.
+
 ## Backups & Restore
 
 The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first. It refuses an archive taken on different AzerothCore/module source revisions than the running server (or one whose revisions are unknown); cross-version restores are host-only (`scripts/restore-azerothcore.sh`).
@@ -179,6 +183,7 @@ Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that co
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime vars (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
 | `/opt/stacks/azerothcore-admin/data/cloud/` | Cloud Backup: `config.json`, `state.json`, `log.jsonl` and `secrets/` (the encrypted Proton session; mode 700). Never included in backup archives |
+| `/opt/stacks/azerothcore-admin/data/customization/` | Customization: `config.json` (header name, logo type and sha256) and `logo.<ext>`. Never included in backup archives |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
 | `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade, prerollback) |
 

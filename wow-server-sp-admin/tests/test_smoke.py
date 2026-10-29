@@ -7,7 +7,7 @@ def test_root_returns_html():
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "azerothcore-admin" in response.text.lower()
+    assert "<title>AzerothCore Admin</title>" in response.text
 
 
 def test_healthz_returns_ok():

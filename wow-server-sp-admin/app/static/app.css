@@ -22,6 +22,7 @@
   --line:        var(--border);
   --muted:       var(--text-muted);
   --bg-panel:    var(--panel-bg);
+  --nav-h:       60px;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -42,25 +43,31 @@ nav.topnav {
   padding: 0 1.5rem;
   display: flex;
   align-items: center;
-  height: 52px;
+  height: var(--nav-h);
   flex-shrink: 0;
 }
 .nav-brand {
   color: var(--gold-bright);
   font-weight: bold;
-  font-size: 1.05rem;
+  font-size: 1.1rem;
   letter-spacing: 0.03em;
   margin-right: 2rem;
   white-space: nowrap;
   text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
 }
 .nav-icon { color: var(--gold); }
+.nav-logo { width: 36px; height: 36px; object-fit: contain; flex-shrink: 0; }
+.nav-name { overflow: hidden; text-overflow: ellipsis; }
 .nav-links { display: flex; }
 .nav-link {
   color: var(--text-warm);
   text-decoration: none;
   padding: 0 1.1rem;
-  height: 52px;
+  height: var(--nav-h);
   display: flex;
   align-items: center;
   font-size: 0.92rem;
@@ -69,7 +76,7 @@ nav.topnav {
 }
 .nav-link:hover { color: var(--gold-bright); }
 .nav-link.active { color: var(--gold-bright); border-bottom-color: var(--gold-bright); }
-.nav-right { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; white-space: nowrap; }
 #last-refresh { font-size: 0.75rem; color: var(--text-dim); }
 .status-pill {
   padding: 3px 10px;
@@ -88,7 +95,7 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 /* ── Dashboard content wrapper ── */
 .dashboard-content {
   flex: 1;
-  height: calc(100vh - 52px);
+  height: calc(100vh - var(--nav-h));
   padding: 1.25rem 1.5rem;
   display: flex;
   flex-direction: column;
@@ -384,7 +391,7 @@ pre.logview {
 /* ── Settings page ── */
 .settings-page {
   flex: 1;
-  height: calc(100vh - 52px);
+  height: calc(100vh - var(--nav-h));
   display: grid;
   grid-template-columns: 270px minmax(0, 1fr) 525px;
   grid-template-rows: minmax(0, 1fr);
@@ -476,7 +483,7 @@ pre.logview {
 }
 
 /* Settings list */
-.settings-list-wrapper { display: flex; flex-direction: column; overflow: hidden; min-height: 0; height: calc(100vh - 52px); }
+.settings-list-wrapper { display: flex; flex-direction: column; overflow: hidden; min-height: 0; height: calc(100vh - var(--nav-h)); }
 .settings-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-height: 0; }
 .key-list-header {
   display: grid;
@@ -1446,3 +1453,33 @@ pre.logview {
   background: rgba(50, 95, 55, 0.28);
 }
  .action-toast { position: fixed; right: 16px; bottom: 16px; z-index: 1000; max-width: 360px; padding: 12px 16px; border: 1px solid var(--gold); background: var(--bg-panel); color: var(--text-warm); box-shadow: 0 4px 16px #0008; }
+
+/* --- Customization page --- */
+.customization-page { overflow-y: auto; }
+.customization-page > .banner { margin: 0; }
+.custom-logo-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.custom-logo-box {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--input-bg);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 1.4rem;
+}
+.custom-logo-box img { width: 36px; height: 36px; object-fit: contain; }
+.custom-preview {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-bottom: 2px solid var(--gold);
+  border-radius: 4px;
+  height: var(--nav-h);
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+.custom-preview .nav-brand { margin-right: 0; }
+.custom-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
