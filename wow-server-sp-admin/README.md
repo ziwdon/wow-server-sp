@@ -157,7 +157,10 @@ Until then the Stats tab says so and shows the current value.
 - **Update** — the viewer script is fetched once and then kept as it is, so a
   change at Wowhead cannot break the page unannounced. Update fetches the
   current one; if the model then stops drawing, **Revert** goes back to the
-  previous copy.
+  previous copy. If the kept viewer script is ever broken and neither Update
+  nor Revert helps, delete `data/armory/cache/live/viewer/` (under
+  `/opt/stacks/azerothcore-admin/`) and reload the Armory page: the first view
+  fetches and keeps a fresh copy.
 
 If a piece of gear shows a small "no 3D" mark, Wowhead has no model for it; the
 rest of the character still renders. The Armory's data is all re-fetchable, so

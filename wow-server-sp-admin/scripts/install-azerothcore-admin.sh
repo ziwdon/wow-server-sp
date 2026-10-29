@@ -199,17 +199,17 @@ cp "$REPO_DIR/../scripts/backup.sh" "$STACK_DIR/build/backup.sh"
 # 404s during Phase A/B/C even though the SSE-consuming UI lands in Phase D.
 HTMX_VERSION=2.0.3
 HTMX_SSE_VERSION=2.2.2
-curl -sSfL -o "$STACK_DIR/build/app/static/htmx.min.js" \
+curl -sSfL --connect-timeout 15 --max-time 120 -o "$STACK_DIR/build/app/static/htmx.min.js" \
     "https://unpkg.com/htmx.org@${HTMX_VERSION}/dist/htmx.min.js"
 # Upstream `htmx-ext-sse` ships `sse.js` (unminified) at the version-pinned
 # path; save it as `htmx-sse.js` (no `.min`) so the filename is honest.
-curl -sSfL -o "$STACK_DIR/build/app/static/htmx-sse.js" \
+curl -sSfL --connect-timeout 15 --max-time 120 -o "$STACK_DIR/build/app/static/htmx-sse.js" \
     "https://unpkg.com/htmx-ext-sse@${HTMX_SSE_VERSION}/sse.js"
 # jQuery: Wowhead's model viewer (Armory page only) needs it at load time
 # (`jQuery.support`, `$.getJSON`, `$.ajaxTransport`); armory.html loads it
 # from /static/jquery.min.js before armory.js.
 JQUERY_VERSION=3.7.1
-curl -sSfL -o "$STACK_DIR/build/app/static/jquery.min.js" \
+curl -sSfL --connect-timeout 15 --max-time 120 -o "$STACK_DIR/build/app/static/jquery.min.js" \
     "https://unpkg.com/jquery@${JQUERY_VERSION}/dist/jquery.min.js"
 
 # --- Step 7: write .env ---

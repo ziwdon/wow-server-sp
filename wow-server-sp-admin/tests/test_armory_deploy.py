@@ -29,6 +29,7 @@ STATIC = ADMIN_ROOT / "app/static"
 CLIENT_DATA_VOLUME = "azerothcore_ac-client-data"
 JQUERY_URL = "https://unpkg.com/jquery@3.7.1/dist/jquery.min.js"
 VENDOR_FILES = ("htmx.min.js", "htmx-sse.js", "jquery.min.js")
+CURL_FLAGS = "-sSfL --connect-timeout 15 --max-time 120"
 
 
 def _executable(path: Path, body: str) -> None:
@@ -171,11 +172,22 @@ def test_redeploy_backfills_only_jquery_between_the_sync_and_the_guard():
     fetches = [i for i, line in enumerate(lines) if "curl " in line and not line.lstrip().startswith("echo")]
     assert len(fetches) == 1, [lines[i] for i in fetches]
     (fetch,) = fetches
-    assert 'curl -sSfL -o "$jquery_tmp" "$(vendor_url jquery.min.js)"' in lines[fetch]
+    assert f'curl {CURL_FLAGS} -o "$jquery_tmp" "$(vendor_url jquery.min.js)"' in lines[fetch]
     sync = next(i for i, line in enumerate(lines) if line.lstrip().startswith("rsync -a --delete"))
     guard = next(i for i, line in enumerate(lines) if '-le 200 ]' in line and "vendor_size" in line)
     assert sync < fetch < guard
-    assert "backfill_tpm_env" in REDEPLOY.read_text()[: REDEPLOY.read_text().index('curl -sSfL -o "$jquery_tmp"')]
+    assert "backfill_tpm_env" in REDEPLOY.read_text()[: REDEPLOY.read_text().index(f'curl {CURL_FLAGS} -o "$jquery_tmp"')]
+
+
+def test_every_vendor_fetch_has_a_connect_and_a_total_timeout():
+    # The redeploy's backfill runs while it holds .redeploy.lock; a stalled unpkg must not hold
+    # it for ever. The installer's fetches take the same flags.
+    for script, expected in ((INSTALLER, len(VENDOR_FILES)), (REDEPLOY, 1)):
+        fetches = [line for line in _logical_lines(script)
+                   if "curl " in line and not line.lstrip().startswith("echo")]
+        assert len(fetches) == expected, (script.name, fetches)
+        for line in fetches:
+            assert f"curl {CURL_FLAGS} -o " in line, (script.name, line)
 
 
 def test_dockerfile_unchanged_by_armory():

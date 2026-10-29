@@ -301,7 +301,9 @@ def test_redeploy_backfills_jquery_once_from_the_pinned_url(tmp_path):
 
         assert result.returncode == 0, result.stderr
         fetches = curl_log.read_text().splitlines()
-        assert len(fetches) == 1 and fetches[0].startswith("curl -sSfL -o ") and fetches[0].endswith(" " + JQUERY_URL)
+        assert len(fetches) == 1 and fetches[0].endswith(" " + JQUERY_URL)
+        # Bounded while redeploy holds .redeploy.lock: a stalled unpkg cannot keep it.
+        assert fetches[0].startswith("curl -sSfL --connect-timeout 15 --max-time 120 -o "), fetches[0]
         assert f"-o {stack}/build/app/static/jquery.min.js " not in fetches[0]  # a temp file, moved into place
         assert calls.count(" up") == 1, f"calls={calls!r}\nstderr={result.stderr}"
         # A copy is kept for the next redeploys, readable like the installer's curl output.

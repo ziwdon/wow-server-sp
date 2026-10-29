@@ -162,7 +162,7 @@ fi
 if [ "$jquery_size" -le 200 ]; then
     echo "==> jquery.min.js is not vendored yet; fetching it once from $(vendor_url jquery.min.js)..."
     jquery_tmp="$(mktemp "$STAGE_DIR/jquery.min.js.XXXXXX")"
-    if curl -sSfL -o "$jquery_tmp" "$(vendor_url jquery.min.js)"; then
+    if curl -sSfL --connect-timeout 15 --max-time 120 -o "$jquery_tmp" "$(vendor_url jquery.min.js)"; then
         chmod 644 "$jquery_tmp"
         mv -f "$jquery_tmp" "$jquery_path"
         jquery_keep=""
