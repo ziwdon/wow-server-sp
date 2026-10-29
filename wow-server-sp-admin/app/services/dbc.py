@@ -1,8 +1,9 @@
 """WoW 3.3.5 client DBC files: a small WDBC reader and the Armory's reference-data store.
 
 The Armory needs names and icons the AC database does not hold: talent trees, spell
-names, glyphs, enchant/gem texts, random suffixes, item sets and item icons. They come
-from the read-only client-data volume (``$CLIENT_DATA_DIR/dbc/``, default ``/client-data``).
+names, glyphs, enchant/gem texts, random suffixes (and the points that size their stats),
+item sets and item icons. They come from the read-only client-data volume
+(``$CLIENT_DATA_DIR/dbc/``, default ``/client-data``).
 
 WDBC layout: a 20-byte header (magic ``WDBC``, then little-endian uint32 record count,
 field count, record size, string-block size), the fixed-size records (4-byte fields), then
@@ -33,7 +34,7 @@ from array import array
 from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, NamedTuple, TypeVar
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +227,18 @@ ITEMDISPLAY_FIELDS = 25
 ITEMDISPLAY_ID = 0        # ID
 ITEMDISPLAY_ICON = 5      # inventoryIcon (m_inventoryIcon[0], InventoryIcon_1)
 
+# RandPropPoints.dbc — RandomPropertiesPointsEntry, RandomPropertiesPointsfmt
+# "niiiiiiiiiiiiiii" (16 fields). The struct comments number the fields from 1 after a
+# commented-out "hidden key" Id, but the fmt's 'n' (field 0) is stored as the struct's
+# first member, itemLevel: the fmt length and the mirror table randproppoints_dbc (ID,
+# Epic_1-5, Superior_1-5, Good_1-5) give the indices below.
+RANDPOINTS_FIELDS = 16
+RANDPOINTS_ITEM_LEVEL = 0      # itemLevel (fmt 'n': the id LookupEntry(ItemLevel) finds)
+RANDPOINTS_EPIC_FIRST = 1      # EpicPropertiesPoints[5] (Epic_1-5)
+RANDPOINTS_RARE_FIRST = 6      # RarePropertiesPoints[5] (Superior_1-5)
+RANDPOINTS_UNCOMMON_FIRST = 11  # UncommonPropertiesPoints[5] (Good_1-5)
+RANDPOINTS_COUNT = 5
+
 DBC_FILES: tuple[str, ...] = (
     "Talent.dbc",
     "TalentTab.dbc",
@@ -238,6 +251,7 @@ DBC_FILES: tuple[str, ...] = (
     "ItemRandomSuffix.dbc",
     "ItemSet.dbc",
     "ItemDisplayInfo.dbc",
+    "RandPropPoints.dbc",
 )
 
 EXPECTED_FIELDS: dict[str, int] = {
@@ -252,6 +266,7 @@ EXPECTED_FIELDS: dict[str, int] = {
     "ItemRandomSuffix.dbc": RANDSUFFIX_FIELDS,
     "ItemSet.dbc": ITEMSET_FIELDS,
     "ItemDisplayInfo.dbc": ITEMDISPLAY_FIELDS,
+    "RandPropPoints.dbc": RANDPOINTS_FIELDS,
 }
 
 
@@ -321,6 +336,15 @@ class ItemSet:
     name: str
     items: tuple[int, ...]
     bonuses: tuple[tuple[int, int], ...]  # (spell_id, threshold)
+
+
+class RandPropPoints(NamedTuple):
+    """One item level's random-property points, each indexed by the core's suffix-factor
+    column (``GenerateEnchSuffixFactor``: 0 head/chest/legs/2H, ..., 4 ranged)."""
+
+    epic: tuple[int, ...]
+    rare: tuple[int, ...]
+    uncommon: tuple[int, ...]
 
 
 def icon_basename(path: str) -> str:
@@ -432,6 +456,7 @@ class DbcStore:
         self._random_properties: dict[int, RandomEnchant] = {}
         self._random_suffixes: dict[int, RandomEnchant] = {}
         self._item_sets: dict[int, ItemSet] = {}
+        self._rand_prop_points: dict[int, RandPropPoints] = {}
         self._spells: _LazyTable[Spell] | None = None
         self._item_icons: _LazyTable[str] | None = None
 
@@ -457,6 +482,7 @@ class DbcStore:
                 "ItemRandomSuffix.dbc": self._load_random_suffixes,
                 "ItemSet.dbc": self._load_item_sets,
                 "ItemDisplayInfo.dbc": self._load_item_icons,
+                "RandPropPoints.dbc": self._load_rand_prop_points,
             }
             for name in DBC_FILES:
                 self._load_one(name, loaders[name])
@@ -606,6 +632,17 @@ class DbcStore:
         self._item_icons = _LazyTable(f, ITEMDISPLAY_ID, _decode_item_icon)
         return True
 
+    def _load_rand_prop_points(self, f: DbcFile) -> bool:
+        entries: dict[int, RandPropPoints] = {}
+        for i in range(f.records):
+            entries[f.int(i, RANDPOINTS_ITEM_LEVEL)] = RandPropPoints(
+                epic=f.ints(i, RANDPOINTS_EPIC_FIRST, RANDPOINTS_COUNT),
+                rare=f.ints(i, RANDPOINTS_RARE_FIRST, RANDPOINTS_COUNT),
+                uncommon=f.ints(i, RANDPOINTS_UNCOMMON_FIRST, RANDPOINTS_COUNT),
+            )
+        self._rand_prop_points = entries
+        return False
+
     def close(self) -> None:
         """Unmap the files kept open (tests and process teardown)."""
         with self._lock:
@@ -670,6 +707,12 @@ class DbcStore:
         self.load()
         table = self._item_icons
         return (table.get(display_id) or "") if table is not None else ""
+
+    def rand_prop_points(self, item_level: int) -> RandPropPoints | None:
+        """The ``RandPropPoints.dbc`` row whose id is ``item_level`` (the core's
+        ``sRandomPropertiesPointsStore.LookupEntry(ItemLevel)``)."""
+        self.load()
+        return self._rand_prop_points.get(item_level)
 
 
 # --- the process-wide instance ---

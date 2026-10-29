@@ -14,13 +14,25 @@ Enum values come from the pinned core (rev 3f2969dd), never from memory.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
 
 import mysql.connector
 
 from app.services import wow_reference as wr
-from app.services.dbc import DbcStore, Glyph, Spell, Talent, TalentTab
+from app.services.dbc import (
+    DbcStore,
+    Enchant,
+    Gem,
+    Glyph,
+    ItemSet,
+    RandomEnchant,
+    RandPropPoints,
+    Spell,
+    Talent,
+    TalentTab,
+)
 
 
 class ArmoryStore(Protocol):
@@ -114,6 +126,298 @@ class EquippedItem:
     enchantments: dict[int, int] = field(default_factory=dict, hash=False)
     # item_instance.randomPropertyId: < 0 = ItemRandomSuffix id, > 0 = ItemRandomProperties
     random_property_id: int = 0
+
+
+# --- item tooltips (spec §3 G3, §12) ---
+
+
+class TooltipStore(Protocol):
+    """The ``DbcStore`` accessors ``tooltip`` uses (ids are passed positionally)."""
+
+    def spell(self, id_: int) -> Spell | None: ...
+    def enchant(self, id_: int) -> Enchant | None: ...
+    def gem(self, item_id: int) -> Gem | None: ...
+    def random_property(self, id_: int) -> RandomEnchant | None: ...
+    def random_suffix(self, id_: int) -> RandomEnchant | None: ...
+    def item_set(self, id_: int) -> ItemSet | None: ...
+    def item_icon(self, display_id: int) -> str: ...
+    def rand_prop_points(self, item_level: int) -> RandPropPoints | None: ...
+
+
+# ItemTemplate.h enum SocketColor (1 meta, 2 red, 4 yellow, 8 blue). A socket with no
+# colour is the prismatic one (PlayerStorage.cpp, Player::ApplyEnchantment); a prismatic
+# gem's colour is red | yellow | blue.
+SOCKET_COLOR_NAMES = {0: "Prismatic", 1: "Meta", 2: "Red", 4: "Yellow", 8: "Blue", 14: "Prismatic"}
+
+# ItemTemplate.h enum ItemSpelltriggerType -> the tooltip prefix. Other triggers
+# (4 soulstone, 5 no-delay use, 6 learn spell) get no line.
+SPELL_TRIGGER_PREFIXES = {1: "Equip:", 0: "Use:", 2: "Chance on hit:"}
+
+# (item_template column, SpellSchools id) in spell-school order, the client's order
+_RESISTANCES = (
+    ("holy_res", 1),
+    ("fire_res", 2),
+    ("nature_res", 3),
+    ("frost_res", 4),
+    ("shadow_res", 5),
+    ("arcane_res", 6),
+)
+
+# GenerateEnchSuffixFactor (ItemEnchantmentMgr.cpp): InventoryType -> the column of
+# RandPropPoints' Epic/Rare/Uncommon arrays; a type not listed has no points (0).
+_SUFFIX_FACTOR_COLUMN = {
+    **dict.fromkeys((1, 4, 5, 7, 17, 20), 0),      # head, body, chest, legs, 2H, robe
+    **dict.fromkeys((3, 6, 8, 10, 12), 1),         # shoulders, waist, feet, hands, trinket
+    **dict.fromkeys((2, 9, 11, 14, 16, 23), 2),    # neck, wrists, finger, shield, cloak, holdable
+    **dict.fromkeys((13, 21, 22), 3),              # one-hand, main hand, off hand
+    **dict.fromkeys((15, 25, 26), 4),              # ranged, thrown, ranged right
+}
+ITEM_QUALITY_UNCOMMON = 2  # SharedDefines.h ItemQualities
+ITEM_QUALITY_RARE = 3
+ITEM_QUALITY_EPIC = 4
+
+
+@dataclass(frozen=True, slots=True)
+class Socket:
+    color: str  # socket_color_name: "Meta", "Red", "Yellow", "Blue" or "Prismatic"
+    gem_text: str | None  # the gem's enchant text; None = empty socket
+    gem_icon: str  # always "" in v1 (gem item display ids are in item_template, not DBCs)
+
+
+@dataclass(frozen=True, slots=True)
+class SetBlock:
+    name: str
+    have: int  # equipped items of this set
+    total: int  # items in the set, 0 = unknown (no ItemSet.dbc row)
+    bonuses: list[tuple[int, str]]  # (pieces needed, bonus spell), by pieces needed
+
+
+@dataclass(frozen=True, slots=True)
+class Tooltip:
+    """One equipped item's WoW-style tooltip, ready to render (plain data: the page embeds
+    it as JSON). An optional line is ``None``/empty when the item has none."""
+
+    name: str  # with the random property/suffix name appended
+    quality: int  # ItemQualities
+    quality_color: str
+    ilvl: int
+    binding: str | None  # "Binds when picked up", ...
+    slot_name: str | None  # INVENTORY_TYPE_NAMES, e.g. "Two-Hand"
+    type_name: str | None  # ITEM_SUBCLASS_NAMES, e.g. "Sword" (none for misc. armour)
+    armor: int  # 0 = no armour line
+    damage: str | None  # "12 - 34 Damage", "12 - 34 Fire Damage"
+    speed: str | None  # "Speed 2.60"
+    dps: str | None  # "57.7" (damage per second)
+    stats: list[str]  # "+16 Strength"
+    resistances: list[str]  # "+10 Fire Resistance"
+    sockets: list[Socket]  # native sockets, then a prismatic one
+    socket_bonus: str | None  # the socket bonus enchant's text
+    socket_bonus_active: bool  # every native socket holds a gem of a fitting colour
+    enchant: str | None  # the permanent enchant's text
+    suffix_stats: list[str]  # the random property/suffix enchant lines
+    equips: list[str]  # "Equip: <spell>", "Use: <spell>", "Chance on hit: <spell>"
+    set_block: SetBlock | None
+    required_level: int
+    description: str
+    icon: str  # lowercase inventory icon name, "" if unknown
+
+
+def format_stat(type_: int, value: int) -> str:
+    """An ``ITEM_MOD_*`` stat line: ``+16 Strength``, ``-5 Stamina``, ``+7 Stat #40``."""
+    return f"{value:+d} {wr.STAT_NAMES.get(type_, f'Stat #{type_}')}"
+
+
+def socket_color_name(mask: int) -> str:
+    """A socket (or gem) ``SocketColor`` mask -> its name; 0 and 14 are ``Prismatic``."""
+    return SOCKET_COLOR_NAMES.get(mask, f"Colour #{mask}")
+
+
+def dps(min_: float, max_: float, delay: int) -> str | None:
+    """Damage per second, one decimal (``(min + max) / 2`` per ``delay`` ms swing);
+    ``None`` without damage or speed."""
+    if delay <= 0 or min_ + max_ <= 0:
+        return None
+    return f"{(min_ + max_) / 2 / (delay / 1000):.1f}"
+
+
+def suffix_factor(item: EquippedItem, points: RandPropPoints | None) -> int | None:
+    """The core's ``GenerateEnchSuffixFactor`` for ``item`` given its item level's
+    ``RandPropPoints`` row: the point for its inventory type's column and its quality
+    (uncommon, rare or epic; 0 for any other quality or a type without points).
+    ``None`` = no row (the core would give 0; the tooltip shows ``?``)."""
+    if points is None:
+        return None
+    column = _SUFFIX_FACTOR_COLUMN.get(item.inventory_type)
+    if column is None:
+        return 0
+    by_quality = {
+        ITEM_QUALITY_UNCOMMON: points.uncommon,
+        ITEM_QUALITY_RARE: points.rare,
+        ITEM_QUALITY_EPIC: points.epic,
+    }
+    values = by_quality.get(item.quality)
+    if values is None:
+        return 0
+    return values[column] if column < len(values) else None
+
+
+def _enchant_text(enchant_id: int, store: TooltipStore) -> str:
+    enchant = store.enchant(enchant_id)
+    return enchant.text if enchant is not None and enchant.text else f"Enchant #{enchant_id}"
+
+
+def _spell_label(spell_id: int, store: TooltipStore) -> str:
+    spell = store.spell(spell_id)
+    if spell is None or not spell.name:
+        return f"Spell #{spell_id}"
+    return f"{spell.name} ({spell.rank})" if spell.rank else spell.name
+
+
+def _gem_fits(enchant_id: int | None, socket_color: int, store: TooltipStore) -> bool:
+    """``Item::GemsFitSockets`` for one socket: socket enchant -> its gem item ->
+    ``GemProperties`` colour, which must share a bit with the socket colour (so a meta
+    socket takes only a meta gem). Missing data is no match."""
+    if not enchant_id:
+        return False
+    enchant = store.enchant(enchant_id)
+    if enchant is None or not enchant.gem_item_id:
+        return False
+    gem = store.gem(enchant.gem_item_id)
+    return gem is not None and bool(gem.color_mask & socket_color)
+
+
+def _sockets(item: EquippedItem, store: TooltipStore) -> tuple[list[Socket], bool]:
+    """(sockets, do all native sockets hold a fitting gem). A gem in a socket slot past the
+    native ones, or the first free slot when ``PRISMATIC_ENCHANTMENT_SLOT`` is set (belt
+    buckle, socketed bracers/gloves), is the prismatic socket."""
+    colors = (tuple(item.socket_colors) + (0,) * len(ENCHANT_SOCKETS))[: len(ENCHANT_SOCKETS)]
+    first_free = next((i for i, color in enumerate(colors) if not color), None)
+    prismatic = ENCHANT_PRISMATIC in item.enchantments
+    sockets: list[Socket] = []
+    native = 0
+    fit = True
+    for i, color in enumerate(colors):
+        enchant_id = item.enchantments.get(ENCHANT_SOCKETS[i])
+        gem_text = _enchant_text(enchant_id, store) if enchant_id else None
+        if color:
+            native += 1
+            sockets.append(Socket(socket_color_name(color), gem_text, ""))
+            fit = fit and _gem_fits(enchant_id, color, store)
+        elif enchant_id or (prismatic and i == first_free):
+            sockets.append(Socket(socket_color_name(0), gem_text, ""))
+    return sockets, native > 0 and fit
+
+
+def _random_enchant(item: EquippedItem, store: TooltipStore) -> tuple[str, list[str]]:
+    """(name with the suffix, stat lines) for ``item_instance.randomPropertyId``.
+
+    ``> 0``: ``ItemRandomProperties``, whose enchant texts carry fixed amounts. ``< 0``:
+    ``ItemRandomSuffix`` row ``-id``, whose texts carry ``$i`` = ``AllocationPct *
+    suffix factor / 10000`` (integer division, Player::ApplyEnchantment); ``?`` when the
+    factor is unknown. The DBC name already reads "of the Bear"; the core's item link is
+    ``name + " " + suffix`` (Hyperlinks.cpp).
+    """
+    rid = item.random_property_id
+    if rid > 0:
+        entry = store.random_property(rid)
+        if entry is None:
+            return item.name, [f"Random property #{rid}"]
+        lines = [_enchant_text(enchant_id, store) for enchant_id in entry.enchant_ids]
+    elif rid < 0:
+        entry = store.random_suffix(-rid)
+        if entry is None:
+            return item.name, [f"Random suffix #{-rid}"]
+        factor = suffix_factor(item, store.rand_prop_points(item.item_level))
+        lines = []
+        for i, enchant_id in enumerate(entry.enchant_ids):
+            enchant = store.enchant(enchant_id)
+            if enchant is None or not enchant.text:
+                lines.append(f"Enchant #{enchant_id}")
+                continue
+            alloc = entry.alloc[i] if i < len(entry.alloc) else None
+            amount = "?" if factor is None or alloc is None else str(alloc * factor // 10000)
+            lines.append(enchant.text.replace("$i", amount))
+    else:
+        return item.name, []
+    name = f"{item.name} {entry.suffix}" if entry.suffix else item.name
+    return name, lines
+
+
+def _set_block(item: EquippedItem, store: TooltipStore,
+               all_items: list[EquippedItem]) -> SetBlock | None:
+    """The item's set: pieces counted like the core (``AddItemsSetItem``: every equipped
+    item whose ``itemset`` is this set, the item itself included)."""
+    set_id = item.item_set
+    if not set_id:
+        return None
+    have = sum(1 for other in all_items if other.item_set == set_id)
+    if item not in all_items:
+        have += 1
+    entry = store.item_set(set_id)
+    if entry is None:
+        return SetBlock(name=f"Set #{set_id}", have=have, total=0, bonuses=[])
+    bonuses = sorted(
+        ((threshold, _spell_label(spell_id, store)) for spell_id, threshold in entry.bonuses),
+        key=lambda bonus: bonus[0],
+    )
+    return SetBlock(name=entry.name or f"Set #{set_id}", have=have, total=len(entry.items),
+                    bonuses=bonuses)
+
+
+def tooltip(item: EquippedItem, store: TooltipStore, all_items: list[EquippedItem]) -> Tooltip:
+    """``item``'s tooltip from its ``item_template``/``item_instance`` data and the DBCs.
+
+    ``all_items`` = the character's equipped items (for the set count). Never raises on
+    missing reference data: an enchant, spell or set the store does not know shows as
+    ``Enchant #<id>``, ``Spell #<id>``, ``Set #<id>`` (spec §12).
+    """
+    weapon = item.dmg_max > 0 and item.delay > 0
+    damage = speed = None
+    if weapon:
+        school = wr.DAMAGE_TYPE_NAMES.get(item.dmg_type, "") if item.dmg_type else ""
+        low, high = (math.floor(v + 0.5) for v in (item.dmg_min, item.dmg_max))
+        damage = f"{low} - {high} {school + ' ' if school else ''}Damage"
+        speed = f"Speed {item.delay / 1000:.2f}"
+    type_name = None
+    if (item.item_class, item.subclass) != (4, 0):  # misc. armour (rings, necks, ...)
+        type_name = wr.ITEM_SUBCLASS_NAMES.get((item.item_class, item.subclass))
+    sockets, gems_fit = _sockets(item, store)
+    socket_bonus = _enchant_text(item.socket_bonus, store) if item.socket_bonus else None
+    perm = item.enchantments.get(ENCHANT_PERM)
+    name, suffix_stats = _random_enchant(item, store)
+    equips = []
+    for spell_id, trigger in zip(item.spell_ids, item.spell_triggers):
+        prefix = SPELL_TRIGGER_PREFIXES.get(trigger)
+        if spell_id > 0 and prefix is not None:
+            equips.append(f"{prefix} {_spell_label(spell_id, store)}")
+    return Tooltip(
+        name=name,
+        quality=item.quality,
+        quality_color=wr.QUALITY_COLORS.get(item.quality, wr.QUALITY_COLORS[1]),
+        ilvl=item.item_level,
+        binding=wr.BONDING_NAMES.get(item.bonding),
+        slot_name=wr.INVENTORY_TYPE_NAMES.get(item.inventory_type),
+        type_name=type_name,
+        armor=item.armor,
+        damage=damage,
+        speed=speed,
+        dps=dps(item.dmg_min, item.dmg_max, item.delay) if weapon else None,
+        stats=[format_stat(t, v) for t, v in zip(item.stat_types, item.stat_values) if v],
+        resistances=[
+            f"{getattr(item, column):+d} {wr.DAMAGE_TYPE_NAMES[school]} Resistance"
+            for column, school in _RESISTANCES if getattr(item, column)
+        ],
+        sockets=sockets,
+        socket_bonus=socket_bonus,
+        socket_bonus_active=socket_bonus is not None and gems_fit,
+        enchant=_enchant_text(perm, store) if perm else None,
+        suffix_stats=suffix_stats,
+        equips=equips,
+        set_block=_set_block(item, store, all_items),
+        required_level=item.required_level,
+        description=item.description,
+        icon=store.item_icon(item.display_id) if item.display_id else "",
+    )
 
 
 # --- talents ---

@@ -31,32 +31,88 @@ from app.services.armory import (
     GlyphRow,
     Header,
     SearchHit,
+    SetBlock,
+    Socket,
+    Tooltip,
     ViewerItem,
     collect_character,
+    dps,
     equipped_item,
+    format_stat,
     glyph_rows,
     map_customization,
     model_id,
     normalize_search,
     parse_enchantments,
     search_characters,
+    socket_color_name,
     split_specs,
     stats_rows,
+    suffix_factor,
     talent_trees,
+    tooltip,
     viewer_items,
 )
-from app.services.dbc import Glyph, Spell, Talent, TalentTab
+from app.services import dbc
+from app.services.dbc import (
+    Enchant,
+    Gem,
+    Glyph,
+    ItemSet,
+    RandomEnchant,
+    RandPropPoints,
+    Spell,
+    Talent,
+    TalentTab,
+)
 
 
 class FakeStore:
     """Just the ``DbcStore`` accessors the helpers use (ids are positional, like ``id_``)."""
 
-    def __init__(self, *, talents=(), tabs=(), spells=(), icons=None, glyphs=()):
+    def __init__(self, *, talents=(), tabs=(), spells=(), icons=None, glyphs=(),
+                 enchants=(), gems=(), random_properties=(), random_suffixes=(),
+                 item_sets=(), icons_by_display=None, points=None, missing=()):
         self._talents = {t.id: t for t in talents}
         self._tabs = {t.id: t for t in tabs}
         self._spells = {s.id: s for s in spells}
         self._icons = dict(icons or {})
         self._glyphs = {g.id: g for g in glyphs}
+        self._enchants = {e.id: e for e in enchants}
+        self._gems = {g.item_id: g for g in gems}
+        self._random_properties = {r.id: r for r in random_properties}
+        self._random_suffixes = {r.id: r for r in random_suffixes}
+        self._item_sets = {s.id: s for s in item_sets}
+        self._item_icons = dict(icons_by_display or {})
+        self._points = dict(points or {})
+        self._missing = list(missing)
+
+    def missing(self):
+        return list(self._missing)
+
+    def ok(self):
+        return not self._missing
+
+    def enchant(self, id_):
+        return self._enchants.get(id_)
+
+    def gem(self, item_id):
+        return self._gems.get(item_id)
+
+    def random_property(self, id_):
+        return self._random_properties.get(id_)
+
+    def random_suffix(self, id_):
+        return self._random_suffixes.get(id_)
+
+    def item_set(self, id_):
+        return self._item_sets.get(id_)
+
+    def item_icon(self, display_id):
+        return self._item_icons.get(display_id, "")
+
+    def rand_prop_points(self, item_level):
+        return self._points.get(item_level)
 
     def talents(self):
         return dict(self._talents)
@@ -624,6 +680,298 @@ def test_viewer_items_sorted_by_slot_and_robe_sent_as_is():
     assert omitted == [1, 10, 11, 12, 13, 17]
     assert ViewerItem(4, 20, 8888) in items
     assert viewer_items([]) == ([], [])
+
+
+# --- item tooltips (spec §3 G3, §6, §12) ---
+
+# Enchant/gem fixtures: (enchant id, text, gem item id, gem colour mask or None = no
+# GemProperties row). Colours are SocketColor masks: 1 meta, 2 red, 4 yellow, 8 blue.
+_GEM_ROWS = (
+    (3621, "+21 Critical Strike Rating and 3% Increased Critical Damage", 41398, 1),  # meta
+    (3520, "+20 Strength", 40111, 2),               # red
+    (3532, "+10 Strength and +15 Stamina", 40129, 10),  # purple: red | blue
+    (3540, "+20 Critical Strike Rating", 40142, 4),  # yellow
+    (3879, "+10 All Stats", 49110, 14),             # prismatic: red | yellow | blue
+    (3600, "+12 Agility", 40200, None),             # gem enchant without gem data
+)
+
+
+def _tooltip_store(**kw):
+    enchants = [Enchant(id=e, text=t, gem_item_id=g, visual_id=0) for e, t, g, _ in _GEM_ROWS]
+    enchants += [
+        Enchant(id=3307, text="+6 Stamina", gem_item_id=0, visual_id=0),
+        Enchant(id=3368, text="Rune of the Fallen Crusader", gem_item_id=0, visual_id=151),
+        Enchant(id=3729, text="Prismatic Socket", gem_item_id=0, visual_id=0),
+        Enchant(id=2802, text="+$i Stamina", gem_item_id=0, visual_id=0),
+        Enchant(id=2803, text="+$i Strength", gem_item_id=0, visual_id=0),
+        Enchant(id=2930, text="+12 Spell Power", gem_item_id=0, visual_id=0),
+        Enchant(id=2931, text="+8 Stamina", gem_item_id=0, visual_id=0),
+    ]
+    gems = [Gem(item_id=g, enchant_id=e, color_mask=c) for e, _, g, c in _GEM_ROWS if c is not None]
+    defaults = dict(
+        enchants=enchants,
+        gems=gems,
+        icons_by_display={33100: "inv_helmet_96"},
+        random_properties=[RandomEnchant(id=14, suffix="of the Owl",
+                                         enchant_ids=(2930, 2931), alloc=())],
+        random_suffixes=[RandomEnchant(id=5, suffix="of the Bear",
+                                       enchant_ids=(2802, 2803), alloc=(5259, 3506))],
+        points={200: RandPropPoints(epic=(501, 372, 283, 214, 165),
+                                    rare=(402, 303, 234, 175, 136),
+                                    uncommon=(305, 226, 177, 138, 109))},
+    )
+    defaults.update(kw)
+    return FakeStore(**defaults)
+
+
+def test_tooltip_weapon_damage_speed_dps():
+    sword = _item(15, 17, 33100, item_class=2, subclass=8, quality=4, item_level=200,
+                  required_level=80, bonding=1, dmg_min=100.0, dmg_max=200.0, delay=2600,
+                  description="Forged in fire.")
+    t = tooltip(sword, _tooltip_store(), [sword])
+
+    assert isinstance(t, Tooltip)
+    assert (t.name, t.quality, t.quality_color) == ("Item 15", 4, "#a335ee")
+    assert (t.ilvl, t.required_level, t.binding) == (200, 80, "Binds when picked up")
+    assert (t.slot_name, t.type_name) == ("Two-Hand", "Sword")
+    assert t.damage == "100 - 200 Damage"
+    assert t.speed == "Speed 2.60"
+    assert t.dps == "57.7"  # (100 + 200) / 2 / 2.6
+    assert (t.description, t.icon) == ("Forged in fire.", "inv_helmet_96")
+
+    assert dps(100, 200, 2600) == "57.7"
+    assert dps(0, 0, 2600) is None
+    assert dps(10, 20, 0) is None
+
+    fire = tooltip(dataclasses.replace(sword, dmg_type=2, dmg_min=51.5, dmg_max=96.4),
+                   _tooltip_store(), [])
+    assert fire.damage == "52 - 96 Fire Damage"
+
+    helm = _item(0, 1, 777, item_class=4, subclass=4, armor=1500, quality=3)
+    h = tooltip(helm, _tooltip_store(), [helm])
+    assert (h.damage, h.speed, h.dps) == (None, None, None)
+    assert (h.armor, h.slot_name, h.type_name, h.binding) == (1500, "Head", "Plate", None)
+    assert h.icon == ""  # display id unknown to the store
+    # a ring (armour "Miscellaneous") shows no type line; the client shows none either
+    ring = tooltip(_item(10, 11, item_class=4, subclass=0), _tooltip_store(), [])
+    assert (ring.slot_name, ring.type_name) == ("Finger", None)
+    # an unknown quality falls back to the common colour
+    assert tooltip(_item(0, 1, quality=9), _tooltip_store(), []).quality_color == "#ffffff"
+
+
+def test_tooltip_stats_and_resistances_formatting():
+    item = _item(0, 1, stat_types=(4, 7, 32, 0, 99, 0, 0, 0, 0, 0),
+                 stat_values=(16, -5, 20, 0, 3, 0, 0, 0, 0, 0),
+                 fire_res=10, arcane_res=5, holy_res=0)
+    t = tooltip(item, _tooltip_store(), [item])
+
+    # zero-value columns are unused stat slots; an unknown stat type degrades to its id
+    assert t.stats == ["+16 Strength", "-5 Stamina", "+20 Critical Strike Rating", "+3 Stat #99"]
+    # resistances in spell-school order (holy, fire, nature, frost, shadow, arcane)
+    assert t.resistances == ["+10 Fire Resistance", "+5 Arcane Resistance"]
+
+    assert format_stat(4, 16) == "+16 Strength"
+    assert format_stat(7, -5) == "-5 Stamina"
+    assert format_stat(40, 7) == "+7 Stat #40"
+    # short tuples (an EquippedItem built by hand) are fine
+    assert tooltip(_item(0, 1), _tooltip_store(), []).stats == []
+
+
+def test_tooltip_sockets_gems_and_bonus_active_only_when_all_filled():
+    """The bonus is active only when every native socket holds a gem whose colour mask
+    matches the socket (``Item::GemsFitSockets``); filled with a wrong colour is not enough."""
+    store = _tooltip_store()
+    helm = _item(0, 1, socket_colors=(1, 2, 8), socket_bonus=3307,
+                 enchantments={2: 3621, 3: 3520, 4: 3532})
+    t = tooltip(helm, store, [helm])
+    assert t.sockets == [
+        Socket("Meta", "+21 Critical Strike Rating and 3% Increased Critical Damage", ""),
+        Socket("Red", "+20 Strength", ""),
+        Socket("Blue", "+10 Strength and +15 Stamina", ""),
+    ]
+    assert (t.socket_bonus, t.socket_bonus_active) == ("+6 Stamina", True)
+
+    def active(enchantments, colors=(1, 2, 8)):
+        item = dataclasses.replace(helm, socket_colors=colors, enchantments=enchantments)
+        return tooltip(item, store, [item]).socket_bonus_active
+
+    # an empty socket
+    empty = dataclasses.replace(helm, enchantments={2: 3621, 3: 3520})
+    e = tooltip(empty, store, [empty])
+    assert e.sockets[2] == Socket("Blue", None, "")
+    assert e.socket_bonus_active is False
+    assert active({2: 3621, 3: 3520, 4: 3540}) is False  # yellow gem in a blue socket
+    assert active({2: 3520, 3: 3520, 4: 3532}) is False  # red gem in the meta socket
+    assert active({2: 3879, 3: 3520, 4: 3532}) is False  # prismatic gem in the meta socket
+    assert active({2: 3621, 3: 3621, 4: 3532}) is False  # meta gem in a red socket
+    assert active({2: 3621, 3: 3879, 4: 3879}) is True   # prismatic gems fit any colour
+    assert active({2: 3621, 3: 3600, 4: 3532}) is False  # no gem data: not a match
+    assert active({2: 3621, 3: 9999, 4: 3532}) is False  # unknown enchant: not a match
+
+    unknown = dataclasses.replace(helm, enchantments={2: 3621, 3: 3600, 4: 9999})
+    assert [s.gem_text for s in tooltip(unknown, store, []).sockets] == [
+        "+21 Critical Strike Rating and 3% Increased Critical Damage",
+        "+12 Agility",      # the gem enchant's text, even without gem data
+        "Enchant #9999",
+    ]
+
+    # a prismatic socket (belt buckle: PRISMATIC slot 6) after the native ones; only the
+    # native sockets decide the bonus
+    belt = _item(5, 6, socket_colors=(4, 0, 0), socket_bonus=3307,
+                 enchantments={2: 3540, 3: 3879, 6: 3729})
+    b = tooltip(belt, store, [belt])
+    assert b.sockets == [Socket("Yellow", "+20 Critical Strike Rating", ""),
+                         Socket("Prismatic", "+10 All Stats", "")]
+    assert b.socket_bonus_active is True
+    bare_buckle = dataclasses.replace(belt, enchantments={2: 3540, 6: 3729})
+    assert tooltip(bare_buckle, store, []).sockets[1] == Socket("Prismatic", None, "")
+    # a gem beyond the native sockets is listed even without the slot-6 marker
+    stray = dataclasses.replace(belt, enchantments={2: 3540, 4: 3520})
+    assert tooltip(stray, store, []).sockets[1] == Socket("Prismatic", "+20 Strength", "")
+
+    plain = tooltip(_item(0, 1), store, [])
+    assert (plain.sockets, plain.socket_bonus, plain.socket_bonus_active) == ([], None, False)
+
+    assert [socket_color_name(m) for m in (1, 2, 4, 8, 0, 14)] == [
+        "Meta", "Red", "Yellow", "Blue", "Prismatic", "Prismatic"]
+    assert socket_color_name(3) == "Colour #3"
+
+
+def test_tooltip_permanent_enchant_text():
+    store = _tooltip_store()
+    weapon = _item(15, 17, enchantments={0: 3368, 1: 2930})
+    assert tooltip(weapon, store, [weapon]).enchant == "Rune of the Fallen Crusader"
+    # a temporary enchant (slot 1: poisons, oils) is not the permanent enchant line
+    temp_only = dataclasses.replace(weapon, enchantments={1: 2930})
+    assert tooltip(temp_only, store, []).enchant is None
+    assert tooltip(_item(0, 1), store, []).enchant is None
+
+
+def test_tooltip_random_suffix_appends_name_and_stats():
+    store = _tooltip_store()
+    # rare legs, item level 200: suffix factor = RarePropertiesPoints[0] = 402
+    legs = _item(6, 7, quality=3, item_level=200, random_property_id=-5)
+    legs = dataclasses.replace(legs, name="Frostsaber Leggings")
+    t = tooltip(legs, store, [legs])
+    assert t.name == "Frostsaber Leggings of the Bear"  # the DBC name carries "of the"
+    # amount = AllocationPct * factor / 10000, integer division as in the core
+    assert t.suffix_stats == ["+211 Stamina", "+140 Strength"]  # 5259*402, 3506*402
+
+    # the RandPropPoints row is missing: the amounts are unknown, the name is not
+    no_points = tooltip(dataclasses.replace(legs, item_level=199), store, [])
+    assert no_points.name == "Frostsaber Leggings of the Bear"
+    assert no_points.suffix_stats == ["+? Stamina", "+? Strength"]
+
+    # a random property (> 0) has fixed amounts in its enchant texts
+    owl = dataclasses.replace(legs, name="Robe", random_property_id=14)
+    o = tooltip(owl, store, [owl])
+    assert (o.name, o.suffix_stats) == ("Robe of the Owl", ["+12 Spell Power", "+8 Stamina"])
+
+    # unknown ids: the name stays, the id is shown
+    lost = tooltip(dataclasses.replace(legs, random_property_id=-77), store, [])
+    assert (lost.name, lost.suffix_stats) == ("Frostsaber Leggings", ["Random suffix #77"])
+    lost = tooltip(dataclasses.replace(legs, random_property_id=88), store, [])
+    assert (lost.name, lost.suffix_stats) == ("Frostsaber Leggings", ["Random property #88"])
+    assert tooltip(dataclasses.replace(legs, random_property_id=0), store, []).suffix_stats == []
+
+
+def test_suffix_factor_ports_generate_ench_suffix_factor():
+    points = RandPropPoints(epic=(501, 372, 283, 214, 165),
+                            rare=(402, 303, 234, 175, 136),
+                            uncommon=(305, 226, 177, 138, 109))
+
+    def factor(inventory_type, quality):
+        return suffix_factor(_item(0, inventory_type, quality=quality), points)
+
+    # column 0: head, body, chest, legs, 2H, robe
+    assert [factor(t, 4) for t in (1, 4, 5, 7, 17, 20)] == [501] * 6
+    # column 1: shoulders, waist, feet, hands, trinket
+    assert [factor(t, 3) for t in (3, 6, 8, 10, 12)] == [303] * 5
+    # column 2: neck, wrists, finger, shield, cloak, holdable
+    assert [factor(t, 2) for t in (2, 9, 11, 14, 16, 23)] == [177] * 6
+    # column 3: one-hand, main hand, off hand
+    assert [factor(t, 4) for t in (13, 21, 22)] == [214] * 3
+    # column 4: ranged, thrown, ranged right
+    assert [factor(t, 3) for t in (15, 25, 26)] == [136] * 3
+    # no points: non-equip, bag, tabard, ammo, quiver, relic, unknown types
+    assert [factor(t, 4) for t in (0, 18, 19, 24, 27, 28, 29)] == [0] * 7
+    # only uncommon, rare and epic have points
+    assert [factor(1, q) for q in (0, 1, 5, 6, 7)] == [0] * 5
+    assert suffix_factor(_item(0, 1, quality=4), None) is None
+
+
+def test_tooltip_set_block_counts_equipped_pieces():
+    store = _tooltip_store(
+        item_sets=[ItemSet(id=843, name="Frostfire Garb",
+                           items=(40415, 40416, 40417, 40418, 40419),
+                           bonuses=((61063, 4), (61062, 2)))],
+        spells=[Spell(id=61062, name="Increased Mana Regen", rank="", icon_id=0,
+                      description="")],
+    )
+    head = _item(0, 1, item_set=843)
+    chest = _item(4, 20, item_set=843)
+    legs = _item(6, 7, item_set=843)
+    other = _item(9, 10, item_set=900)
+    gear = [head, chest, legs, other, _item(14, 16)]
+
+    t = tooltip(head, store, gear)
+    # counted like the core: every equipped item whose itemset is this set
+    assert t.set_block == SetBlock(
+        name="Frostfire Garb", have=3, total=5,
+        bonuses=[(2, "Increased Mana Regen"), (4, "Spell #61063")],
+    )
+    # the whole tooltip is plain data (the page embeds it as JSON)
+    json.dumps(dataclasses.asdict(t))
+
+    # unknown set: its id, the count, no total (0) and no bonuses
+    assert tooltip(other, store, gear).set_block == SetBlock("Set #900", 1, 0, [])
+    assert tooltip(_item(14, 16), store, gear).set_block is None
+    # the item itself always counts, even when it is not in the list
+    assert tooltip(head, store, []).set_block.have == 1
+
+
+def test_tooltip_equip_use_chance_prefixes():
+    store = _tooltip_store(spells=[
+        Spell(id=1234, name="Increase Spell Dam 23", rank="", icon_id=0, description=""),
+        Spell(id=5678, name="Berserking", rank="Rank 2", icon_id=0, description=""),
+        Spell(id=9012, name="Fiery Weapon", rank="", icon_id=0, description=""),
+        Spell(id=3333, name="Learning", rank="", icon_id=0, description=""),
+        Spell(id=4444, name="Quick Use", rank="", icon_id=0, description=""),
+    ])
+    trinket = _item(12, 12, spell_ids=(1234, 5678, 9012, 3333, 4444),
+                    spell_triggers=(1, 0, 2, 6, 5))
+    t = tooltip(trinket, store, [trinket])
+    # ITEM_SPELLTRIGGER_ON_EQUIP 1, ON_USE 0, CHANCE_ON_HIT 2; other triggers are skipped
+    assert t.equips == [
+        "Equip: Increase Spell Dam 23",
+        "Use: Berserking (Rank 2)",
+        "Chance on hit: Fiery Weapon",
+    ]
+    # an empty spell column (id 0, trigger 0) is no "Use:" line
+    blank = _item(12, 12, spell_ids=(0, 0, 0, 0, 0), spell_triggers=(0, 0, 0, 0, 0))
+    assert tooltip(blank, store, []).equips == []
+
+
+def test_tooltip_degrades_to_ids_when_store_missing():
+    store = FakeStore(missing=list(dbc.DBC_FILES))
+    assert store.ok() is False
+    item = _item(0, 1, 33100, enchantments={0: 2564, 2: 3520}, socket_colors=(2, 0, 0),
+                 socket_bonus=3307, spell_ids=(1234, 0, 0, 0, 0),
+                 spell_triggers=(1, 0, 0, 0, 0), item_set=843, random_property_id=-5)
+    t = tooltip(item, store, [item])
+
+    assert t.enchant == "Enchant #2564"
+    assert t.sockets == [Socket("Red", "Enchant #3520", "")]
+    assert (t.socket_bonus, t.socket_bonus_active) == ("Enchant #3307", False)
+    assert t.equips == ["Equip: Spell #1234"]
+    assert t.set_block == SetBlock("Set #843", 1, 0, [])
+    assert (t.name, t.suffix_stats) == ("Item 0", ["Random suffix #5"])
+    assert t.icon == ""
+    # the item's own data still shows
+    assert (t.slot_name, t.ilvl) == ("Head", 0)
+    # an enchant whose text is empty also degrades to its id
+    blank = _tooltip_store(enchants=[Enchant(id=2564, text="", gem_item_id=0, visual_id=0)])
+    assert tooltip(item, blank, []).enchant == "Enchant #2564"
 
 
 # --- DB layer: search and character collection (spec §6) ---

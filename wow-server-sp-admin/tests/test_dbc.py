@@ -70,7 +70,8 @@ def record(fields: int, values: dict[int, object]) -> tuple:
 
 
 # Real 3.3.5 field counts (len of the DBCfmt.h format string; SpellIcon.dbc is not loaded
-# by the core, its 3.3.5 layout is ID + TextureFilename).
+# by the core, its 3.3.5 layout is ID + TextureFilename; RandPropPoints.dbc is
+# RandomPropertiesPointsfmt "niiiiiiiiiiiiiii", 16 fields).
 FIELDS = {
     "Talent.dbc": 23,
     "TalentTab.dbc": 24,
@@ -83,12 +84,14 @@ FIELDS = {
     "ItemRandomSuffix.dbc": 29,
     "ItemSet.dbc": 53,
     "ItemDisplayInfo.dbc": 25,
+    "RandPropPoints.dbc": 16,
 }
 
 
 def synthetic_rows() -> dict[str, list[tuple]]:
     """A tiny consistent client-data set: one mage talent, a few spells, glyphs, an
-    enchant + gem, a random property and suffix, an item set and two item icons."""
+    enchant + gem, a random property and suffix, an item set, two item icons and one
+    item level's random-property points."""
     f = FIELDS
     return {
         # TalentEntry: 0 TalentID, 1 TalentTab, 2 Row, 3 Col, 4-8 RankID, 9-12 spellRank
@@ -152,6 +155,15 @@ def synthetic_rows() -> dict[str, list[tuple]]:
             record(f["ItemDisplayInfo.dbc"], {0: 5, 1: "model.mdx", 5: "INV_Chest_Plate_12",
                                               6: "INV_Other"}),
             record(f["ItemDisplayInfo.dbc"], {0: 9, 5: "Inv_Sword_04"}),
+        ],
+        # RandomPropertiesPointsEntry, by the mirror table randproppoints_dbc: 0 ID (= item
+        # level; the struct's itemLevel, fmt 'n'), 1-5 Epic_1..5, 6-10 Superior_1..5 (rare),
+        # 11-15 Good_1..5 (uncommon). The struct comments number them one higher.
+        "RandPropPoints.dbc": [
+            record(f["RandPropPoints.dbc"], {0: 200, 1: 501, 2: 372, 3: 283, 4: 214, 5: 165,
+                                             6: 402, 7: 303, 8: 234, 9: 175, 10: 136,
+                                             11: 305, 12: 226, 13: 177, 14: 138, 15: 109}),
+            record(f["RandPropPoints.dbc"], {0: 1, 1: 9}),
         ],
     }
 
@@ -236,7 +248,7 @@ def test_read_dbc_rejects_bad_magic_and_truncated_file(tmp_path):
 # --- DbcStore ---
 
 
-def test_dbc_files_are_the_eleven_spec_tables_in_order():
+def test_dbc_files_are_the_spec_tables_then_rand_prop_points_in_order():
     assert DBC_FILES == (
         "Talent.dbc",
         "TalentTab.dbc",
@@ -249,7 +261,9 @@ def test_dbc_files_are_the_eleven_spec_tables_in_order():
         "ItemRandomSuffix.dbc",
         "ItemSet.dbc",
         "ItemDisplayInfo.dbc",
+        "RandPropPoints.dbc",
     )
+    assert len(DBC_FILES) == 12
 
 
 def test_store_talents_tabs_and_spell_lookup_from_synthetic_files(client_data):
@@ -309,6 +323,23 @@ def test_store_glyphs_enchants_gems_random_enchants_and_item_sets(client_data):
     assert store.item_set(1) is None
 
 
+def test_store_rand_prop_points_by_item_level(client_data):
+    store = DbcStore(client_data)
+
+    points = store.rand_prop_points(200)
+    assert points == dbc.RandPropPoints(
+        epic=(501, 372, 283, 214, 165),
+        rare=(402, 303, 234, 175, 136),
+        uncommon=(305, 226, 177, 138, 109),
+    )
+    # a plain tuple of (epic, rare, uncommon), each indexed by the suffix-factor column
+    assert points == ((501, 372, 283, 214, 165), (402, 303, 234, 175, 136),
+                      (305, 226, 177, 138, 109))
+    assert store.rand_prop_points(1).epic == (9, 0, 0, 0, 0)
+    assert store.rand_prop_points(199) is None
+    assert store.rand_prop_points(0) is None
+
+
 def test_spell_icon_and_item_icon_are_lowercase_basenames(client_data):
     store = DbcStore(client_data)
 
@@ -363,6 +394,7 @@ def test_store_with_no_client_data_reports_every_file(tmp_path):
     assert store.random_suffix(1) is None
     assert store.item_set(1) is None
     assert store.item_icon(1) == ""
+    assert store.rand_prop_points(1) is None
 
 
 def test_store_loads_lazily_and_only_once_across_threads(client_data, monkeypatch):
@@ -445,3 +477,5 @@ def test_real_client_data_smoke():
     assert (fireball.name, fireball.rank) == ("Fireball", "Rank 1")
     assert store.spell_icon(fireball.icon_id) == "spell_fire_flamebolt"
     assert "Fallen Crusader" in store.enchant(3368).text
+    points = store.rand_prop_points(200)
+    assert points is not None and points.epic[0] > points.rare[0] > points.uncommon[0] > 0
