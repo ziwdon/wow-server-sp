@@ -483,6 +483,45 @@ def test_fetch_upstream_maps_network_failures_to_short_reasons(fake_opener, monk
     assert exc.value.reason == "timeout"
 
 
+def test_fetch_upstream_refuses_a_body_shorter_or_longer_than_declared(fake_opener):
+    url = MV + "wrath/m2/1.m2"
+    # A peer that closes the connection cleanly mid-body: read() just returns less, no error.
+    fake_opener.answer = FakeResponse(b"a" * 10, headers=_headers(Content_Length="100000"))
+    with pytest.raises(UpstreamError) as exc:
+        fetch_upstream(url)
+    assert exc.value.reason == "truncated"
+    fake_opener.answer = FakeResponse(b"a" * 12, headers=_headers(Content_Length="10"))
+    with pytest.raises(UpstreamError) as exc:
+        fetch_upstream(url)
+    assert exc.value.reason == "truncated"
+    fake_opener.answer = FakeResponse(b"", headers=_headers(Content_Length="7"))
+    with pytest.raises(UpstreamError) as exc:
+        fetch_upstream(url)
+    assert exc.value.reason == "truncated"
+
+    # The declared length matches, or there is none (or none we can read): the body stands.
+    fake_opener.answer = FakeResponse(b"a" * 10, headers=_headers(Content_Length="10"))
+    assert fetch_upstream(url).body == b"a" * 10
+    fake_opener.answer = FakeResponse(b"abc")
+    assert fetch_upstream(url).body == b"abc"
+    fake_opener.answer = FakeResponse(b"abc", headers=_headers(Content_Length="three"))
+    assert fetch_upstream(url).body == b"abc"
+
+
+def test_fetch_upstream_refuses_an_encoded_body_before_reading_it(fake_opener):
+    url = MV + "wrath/m2/1.m2"
+    # We ask for identity; anything else would be cached and served as if it were the file.
+    for encoding in ("gzip", "br", "deflate", "x-gzip", "gzip, identity"):
+        fake_opener.answer = FakeResponse(b"\x1f\x8b\x08\x00", headers=_headers(Content_Encoding=encoding))
+        with pytest.raises(UpstreamError) as exc:
+            fetch_upstream(url)
+        assert exc.value.reason == "encoded", encoding
+        assert fake_opener.answer.reads == [], encoding
+    for encoding in ("identity", "Identity", " identity "):
+        fake_opener.answer = FakeResponse(b"plain", headers=_headers(Content_Encoding=encoding))
+        assert fetch_upstream(url).body == b"plain", encoding
+
+
 # --- disk cache ---
 
 
@@ -1111,6 +1150,57 @@ def test_serve_upstream_error_starts_cooldown_and_misses_return_503_until_it_end
     assert rig.proxy.status().unreachable_since is None  # the success cleared the host
 
 
+def test_serve_empty_200_is_an_upstream_failure_and_is_never_stored(tmp_path):
+    rig = Rig(tmp_path, FakeFetch({M2_URL: _ok(b"")}))
+
+    failed = rig.proxy.serve(M2)
+
+    assert failed.status == 503 and failed.path is None and failed.body is None
+    assert "empty" in failed.reason
+    assert not rig.file(M2).exists()  # never cached as an immutable empty model
+    assert rig.proxy.cache.negative(M2) is False  # nor remembered as missing
+    assert rig.proxy.status().unreachable_since is not None  # the host cools down like after a 5xx
+    assert rig.proxy.serve(SKIN).status == 503
+    assert rig.fetch.urls() == [M2_URL]
+    rig.mono.now += 60
+    rig.fetch.answers[M2_URL] = _ok(b"m2 bytes")
+    assert rig.proxy.serve(M2).path.read_bytes() == b"m2 bytes"
+
+
+@pytest.mark.parametrize(
+    "failure", [_status(429), _status(502), _ok(b"")], ids=["429", "502", "empty-200"]
+)
+def test_status_failure_starts_the_cooldown_before_the_slot_is_freed(tmp_path, failure):
+    """A request queued for the only slot sees the failure's cool-down; it never asks the host again."""
+    rig = Rig(tmp_path, GateFetch({M2_URL: failure}), max_parallel=1)
+    record_failure = rig.proxy._host_failed
+
+    def record_failure_late(host):
+        # Give the queued request every chance to take the slot before the failure is recorded.
+        deadline = time.monotonic() + 0.5
+        while len(rig.fetch.calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        record_failure(host)
+
+    rig.proxy._host_failed = record_failure_late
+    leader = _in_thread(rig.proxy.serve, M2)
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    queued = _in_thread(rig.proxy.serve, SKIN)
+
+    def skin_queued() -> bool:
+        with rig.proxy._inflight_lock:
+            return SKIN in rig.proxy._inflight
+
+    _wait_until(skin_queued, "the second request to wait for the slot")
+    rig.fetch.release.set()
+
+    assert _joined(*leader).status == 503
+    second = _joined(*queued)
+    assert second.status == 503
+    assert second.reason == "Wowhead unreachable; waiting a minute before asking again"
+    assert rig.fetch.urls() == [M2_URL]
+
+
 def test_cooldown_is_per_host_and_status_reports_the_earliest_active_one(tmp_path):
     xml_url = item_xml_url(6125)
     rig = Rig(tmp_path, FakeFetch({M2_URL: _status(500), xml_url: _ok(b"<wowhead/>")}))
@@ -1145,20 +1235,24 @@ def test_fetch_item_xml_goes_through_the_guard_and_is_never_cached(tmp_path):
     rig.fetch.answers[xml_url] = _status(404)
     assert rig.proxy.fetch_item_xml(6125) == FetchResult(404, b"", None, None)  # an answer, not an outage
     assert not rig.data_dir.exists()
+    # An empty 200 is returned as it is (unlike an asset's: nothing is cached from it).
+    rig.fetch.answers[xml_url] = _ok(b"")
+    assert rig.proxy.fetch_item_xml(6125) == FetchResult(200, b"", None, None)
+    assert rig.proxy.status().unreachable_since is None
     assert rig.proxy.serve("item-displayid/6125").status == 404  # no asset path reaches it
-    assert len(rig.fetch.calls) == 3
+    assert len(rig.fetch.calls) == 4
 
     with pytest.raises(ValueError):
         rig.proxy.fetch_item_xml(0)
     with pytest.raises(ValueError):
         rig.proxy.fetch_item_xml("6125")  # type: ignore[arg-type]
-    assert len(rig.fetch.calls) == 3
+    assert len(rig.fetch.calls) == 4
 
     # Switched off: not attempted.
     rig.proxy.settings.set_enabled(False)
     assert rig.proxy.fetch_item_xml(6125) is None
     rig.proxy.settings.set_enabled(True)
-    assert len(rig.fetch.calls) == 3
+    assert len(rig.fetch.calls) == 4
 
     # 429/5xx and network errors: None, and www.wowhead.com cools down (zamimg does not).
     for failure in (_status(429), _status(503), UpstreamError("timeout")):
@@ -1332,6 +1426,67 @@ def test_update_viewer_304_changes_nothing(tmp_path):
         rig.proxy.update_viewer()
     assert len(rig.fetch.calls) == calls
     assert snapshot() == before
+
+
+def test_viewer_empty_or_truncated_answer_is_never_pinned(tmp_path):
+    v1 = b"/* viewer v1 */"
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(b"", etag='"v0"')}))
+
+    # First use: an empty 200 is an upstream failure, so nothing is pinned and the next view asks again.
+    first = rig.proxy.serve(VIEWER)
+    assert first.status == 503 and first.path is None and first.body is None
+    assert "empty" in first.reason
+    assert not rig.file(VIEWER).exists() and not rig.file("live/viewer/viewer.meta.json").exists()
+    assert rig.proxy.viewer_status().size == 0
+    rig.mono.now += 60
+    rig.fetch.answers[VIEWER_URL] = _ok(v1, etag='"v1"')
+    assert rig.proxy.serve(VIEWER).status == 200
+    assert rig.file(VIEWER).read_bytes() == v1
+
+    def viewer_files():
+        return {p.name: p.read_bytes() for p in rig.file("live/viewer").iterdir()}
+
+    pinned = viewer_files()
+    # Update: an empty 200 or a truncated body (fetch_upstream's UpstreamError) keeps the pinned copy.
+    for failure, detail in ((_ok(b"", etag='"v2"'), "empty"), (UpstreamError("truncated"), "truncated")):
+        rig.fetch.answers[VIEWER_URL] = failure
+        with pytest.raises(ViewerError, match="pinned copy is kept") as exc:
+            rig.proxy.update_viewer()
+        assert detail in exc.value.message
+        assert viewer_files() == pinned  # no .prev either
+        rig.mono.now += 60
+
+
+def test_update_viewer_repairs_a_damaged_pin_with_an_unconditional_get(tmp_path):
+    v1 = b"/* viewer v1 */"
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(v1, etag='"v1"')}))
+    rig.proxy.serve(VIEWER)
+    meta_path = rig.file("live/viewer/viewer.meta.json")
+    meta_v1 = meta_path.read_bytes()
+
+    # The pinned file no longer matches its meta's sha256: a conditional GET would get a 304 for
+    # the recorded etag and keep the damaged copy for good. Update asks unconditionally instead.
+    rig.file(VIEWER).write_bytes(b"/* vie")
+    rig.fetch.answers[VIEWER_URL] = _ok(v1, etag='"v1"')
+    status = rig.proxy.update_viewer()
+    assert rig.fetch.calls[-1] == (VIEWER_URL, None)
+    assert rig.file(VIEWER).read_bytes() == v1
+    assert (status.size, status.etag) == (len(v1), '"v1"')
+    assert json.loads(meta_path.read_text())["sha256"] == _sha(v1)
+    assert rig.proxy.serve(VIEWER).etag == f'"{_sha(v1)}"'
+
+    # A meta without a usable sha256 cannot vouch for the pin either.
+    meta_path.write_text(json.dumps({"etag": '"v1"', "fetched_at": "2026-10-29T00:00:00+00:00"}))
+    rig.fetch.answers[VIEWER_URL] = _status(304)
+    with pytest.raises(ViewerError):
+        rig.proxy.update_viewer()  # an unasked-for 304 is an upstream failure
+    assert rig.fetch.calls[-1] == (VIEWER_URL, None)
+    rig.mono.now += 60
+
+    # An intact pin is asked for conditionally, as before.
+    meta_path.write_bytes(meta_v1)
+    assert rig.proxy.update_viewer().etag == '"v1"'
+    assert rig.fetch.calls[-1] == (VIEWER_URL, '"v1"')
 
 
 def test_clear_cache_keeps_pinned_viewer(tmp_path):

@@ -14,8 +14,10 @@ discipline (allow-list first, everything built from scratch, fail closed):
 * ``fetch_upstream`` — one GET through an opener built from scratch: no environment
   proxy, no cookie jar, redirects refused, fixed headers only (no Referer, Origin or
   Cookie), a 16 MB cap, a 20 s budget. It refuses any URL the allow-list could not
-  have produced before anything is opened. Network failures raise ``UpstreamError``
-  with a short generic reason; HTTP statuses (404, 304, 429, 5xx …) are returned.
+  have produced before anything is opened. Network failures, and a body that is not
+  exactly what was sent (shorter or longer than its Content-Length, or encoded), raise
+  ``UpstreamError`` with a short generic reason; HTTP statuses (404, 304, 429, 5xx …)
+  are returned.
 * ``AssetCache`` — plain private files under one root (0600 files, 0700 dirs,
   tmp + rename), a 1 h negative cache under ``.neg/``, and least-recently-hit
   eviction to 80 % of the cap that never touches the pinned viewer script
@@ -24,8 +26,9 @@ discipline (allow-list first, everything built from scratch, fail closed):
 
 * ``AssetProxy`` — what the ``/armory/assets/…`` route calls (``serve``): allow-list,
   cache hit, negative cache, then one guarded upstream GET (the On/Off switch in
-  ``ArmorySettings``, a 60 s per-host cool-down after a failure, at most 4 fetches at
-  once with a bounded wait for a slot, single-flight per path, never a retry). It
+  ``ArmorySettings``, a 60 s per-host cool-down after a failure — an empty 200 counts
+  as one —, at most 4 fetches at once with a bounded wait for a slot, single-flight
+  per path, never a retry). It
   pins the viewer script (fetched once, then only by ``update_viewer``, with
   ``revert_viewer`` to the previous copy) and falls back to pass-through when the
   cache cannot be written. ``fetch_item_xml`` is the display-ID resolver's one Wowhead
@@ -222,6 +225,18 @@ def _header(headers, name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _declared_length(headers) -> int | None:
+    """A numeric Content-Length, else None (absent, or not a plain number: not checked)."""
+    declared = (_header(headers, "Content-Length") or "").strip()
+    return int(declared) if declared.isascii() and declared.isdigit() else None
+
+
+def _encoded(headers) -> bool:
+    """True when the body comes in any Content-Encoding but identity (we asked for identity)."""
+    encoding = (_header(headers, "Content-Encoding") or "").strip().lower()
+    return encoding not in ("", "identity")
+
+
 def _read_capped(response, max_bytes: int, deadline: float) -> bytes:
     chunks: list[bytes] = []
     total = 0
@@ -248,7 +263,12 @@ def fetch_upstream(
 
     ``timeout`` bounds each socket operation and the whole body read. A 3xx other
     than 304 (a redirect), a body over ``max_bytes`` and a URL the allow-list does
-    not produce are errors; the last is refused before anything is opened.
+    not produce are errors; the last is refused before anything is opened. So is a
+    body that is not exactly what was sent: one shorter or longer than a numeric
+    Content-Length ("truncated": a peer that closes cleanly mid-body makes ``read``
+    return less without any error) and one in a Content-Encoding other than identity
+    ("encoded", refused before it is read). Either would otherwise be cached as an
+    immutable file or pinned as the viewer script.
     """
     if not upstream_url_allowed(url):
         raise UpstreamError("not allowed")
@@ -266,10 +286,14 @@ def fetch_upstream(
             final_url = response.geturl()
             if final_url and final_url != url:
                 raise UpstreamError("redirect")
-            declared = _header(response.headers, "Content-Length")
-            if declared and declared.isdigit() and int(declared) > max_bytes:
+            declared = _declared_length(response.headers)
+            if declared is not None and declared > max_bytes:
                 raise UpstreamError("too large")
+            if _encoded(response.headers):
+                raise UpstreamError("encoded")
             body = _read_capped(response, max_bytes, deadline)
+            if declared is not None and declared != len(body):
+                raise UpstreamError("truncated")
             status = getattr(response, "status", None) or response.getcode()
             return FetchResult(
                 status, body, _header(response.headers, "ETag"), _header(response.headers, "Last-Modified")
@@ -777,6 +801,10 @@ def _meta_text(value: object) -> str | None:
 class _ViewerMeta:
     etag: str | None
     fetched_at: str | None
+    sha256: str | None  # of the script this meta was written for
+
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 def _parse_viewer_meta(data: bytes) -> _ViewerMeta | None:
@@ -786,7 +814,12 @@ def _parse_viewer_meta(data: bytes) -> _ViewerMeta | None:
         return None
     if not isinstance(raw, dict):
         return None
-    return _ViewerMeta(etag=_meta_text(raw.get("etag")), fetched_at=_meta_text(raw.get("fetched_at")))
+    sha = raw.get("sha256")
+    return _ViewerMeta(
+        etag=_meta_text(raw.get("etag")),
+        fetched_at=_meta_text(raw.get("fetched_at")),
+        sha256=sha if isinstance(sha, str) and _SHA256_HEX.fullmatch(sha) else None,
+    )
 
 
 @dataclass
@@ -1000,15 +1033,20 @@ class AssetProxy:
         if cooling:
             raise _Unavailable("cool-down")
 
-    def _guarded_fetch(self, url: str, *, if_none_match: str | None = None) -> FetchResult:
+    def _guarded_fetch(
+        self, url: str, *, if_none_match: str | None = None, empty_ok: bool = False
+    ) -> FetchResult:
         """One upstream GET under the On/Off switch, the host's cool-down and the shared slots.
 
         Returns a 200 or a 404 (and a 304 to a conditional request) and marks the host
         reachable. Otherwise raises ``_Unavailable`` and never retries: switched off,
         host cooling down, no free slot within the wait budget (R17: that starts no
-        cool-down), or an upstream failure (``UpstreamError`` or any other status),
-        which starts the host's cool-down (R16: per host). The display-ID resolver's
-        item lookup comes through here as well (``fetch_item_xml``).
+        cool-down), or an upstream failure (``UpstreamError``, any other status, or an
+        empty 200 unless ``empty_ok``: no asset or viewer script is empty, and it would
+        be cached as immutable), which starts the host's cool-down (R16: per host). The
+        failure is recorded before the slot is freed, so a request queued for that slot
+        sees the cool-down instead of asking the failing host once more. The display-ID
+        resolver's item lookup comes through here as well (``fetch_item_xml``).
         """
         host = urlsplit(url).netloc
         self._check_may_fetch(host)
@@ -1024,13 +1062,16 @@ class AssetProxy:
             except UpstreamError as err:
                 self._host_failed(host)
                 raise _Unavailable("upstream", err.reason) from None
+            if result.status not in ((200, 304, 404) if if_none_match else (200, 404)):
+                self._host_failed(host)
+                raise _Unavailable("upstream", f"HTTP {result.status}")
+            if result.status == 200 and not result.body and not empty_ok:
+                self._host_failed(host)
+                raise _Unavailable("upstream", "empty response")
+            self._host_answered(host)
+            return result
         finally:
             self._slots.release()
-        if result.status not in ((200, 304, 404) if if_none_match else (200, 404)):
-            self._host_failed(host)
-            raise _Unavailable("upstream", f"HTTP {result.status}")
-        self._host_answered(host)
-        return result
 
     def fetch_item_xml(self, entry: int) -> FetchResult | None:
         """Wowhead's item XML for ``entry`` (the display-ID resolver's fallback, spec 8.1), or None.
@@ -1040,11 +1081,12 @@ class AssetProxy:
         returned, never cached, and no ``serve`` path reaches it. Returns the 200 or the
         404; None when nothing was asked (switched off, cooling down, no free slot) or
         upstream failed (network error, 429, 5xx …, which starts the host's cool-down).
+        An empty 200 is returned as it is (never cached; the resolver finds no id in it).
         ``ValueError`` for an entry that is not a positive int, before anything is asked.
         """
         url = item_xml_url(entry)
         try:
-            return self._guarded_fetch(url)
+            return self._guarded_fetch(url, empty_ok=True)
         except _Unavailable:
             return None
 
@@ -1176,20 +1218,34 @@ class AssetProxy:
         self._write_viewer(result)
 
     def _pinned_etag(self) -> str | None:
-        """The pinned copy's upstream ETag when one is pinned (and it is safe to send back), else None."""
+        """The pinned copy's upstream ETag for Update's If-None-Match, or None for an unconditional GET.
+
+        None also when the pinned file's sha256 is not the one its meta recorded (a file
+        damaged on disk, or a meta that cannot vouch for it): a 304 for the recorded ETag
+        would otherwise keep the damaged copy for good, so Update fetches it afresh.
+        """
         try:
-            if self._cache_file_size(VIEWER_PATH) is None:
+            path = self.cache.path_for(VIEWER_PATH)
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
                 return None
             meta = self._read_cache_file(VIEWER_META_PATH)
+            parsed = _parse_viewer_meta(meta) if meta is not None else None
+            if parsed is None or parsed.etag is None:
+                return None
+            if parsed.sha256 != self._viewer_digest(path, st):
+                log.warning("armory: the pinned viewer script does not match its meta; Update fetches it afresh")
+                return None
         except (OSError, ValueError):
             return None
-        parsed = _parse_viewer_meta(meta) if meta is not None else None
-        return parsed.etag if parsed is not None else None
+        return parsed.etag
 
     def update_viewer(self) -> ViewerStatus:
         """Fetch the viewer script again (conditional GET) and pin the new copy, keeping the current one as ``.prev``.
 
         A 304 changes nothing; the same bytes under new validators refresh only the meta.
+        A pinned file that no longer matches its meta's sha256 is asked for without
+        If-None-Match, so Update can repair it (``_pinned_etag``).
         Refused while switched off (R18), while the host cools down and while another
         Update/Revert runs; every failure keeps the pinned copy. Raises ``ViewerError``.
         """
