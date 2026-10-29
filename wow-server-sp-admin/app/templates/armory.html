@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{# Armory (spec 5). Minimal markup from Task 9; Task 10 adds the paper-doll, the tabs, armory.js
+   and the CSS. The route passes view/tooltips/trees/glyphs/stats/stats_note/dbc_missing and the
+   embedded blob (armory_data) for a loaded character; not_found (404) or error otherwise. #}
+{% block main %}
+<div class="dashboard-content armory-page">
+
+  <div class="armory-search" role="search">
+    <input id="armory-q" name="q" type="search" value="{{ q }}"
+           placeholder="Search a character by name" aria-label="Search a character by name"
+           autocomplete="off" spellcheck="false" maxlength="64"
+           hx-get="/api/armory/search"
+           hx-trigger="keyup changed delay:200ms, search{% if q %}, load{% endif %}"
+           hx-target="#armory-results"
+           autofocus>
+    <div id="armory-results" class="armory-results" aria-live="polite"></div>
+  </div>
+
+  {% if error %}<div class="banner error">Could not load the character: {{ error }}</div>{% endif %}
+
+  {% if not_found %}
+  <p class="empty-state armory-not-found">No character with id {{ guid }}. Search for one by name above.</p>
+  {% endif %}
+
+  {% if view %}
+  {% set h = view.header %}
+  <section class="armory-character" aria-labelledby="armory-name">
+    <header class="armory-header">
+      <h1 id="armory-name" class="armory-name" style="color: {{ h.class_color }}">{{ h.name }}</h1>
+      <p class="armory-subtitle">
+        <span>Level {{ h.level }} {{ h.race_name }} {{ h.class_name }}</span>
+        · <span style="color: {{ h.faction_color }}">{{ h.faction }}</span>
+        · {% if h.is_bot %}<span class="armory-bot">bot</span>{% else %}<span>{{ h.account }}</span>{% endif %}
+        · {% if h.online %}<span>Online</span>{% else %}<span>Last seen {{ h.logout_time|epoch_stamp }}</span>{% endif %}
+      </p>
+    </header>
+    <div id="armory-model" class="armory-model" data-guid="{{ h.guid }}" data-model-api="/api/armory/{{ h.guid }}/model"></div>
+    <script type="application/json" id="armory-data">{{ armory_data|tojson }}</script>
+  </section>
+  {% endif %}
+
+  <div id="armory-footer" class="armory-footer" hx-get="/api/armory/footer" hx-trigger="load">
+    <p class="loading">Loading the 3D viewer status…</p>
+  </div>
+
+</div>
+{% endblock %}

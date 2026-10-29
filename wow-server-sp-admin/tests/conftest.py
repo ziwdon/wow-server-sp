@@ -45,3 +45,17 @@ def _reset_armory_proxy():
 
     armory_resolver.reset_resolver()
     armory_assets.reset_proxy()
+
+
+@pytest.fixture(autouse=True)
+def _reset_dbc_store():
+    """Drop the process-wide armory ``DbcStore`` between tests.
+
+    ``dbc.store_from_env()`` caches one store over whatever ``CLIENT_DATA_DIR`` was set at its
+    first call (and the lifespan's warm-up thread loads it); a cached one must not carry one
+    test's reference data into the next.
+    """
+    yield
+    from app.services import dbc
+
+    dbc.reset_store()

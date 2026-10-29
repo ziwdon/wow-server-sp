@@ -2,14 +2,19 @@ from app.logging_config import configure as _configure_logging
 _configure_logging()
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 import hashlib
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
+import anyio
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Path as PathParam
 from fastapi.middleware.gzip import GZipMiddleware as _GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -24,10 +29,14 @@ import uuid
 
 from app.services import backups as backups_svc
 from app.services import app_events
+from app.services import armory as armory_svc
+from app.services import armory_assets
+from app.services import armory_resolver
 from app.services import cloud_backup
 from app.services import cloud_config as cloud_cfg
 from app.services import customization as customization_svc
 from app.services import db_stats
+from app.services import dbc as dbc_svc
 from app.services import docker_client
 from app.services import known_errors as known_errors_svc
 from app.services import logs as logs_svc
@@ -57,6 +66,25 @@ def _file_hash(rel: str) -> str:
         return "0"
 
 
+def _warm_dbc_store(store) -> None:
+    """The warm-up thread's body: parse the armory's DBC files once, off every request (spec 6, R3)."""
+    try:
+        store.load()
+    except Exception:  # noqa: BLE001 - a failed warm-up only means the first armory view loads them
+        log.warning("armory: DBC warm-up failed; the first armory view loads the files", exc_info=True)
+
+
+def _start_dbc_warmup() -> None:
+    """Start the daemon thread that loads the ``DbcStore``. Never blocks and never raises."""
+    try:
+        store = dbc_svc.store_from_env()
+        threading.Thread(
+            target=_warm_dbc_store, args=(store,), name="armory-dbc-warmup", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001 - lazy loading on first access stays the fallback
+        log.warning("armory: could not start the DBC warm-up; the first armory view loads the files", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Guard: tests call init_state() directly before TestClient; skip
@@ -70,6 +98,7 @@ async def lifespan(app: FastAPI):
             configs_dir=_AC_STACK / "configs",
             snapshots_dir=_SNAPSHOTS,
         )
+    _start_dbc_warmup()
     # GC any admin.yml.bak.* snapshots older than 7 days.
     if _state_mod._state is not None:
         removed = _state_mod._state.admin.gc_old_snapshots(keep_days=7)
@@ -129,8 +158,59 @@ class _GZipExcludeSSE:
             await self._gzip(scope, receive, send)
 
 
+# The Armory page and its assets (spec 7): no third-party origin may load anything, so the
+# browser never talks to Wowhead (the proxy does), and the viewer's protocol-relative
+# viewer.css link is refused. Initial value; Task 13 trims it from a real browser run and
+# records the final sources and the reason for each here.
+ARMORY_CSP = (
+    "default-src 'self'; "
+    "img-src 'self' data: blob:; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "worker-src 'self' blob:; "
+    "connect-src 'self'; "
+    "font-src 'self' data:"
+)
+_CSP_HEADER = b"content-security-policy"
+
+
+def _is_armory_path(path: str) -> bool:
+    """``/armory`` and everything under ``/armory/`` (page and assets); never ``/api/armory/*``."""
+    return path == "/armory" or path.startswith("/armory/")
+
+
+class _ArmoryCSP:
+    """Pure ASGI wrapper (like ``_GZipExcludeSSE``) adding ``ARMORY_CSP`` to every armory response.
+
+    Every response on an armory path gets it, error answers included, and any policy set
+    further in is replaced, so exactly one header is sent.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not _is_armory_path(scope.get("path", "")):
+            await self._app(scope, receive, send)
+            return
+
+        async def send_with_csp(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != _CSP_HEADER
+                ]
+                headers.append((_CSP_HEADER, ARMORY_CSP.encode("latin-1")))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self._app(scope, receive, send_with_csp)
+
+
 app = FastAPI(title="azerothcore-admin", lifespan=lifespan)
 app.add_middleware(_GZipExcludeSSE, minimum_size=1024)
+app.add_middleware(_ArmoryCSP)  # added last = outermost: it also covers the gzip'd answers
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 templates.env.globals["css_ver"] = _file_hash("app.css")
@@ -139,6 +219,20 @@ templates.env.globals["backups_js_ver"] = _file_hash("backups.js")
 templates.env.globals["stats_js_ver"] = _file_hash("stats.js")
 templates.env.globals["last_online"] = wow_ref.relative_last_online
 templates.env.globals["branding"] = lambda: customization_svc.store_from_env().branding()
+
+
+def _epoch_stamp(value: object) -> str:
+    """A unix time as ``YYYY-MM-DD HH:MM UTC``; 0 (never logged out) or garbage is ``never``."""
+    try:
+        seconds = int(value)  # type: ignore[arg-type]
+        if seconds <= 0:
+            return "never"
+        return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "never"
+
+
+templates.env.filters["epoch_stamp"] = _epoch_stamp
 
 
 @app.exception_handler(HTTPException)
@@ -1178,6 +1272,396 @@ async def stats_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "stats.html", {"title": "Stats"},
     )
+
+
+# --- Armory (spec 5, 7, 8): character search, the character page, the 3D model API, the asset
+# proxy endpoint and the footer strip. The page is rendered from DB + DBC data only and never
+# waits on Wowhead; the model panel asks /api/armory/<guid>/model afterwards. Blocking work that
+# can wait on Wowhead (asset serving, the model API) runs on a dedicated, bounded thread limiter
+# (R21), so a black-holed upstream (serve can block 25-70 s) never starves the other routes.
+
+ARMORY_THREAD_TOKENS = 8
+ARMORY_RESOLVE_WORKERS = 4  # concurrent display-ID resolutions per model call; the proxy caps upstream at 4
+ARMORY_GENERIC_ERROR = "Something went wrong — see the admin log."
+ARMORY_NOT_WRITABLE = "Could not save the 3D viewer setting (the admin data folder is not writable)."
+ARMORY_STATS_KEY = "PlayerSave.Stats.MinLevel"
+ARMORY_MAX_QUERY = 64  # names are at most 12 characters; nothing longer can match
+_ARMORY_MAX_LOGGED_OPTIONS = 256
+_ArmoryGuid = Annotated[int, PathParam(ge=1, le=4294967295)]
+
+_armory_limiter_obj: anyio.CapacityLimiter | None = None
+_armory_unknown_options_logged: set[str] = set()
+_armory_unknown_options_mu = threading.Lock()
+
+
+def _armory_limiter() -> anyio.CapacityLimiter:
+    """The armory's own thread limiter, made on first use (on the event loop, so no race)."""
+    global _armory_limiter_obj
+    if _armory_limiter_obj is None:
+        _armory_limiter_obj = anyio.CapacityLimiter(ARMORY_THREAD_TOKENS)
+    return _armory_limiter_obj
+
+
+async def _armory_run(func, /, *args):
+    """``func(*args)`` on a worker thread under the armory limiter; a cancelled caller still waits for it."""
+    return await anyio.to_thread.run_sync(func, *args, limiter=_armory_limiter())
+
+
+def _armory_stats_min_level() -> str:
+    """The effective ``PlayerSave.Stats.MinLevel`` (Settings' resolved keys), or ``unset``."""
+    try:
+        for entry in list_keys_resolved():
+            if entry.get("key") == ARMORY_STATS_KEY:
+                value = str(entry.get("effective_value") or "").strip()
+                return value or "unset"
+    except Exception:  # noqa: BLE001 - the note is a hint; it must not break the page
+        log.warning("armory: could not read %s from the resolved keys", ARMORY_STATS_KEY, exc_info=True)
+    return "unset"
+
+
+def _armory_blob(view, tooltips: dict) -> dict:
+    """The page's embedded JSON (``#armory-data``): tooltips and paper-doll items by DB slot."""
+    return {
+        "guid": view.header.guid,
+        "tooltips": {str(slot): asdict(tip) for slot, tip in tooltips.items()},
+        "itemsBySlot": {
+            str(item.slot): {
+                "slot": item.slot,
+                "entry": item.entry,
+                "name": item.name,
+                "quality": item.quality,
+                "itemLevel": item.item_level,
+                "inventoryType": item.inventory_type,
+                "displayId": item.display_id,
+                "icon": tooltips[item.slot].icon,
+            }
+            for item in view.items
+        },
+    }
+
+
+def _armory_character_context(guid: int) -> dict | None:
+    """Everything the character page shows, or ``None`` for an unknown guid. Blocking (DB + DBC).
+
+    ``trees``/``glyphs`` hold one entry per talent group (spec 2 only when the character has
+    two); ``stats_note`` is set only when no ``character_stats`` row exists. A DB error raises.
+    """
+    store = dbc_svc.store_from_env()
+    view = armory_svc.collect_character(guid, **db_credentials(), store=store)
+    if view is None:
+        return None
+    header = view.header
+    tooltips = {item.slot: armory_svc.tooltip(item, store, view.items) for item in view.items}
+    specs = range(2 if view.spec_count == 2 else 1)
+    stats = armory_svc.stats_rows(view.stats_row, view.stats_columns, class_id=header.class_id)
+    return {
+        "view": view,
+        "tooltips": tooltips,
+        "trees": [armory_svc.talent_trees(header.class_id, view.specs[i], store) for i in specs],
+        "glyphs": [armory_svc.glyph_rows(view.glyphs[i], store) for i in specs],
+        "stats": stats,
+        "stats_note": {"min_level": _armory_stats_min_level()} if stats is None else None,
+        "dbc_missing": store.missing(),
+        "armory_data": _armory_blob(view, tooltips),
+    }
+
+
+def _armory_page(request: Request, context: dict, *, status_code: int = 200) -> HTMLResponse:
+    base = {"title": "Armory", "q": "", "view": None, "error": None, "not_found": False}
+    return templates.TemplateResponse(request, "armory.html", {**base, **context}, status_code=status_code)
+
+
+@app.get("/armory", response_class=HTMLResponse)
+async def armory_page(request: Request, q: str = "") -> HTMLResponse:
+    return _armory_page(request, {"q": q[:ARMORY_MAX_QUERY]})
+
+
+# Declared before /armory/{guid}: the proxy's paths never reach the character route.
+@app.get("/armory/assets/{local_path:path}")
+async def armory_asset(request: Request, local_path: str) -> Response:
+    """One allow-listed asset through the proxy (spec 8); anything else is a 404 without a fetch."""
+    served, st = await _armory_run(_armory_serve, local_path)
+    if served.status == 200:
+        headers = {"Cache-Control": served.cache_control, "X-Content-Type-Options": "nosniff"}
+        if served.etag:
+            headers["ETag"] = served.etag
+            if _etag_matches(request.headers.get("if-none-match"), served.etag):
+                return Response(status_code=304, headers=headers)
+        if served.path is not None:
+            # Our ETag and type, never Starlette's mtime ETag (every cache hit touches the mtime).
+            return FileResponse(served.path, media_type=served.content_type, headers=headers, stat_result=st)
+        return Response(content=served.body or b"", media_type=served.content_type, headers=headers)
+    status = served.status if served.status in (404, 503) else 503
+    return Response(
+        content=served.reason or ("not found" if status == 404 else "unavailable"),
+        status_code=status,
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": served.cache_control or "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+def _armory_serve(local_path: str):
+    """``proxy.serve`` plus the cached file's stat (taken here, off the event loop)."""
+    served = armory_assets.get_proxy().serve(local_path)
+    st = None
+    if served.status == 200 and served.path is not None:
+        try:
+            st = os.stat(served.path)
+        except OSError:  # evicted between the hit and now
+            served = armory_assets.Served(503, reason="cached file went away; try again")
+    return served, st
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    """``If-None-Match`` (a list, ``*`` or weak tags) names ``etag``."""
+    if not header:
+        return False
+
+    def opaque(tag: str) -> str:
+        tag = tag.strip()
+        return tag[2:] if tag.startswith("W/") else tag
+
+    want = opaque(etag)
+    return any(part.strip() == "*" or opaque(part) == want for part in header.split(","))
+
+
+@app.get("/armory/{guid}", response_class=HTMLResponse)
+async def armory_character_page(request: Request, guid: _ArmoryGuid) -> HTMLResponse:
+    try:
+        context = await asyncio.to_thread(_armory_character_context, guid)
+    except Exception as e:  # noqa: BLE001 — DB down must not 500 the page (Players convention)
+        log.warning("armory: character %d could not be loaded: %s", guid, e)
+        return _armory_page(request, {"error": str(e), "guid": guid})
+    if context is None:
+        return _armory_page(request, {"not_found": True, "guid": guid}, status_code=404)
+    return _armory_page(request, {**context, "guid": guid})
+
+
+@app.get("/api/armory/search", response_class=HTMLResponse)
+async def api_armory_search(request: Request, q: str = "") -> HTMLResponse:
+    q = q[:ARMORY_MAX_QUERY]
+    hits: list = []
+    error = None
+    short = armory_svc.normalize_search(q) is None
+    if not short:
+        try:
+            hits = await asyncio.to_thread(armory_svc.search_characters, q, **db_credentials())
+        except Exception as e:  # noqa: BLE001 — one line in the results, never a 500
+            error = str(e)
+    return templates.TemplateResponse(
+        request,
+        "partials/armory_search.html",
+        {"hits": hits, "q": q.strip(), "short": short, "error": error},
+    )
+
+
+def _log_unknown_options(names: list[str], model: int) -> None:
+    for name in names:
+        with _armory_unknown_options_mu:
+            new = (
+                name not in _armory_unknown_options_logged
+                and len(_armory_unknown_options_logged) < _ARMORY_MAX_LOGGED_OPTIONS
+            )
+            if new:
+                _armory_unknown_options_logged.add(name)
+        if new:
+            log.warning(
+                "armory: customisation option %r (model %d) is not in the option-name table; "
+                "it gets its first choice", name[:64], model,
+            )
+
+
+def _armory_customization(proxy, model: int, race: int, appearance) -> tuple[list | None, list[str], str | None]:
+    """(viewer options, unknown option names, reason when there are no options)."""
+    path = f"wrath/meta/charactercustomization/{model}.json"
+    served = proxy.serve(path)
+    if served.status != 200:
+        return None, [], f"{path}: {served.reason or f'HTTP {served.status}'}"
+    try:
+        if served.body is not None:
+            raw = served.body
+        elif served.path is not None:
+            raw = served.path.read_bytes()
+        else:
+            raise ValueError("empty answer")
+        doc = json.loads(raw)
+        data = doc.get("data", doc) if isinstance(doc, dict) else None  # the spike: cust.data || cust
+        options_json = data.get("Options") if isinstance(data, dict) else None
+        if not isinstance(options_json, list):
+            raise ValueError("no Options list")
+    except (OSError, ValueError, RecursionError) as e:  # ValueError: bad JSON or bad UTF-8
+        log.warning("armory: %s unreadable: %s", path, e)
+        return None, [], f"{path}: customisation data unreadable"
+    options, unknown = armory_svc.map_customization(options_json, race, appearance)
+    _log_unknown_options(unknown, model)
+    return options, unknown, None
+
+
+def _armory_resolve(items: list, entries: dict[int, int]) -> tuple[list, list[int]]:
+    """Display-ID resolution with at most ``ARMORY_RESOLVE_WORKERS`` at once; input order kept."""
+    if not items:
+        return [], []
+    resolver = armory_resolver.get_resolver()
+    with ThreadPoolExecutor(
+        max_workers=min(ARMORY_RESOLVE_WORKERS, len(items)), thread_name_prefix="armory-resolve"
+    ) as pool:
+        results = list(pool.map(lambda item: resolver.resolve_items([item], entries), items))
+    sent = [item for batch, _unresolved in results for item in batch]
+    unresolved = sorted(slot for _batch, slots in results for slot in slots)
+    return sent, unresolved
+
+
+def _armory_model(guid: int) -> dict | None:
+    """The model API's answer (spec 7, R8, R12), or ``None`` for an unknown guid. Blocking."""
+    view = armory_svc.collect_character(guid, **db_credentials())
+    if view is None:
+        return None
+    header = view.header
+    model = armory_svc.model_id(header.race, header.gender)
+    proxy = armory_assets.get_proxy()
+    enabled = proxy.settings.enabled()
+    answer = {
+        "modelId": model,
+        "options": None,
+        "unresolvedOptions": [],
+        "items": [],
+        "unresolved": [],
+        "viewer": {"enabled": enabled, "scriptReady": proxy.viewer_status().size > 0},
+        "sheath": False,
+    }
+    if not enabled:
+        # Nothing is asked of Wowhead or the resolver; the panel says "switched off".
+        answer["reason"] = "3D viewer is switched off"
+        return answer
+    options, unknown, reason = _armory_customization(proxy, model, header.race, header.appearance)
+    answer["options"] = options
+    answer["unresolvedOptions"] = unknown
+    if reason is not None:
+        answer["reason"] = reason
+    sent, _omitted = armory_svc.viewer_items(view.items)
+    resolved, unresolved = _armory_resolve(sent, {item.slot: item.entry for item in view.items})
+    answer["items"] = [[item.inventory_type, item.display_id] for item in resolved]
+    answer["unresolved"] = unresolved
+    return answer
+
+
+@app.get("/api/armory/{guid}/model")
+async def api_armory_model(guid: _ArmoryGuid) -> JSONResponse:
+    try:
+        answer = await _armory_run(_armory_model, guid)
+    except Exception as e:  # noqa: BLE001 — the panel shows "unavailable" with the reason
+        log.warning("armory: model data for character %d failed: %s", guid, e)
+        return JSONResponse(
+            {"detail": f"Could not load the character: {e}"},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    if answer is None:
+        return JSONResponse({"detail": "character not found"}, status_code=404, headers={"Cache-Control": "no-store"})
+    return JSONResponse(answer, headers={"Cache-Control": "no-store"})
+
+
+# The footer strip: every route answers 200 with the re-rendered partial (the cloud-panel
+# convention); a problem is a line inside it. The state-changing ones run through
+# _await_thread_completion; status() takes the cache lock, so it runs off the event loop too.
+
+
+def _armory_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(dt.timezone.utc)
+    return moment.strftime("%Y-%m-%d")
+
+
+async def _armory_footer_response(request: Request, *, error: str | None = None, notice: str | None = None) -> HTMLResponse:
+    status = None
+    try:
+        status = await asyncio.to_thread(armory_assets.get_proxy().status)
+    except Exception:  # noqa: BLE001
+        log.exception("armory: could not read the asset proxy status")
+        error = error or "Could not read the 3D viewer status — see the admin log."
+    try:
+        dbc_missing = await asyncio.to_thread(lambda: dbc_svc.store_from_env().missing())
+    except Exception:  # noqa: BLE001
+        log.exception("armory: could not read the DBC store state")
+        dbc_missing = []
+    return templates.TemplateResponse(
+        request,
+        "partials/armory_footer.html",
+        {
+            "status": status,
+            "cache_mb": _humanize_bytes(status.cache_bytes) if status is not None else 0,
+            "viewer_fetched": _armory_date(status.viewer.fetched_at) if status is not None else None,
+            "dbc_missing": dbc_missing,
+            "error": error,
+            "notice": notice,
+        },
+    )
+
+
+async def _armory_action(func, *args, on_oserror: str = ARMORY_GENERIC_ERROR):
+    """(result, error text). ``ViewerError`` carries its own text; anything else is logged."""
+    try:
+        return await _await_thread_completion(func, *args), None
+    except armory_assets.ViewerError as e:
+        return None, e.message
+    except OSError:
+        log.exception("armory: footer action failed")
+        return None, on_oserror
+    except Exception:  # noqa: BLE001 - never echo a raw exception to the page
+        log.exception("armory: footer action failed unexpectedly")
+        return None, ARMORY_GENERIC_ERROR
+
+
+@app.get("/api/armory/footer", response_class=HTMLResponse)
+async def api_armory_footer(request: Request) -> HTMLResponse:
+    return await _armory_footer_response(request)
+
+
+@app.post("/api/armory/settings", response_class=HTMLResponse)
+async def api_armory_settings(request: Request, enabled: str = Form("")) -> HTMLResponse:
+    value = enabled.strip().lower()
+    if value not in ("on", "off"):
+        return await _armory_footer_response(request, error="Choose on or off for the 3D viewer.")
+    _result, error = await _armory_action(
+        armory_assets.get_proxy().settings.set_enabled, value == "on", on_oserror=ARMORY_NOT_WRITABLE
+    )
+    notice = None if error else f"3D viewer switched {value}."
+    return await _armory_footer_response(request, error=error, notice=notice)
+
+
+@app.post("/api/armory/cache/clear", response_class=HTMLResponse)
+async def api_armory_cache_clear(request: Request) -> HTMLResponse:
+    removed, error = await _armory_action(armory_assets.get_proxy().clear_cache)
+    notice = None if error else f"Cleared {removed} cached file{'' if removed == 1 else 's'}; the viewer script is kept."
+    return await _armory_footer_response(request, error=error, notice=notice)
+
+
+def _armory_update_viewer(proxy) -> bool:
+    """Update the pinned viewer script; True when anything about the pinned copy changed."""
+    before = proxy.viewer_status()
+    return proxy.update_viewer() != before
+
+
+@app.post("/api/armory/viewer/update", response_class=HTMLResponse)
+async def api_armory_viewer_update(request: Request) -> HTMLResponse:
+    changed, error = await _armory_action(_armory_update_viewer, armory_assets.get_proxy())
+    notice = None
+    if error is None:
+        notice = "Viewer script updated." if changed else "The pinned viewer script is current; nothing changed."
+    return await _armory_footer_response(request, error=error, notice=notice)
+
+
+@app.post("/api/armory/viewer/revert", response_class=HTMLResponse)
+async def api_armory_viewer_revert(request: Request) -> HTMLResponse:
+    _result, error = await _armory_action(armory_assets.get_proxy().revert_viewer)
+    notice = None if error else "The previous viewer script is pinned again."
+    return await _armory_footer_response(request, error=error, notice=notice)
 
 
 class ProgressionApplyPayload(BaseModel):
