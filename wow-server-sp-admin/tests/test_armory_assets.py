@@ -791,6 +791,17 @@ def test_cache_defaults():
     assert armory_assets.NEGATIVE_TTL_SECONDS == 3600
 
 
+def test_cache_creates_missing_ancestors_private_and_leaves_existing_dirs_alone(tmp_path):
+    existing = tmp_path / "admin-data"
+    existing.mkdir(mode=0o755)
+    existing.chmod(0o755)
+    cache = AssetCache(existing / "armory" / "cache", clock=Clock())
+    cache.put("wrath/m2/1.m2", b"x")
+    for created in ("armory", "armory/cache", "armory/cache/wrath", "armory/cache/wrath/m2"):
+        assert _mode(existing / created) == 0o700, created
+    assert _mode(existing) == 0o755  # not ours to change
+
+
 def test_cache_remove_keeps_the_running_total(tmp_path):
     root = tmp_path / "cache"
     cache = AssetCache(root, clock=Clock())
@@ -971,7 +982,7 @@ def test_serve_miss_fetches_once_then_hits_without_fetch(tmp_path):
     assert first.content_type == "application/octet-stream"
     assert first.cache_control == IMMUTABLE
     assert first.etag and first.etag.startswith('"') and first.etag.endswith('"')
-    assert _mode(rig.data_dir) == 0o700  # created private by the proxy, before the cache dir
+    assert _mode(rig.data_dir) == 0o700  # the cache creates armory/ too, private like its own tree
 
     # Hits never contact upstream; the ETag stays the same although every hit touches the mtime.
     rig.wall.now += 1000
@@ -1100,22 +1111,26 @@ def test_serve_upstream_error_starts_cooldown_and_misses_return_503_until_it_end
     assert rig.proxy.status().unreachable_since is None  # the success cleared the host
 
 
-def test_cooldown_is_per_host_and_status_reports_the_earliest(tmp_path):
+def test_cooldown_is_per_host_and_status_reports_the_earliest_active_one(tmp_path):
     xml_url = item_xml_url(6125)
     rig = Rig(tmp_path, FakeFetch({M2_URL: _status(500), xml_url: _ok(b"<wowhead/>")}))
     start = rig.wall.now
-    assert rig.proxy.serve(M2).status == 503
+    assert rig.proxy.serve(M2).status == 503  # wow.zamimg.com cools down for 60 s
+    rig.mono.now += 30
+    rig.wall.now += 30
     # The resolver's XML lookup (Task 8) goes through the same guard; another host is not cooling.
     assert rig.proxy._guarded_fetch(xml_url).status == 200
-    rig.wall.now += 30
     rig.fetch.answers[xml_url] = UpstreamError("connection failed")
     with pytest.raises(armory_assets._Unavailable):
-        rig.proxy._guarded_fetch(xml_url)
-    assert rig.proxy.status().unreachable_since == _iso(start)
-    rig.mono.now += 61
+        rig.proxy._guarded_fetch(xml_url)  # www.wowhead.com cools down until 30 s after zamimg
+    assert rig.proxy.status().unreachable_since == _iso(start)  # both active: the earliest
+    rig.mono.now += 31  # zamimg's cool-down is over, wowhead's is not
+    assert rig.proxy.status().unreachable_since == _iso(start + 30)
     rig.fetch.answers[M2_URL] = _ok(b"back")
     assert rig.proxy.serve(M2).status == 200
     assert rig.proxy.status().unreachable_since == _iso(start + 30)
+    rig.mono.now += 30  # wowhead's is over too: nothing is reported (R16b)
+    assert rig.proxy.status().unreachable_since is None
 
 
 def test_serve_disabled_returns_503_for_misses_only(tmp_path):
@@ -1313,15 +1328,29 @@ def test_status_reports_cache_size_viewer_and_unreachable_since(tmp_path):
     failed_at = rig.wall.now
     assert rig.proxy.serve(SKIN).status == 503
     assert rig.proxy.status().unreachable_since == _iso(failed_at)
-    # Still failing after the cool-down: "unreachable since" keeps the first failure.
-    rig.mono.now += 61
-    rig.wall.now += 61
+    # R16b: once the cool-down has passed it is no longer reported.
+    rig.mono.now += 60
+    rig.wall.now += 60
+    assert rig.proxy.status().unreachable_since is None
+    # A re-arm during a sustained outage (the next miss fails again) keeps the original since.
+    rig.mono.now += 30
+    rig.wall.now += 30
     assert rig.proxy.serve(SKIN).status == 503
     assert rig.proxy.status().unreachable_since == _iso(failed_at)
-    rig.mono.now += 61
+    rig.mono.now += 60
     rig.fetch.answers[MV + SKIN] = _ok(b"skin")
-    assert rig.proxy.serve(SKIN).status == 200
+    assert rig.proxy.serve(SKIN).status == 200  # a success ends the outage
     assert rig.proxy.status().unreachable_since is None
+
+    # One failure, then a quiet hour: the next failure is a new outage with its own since.
+    blip = "wrath/skin/6.skin"
+    rig.fetch.answers[MV + blip] = _status(502)
+    assert rig.proxy.serve(blip).status == 503
+    rig.mono.now += 3600
+    rig.wall.now += 3600
+    assert rig.proxy.status().unreachable_since is None
+    assert rig.proxy.serve(blip).status == 503
+    assert rig.proxy.status().unreachable_since == _iso(rig.wall.now)
 
     rig.proxy.settings.set_enabled(False)
     assert rig.proxy.status().enabled is False

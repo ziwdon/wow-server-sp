@@ -299,6 +299,47 @@ def _ns(seconds: float) -> int:
     return int(round(seconds * 1_000_000_000))
 
 
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` with mode 0700, and any missing parent the same way; an existing directory is left as it is.
+
+    The one rule for every directory the armory creates (``armory/``, the cache tree):
+    private to the admin's UID, like ``cloud/``.
+    """
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        return
+    except FileNotFoundError:
+        if path.parent == path:
+            raise
+        _make_private_dir(path.parent)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:  # another thread made it meanwhile
+            return
+    os.chmod(path, 0o700)  # mkdir's mode is filtered by the umask
+
+
+def _write_private_file(path: Path, data: bytes) -> None:
+    """``data`` into ``path`` (0600) through a temp file, fsync and a rename; a failed write leaves no temp file.
+
+    The only file-writing code of the armory (cache files, viewer files, ``armory.json``).
+    The fsync is there because an immutable cache must never keep a torn file after a crash.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def _safe_parts(local_path: str) -> list[str]:
     """Split a relative cache path; refuse anything that is not plain ``a/b/c`` of visible ASCII."""
     if not isinstance(local_path, str) or not local_path or len(local_path) > _MAX_LOCAL_PATH_CHARS:
@@ -361,20 +402,6 @@ class AssetCache:
 
     # writes
 
-    def _make_private_dirs(self, directory: Path) -> None:
-        root = self.root.resolve()
-        if not root.exists():
-            root.parent.mkdir(parents=True, exist_ok=True)
-        current = root
-        for part in (None, *directory.relative_to(root).parts):
-            if part is not None:
-                current = current / part
-            try:
-                os.mkdir(current, 0o700)
-            except FileExistsError:
-                continue
-            os.chmod(current, 0o700)  # mkdir's mode is filtered by the umask
-
     @staticmethod
     def _regular_size(path: Path) -> int:
         try:
@@ -389,21 +416,10 @@ class AssetCache:
             self._total = max(0, self._total + delta)
 
     def _write_file(self, target: Path, body: bytes) -> None:
-        """Caller holds the lock."""
-        self._make_private_dirs(target.parent)
+        """Caller holds the lock. A failed write changes neither the file nor the total."""
+        _make_private_dir(target.parent)
         replaced = self._regular_size(target)
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                os.fchmod(fh.fileno(), 0o600)
-                fh.write(body)
-                fh.flush()
-                os.fsync(fh.fileno())  # an immutable cache must never keep a torn file after a crash
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        _write_private_file(target, body)
         self._adjust_total(len(body) - replaced)
         self._touch(target)
 
@@ -612,32 +628,6 @@ def _json_bytes(data: dict) -> bytes:
     return (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _make_private_dir(path: Path) -> None:
-    """Create ``path`` with mode 0700 when it is missing (its parents get default modes); an existing one is left."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.mkdir(path, 0o700)
-    except FileExistsError:
-        return
-    os.chmod(path, 0o700)  # mkdir's mode is filtered by the umask
-
-
-def _write_private_file(path: Path, data: bytes) -> None:
-    """``data`` into ``path`` (0600) through a temp file and a rename, so a reader never sees half of it."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            os.fchmod(fh.fileno(), 0o600)
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-
-
 class ArmorySettings:
     """``armory.json``: the 3D viewer's On/Off switch (spec 9). A missing or unreadable file means On."""
 
@@ -701,7 +691,7 @@ class ProxyStatus:
     enabled: bool
     cache_bytes: int
     viewer: ViewerStatus
-    unreachable_since: str | None  # ISO-8601 UTC: the earliest first failure among the unreachable hosts
+    unreachable_since: str | None  # ISO-8601 UTC: start of the earliest outage whose cool-down is active
     cache_writable: bool  # the last cache write worked (True before the first one)
     pass_through: bool  # fetched bytes are served without being stored (the same fact as not cache_writable)
     cache_error: str | None = None  # why, for the footer strip
@@ -809,7 +799,7 @@ class _Flight:
 @dataclass(frozen=True)
 class _HostState:
     until: float  # monotonic: no request goes to this host before then
-    since: float  # wall clock: its first failure since it last answered
+    since: float  # wall clock: the first failure of the current outage
 
 
 class AssetProxy:
@@ -1041,12 +1031,19 @@ class AssetProxy:
         return result
 
     def _host_failed(self, host: str) -> None:
-        """(Re)start the host's cool-down; ``since`` keeps its first failure until it answers again."""
+        """(Re)start the host's cool-down.
+
+        A failure during the cool-down, or within one cool-down after it ended (the next
+        miss of someone still browsing), continues the same outage and keeps its ``since``.
+        After a longer quiet gap it is a new outage, so a blip days ago never dates today's.
+        """
         with self._state_mu:
+            now = self._clock()
             previous = self._hosts.get(host)
-            since = previous.since if previous is not None else self._now()
-            self._hosts[host] = _HostState(until=self._clock() + self._cooldown_s, since=since)
-        if previous is None:
+            continues = previous is not None and now < previous.until + self._cooldown_s
+            since = previous.since if continues else self._now()
+            self._hosts[host] = _HostState(until=now + self._cooldown_s, since=since)
+        if not continues:
             log.warning("armory: %s unreachable; misses answer 503 for %.0f s", host, self._cooldown_s)
 
     def _host_answered(self, host: str) -> None:
@@ -1055,16 +1052,12 @@ class AssetProxy:
         if previous is not None:
             log.info("armory: %s answers again", host)
 
-    # cache writes
-
-    def _put(self, local_path: str, body: bytes) -> Path:
-        _make_private_dir(self.data_dir)  # before the cache would create it with default modes
-        return self.cache.put(local_path, body)
+    # cache writes (the cache creates armory/ and its own tree with mode 0700 on the first write)
 
     def _store(self, local_path: str, upstream: Upstream, body: bytes) -> Served:
         etag = _asset_etag(local_path, len(body))
         try:
-            path = self._put(local_path, body)
+            path = self.cache.put(local_path, body)
         except OSError as err:
             self._cache_failed(err)
             return Served(200, None, upstream.content_type, IMMUTABLE_CACHE_CONTROL, etag, body)
@@ -1073,7 +1066,6 @@ class AssetProxy:
 
     def _remember_missing(self, local_path: str) -> Served:
         try:
-            _make_private_dir(self.data_dir)
             self.cache.mark_negative(local_path)
         except OSError as err:
             self._cache_failed(err)
@@ -1141,8 +1133,8 @@ class AssetProxy:
         meta = _viewer_meta_json(
             body, etag=result.etag, last_modified=result.last_modified, fetched_at=_iso(self._now())
         )
-        self._put(VIEWER_PATH, body)
-        self._put(VIEWER_META_PATH, meta)
+        self.cache.put(VIEWER_PATH, body)
+        self.cache.put(VIEWER_META_PATH, meta)
         self._forget_viewer_digest()
 
     def _swap_in_viewer(self, result: FetchResult) -> None:
@@ -1150,7 +1142,7 @@ class AssetProxy:
         current = self._read_cache_file(VIEWER_PATH)
         if current is not None and _sha256(current) == _sha256(result.body):
             # The same script under new validators: refresh the meta, keep .prev (still the real previous one).
-            self._put(
+            self.cache.put(
                 VIEWER_META_PATH,
                 _viewer_meta_json(
                     current, etag=result.etag, last_modified=result.last_modified, fetched_at=_iso(self._now())
@@ -1161,8 +1153,8 @@ class AssetProxy:
             current_meta = self._read_cache_file(VIEWER_META_PATH)
             if current_meta is None:
                 current_meta = _viewer_meta_json(current, etag=None, last_modified=None, fetched_at=None)
-            self._put(VIEWER_PREV_PATH, current)
-            self._put(VIEWER_PREV_META_PATH, current_meta)  # the exact bytes, for an exact Revert
+            self.cache.put(VIEWER_PREV_PATH, current)
+            self.cache.put(VIEWER_PREV_META_PATH, current_meta)  # the exact bytes, for an exact Revert
         self._write_viewer(result)
 
     def _pinned_etag(self) -> str | None:
@@ -1226,8 +1218,8 @@ class AssetProxy:
                     previous_meta = self._read_cache_file(VIEWER_PREV_META_PATH)
                     if previous_meta is None:
                         previous_meta = _viewer_meta_json(previous, etag=None, last_modified=None, fetched_at=None)
-                    self._put(VIEWER_PATH, previous)
-                    self._put(VIEWER_META_PATH, previous_meta)
+                    self.cache.put(VIEWER_PATH, previous)
+                    self.cache.put(VIEWER_META_PATH, previous_meta)
                 except OSError as err:
                     self._cache_failed(err)
                     raise ViewerError(
@@ -1266,7 +1258,9 @@ class AssetProxy:
     def status(self) -> ProxyStatus:
         """For the footer strip. Blocking (the cache lock, at most one walk): call it off the event loop."""
         with self._state_mu:
-            since = min((state.since for state in self._hosts.values()), default=None)
+            now = self._clock()
+            # R16b: only active cool-downs; an expired one is not news (its entry stays for since).
+            since = min((state.since for state in self._hosts.values() if now < state.until), default=None)
             cache_error = self._cache_error
         return ProxyStatus(
             enabled=self.settings.enabled(),
