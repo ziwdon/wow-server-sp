@@ -357,13 +357,19 @@ def test_stats_rows_skips_columns_the_row_lacks():
 # --- search ---
 
 
-def test_normalize_search_capitalises_and_escapes():
-    assert normalize_search("  vEGI% ") == "Vegi\\%"
+def test_normalize_search_capitalises_and_strips_like_wildcards():
+    # AC names never hold %, _ or \\ (normalizePlayerName, CheckPlayerName): they are dropped,
+    # not escaped, so a stray wildcard still finds the character instead of matching a literal.
+    assert normalize_search("  vEGI% ") == "Vegi"
     assert normalize_search("v") is None
     assert normalize_search("  v  ") is None
     assert normalize_search("") is None
-    assert normalize_search("a_b") == "A\\_b"
-    assert normalize_search("x\\y") == "X\\\\y"
+    assert normalize_search("a_b") == "Ab"
+    assert normalize_search("x\\y") == "Xy"
+    assert normalize_search("% vegi") == "Vegi"
+    # Under 2 characters once they are gone: no search.
+    for short in ("%%", "a_", "_\\%", " v% ", "%_%a"):
+        assert normalize_search(short) is None, short
     assert normalize_search("PITOKAX") == "Pitokax"
     assert normalize_search("éLAN") == "Élan"
 
@@ -1043,7 +1049,7 @@ def _expected_connect():
     return [dict(DB, connection_timeout=2, autocommit=True)]
 
 
-def test_search_normalises_and_escapes_prefix_and_orders_humans_first(monkeypatch):
+def test_search_normalises_prefix_and_orders_humans_first(monkeypatch):
     conn, calls = _install_db(monkeypatch, [[
         (2506, "Vegivaca", 60, 6, 1, 0),
         (9001, "Vegibot", 70, 2, 3, 1),
@@ -1053,7 +1059,7 @@ def test_search_normalises_and_escapes_prefix_and_orders_humans_first(monkeypatc
 
     assert calls == _expected_connect()
     [(sql, params)] = conn.executed
-    assert params == ("Vegi\\%%",)
+    assert params == ("Vegi%",)  # the typed % is dropped: Vegivaca is still found
     assert sql.startswith("SELECT ")
     # MySQL text ESCAPE '\\' = one backslash ('\' alone would swallow the quote)
     assert "c.name LIKE %s ESCAPE '\\\\'" in sql
@@ -1079,6 +1085,8 @@ def test_search_short_query_runs_no_sql(monkeypatch):
     monkeypatch.setattr(armory.mysql.connector, "connect", connect)
     assert search_characters(" v ", **DB) == []
     assert search_characters("", **DB) == []
+    assert search_characters("%%", **DB) == []  # short once the wildcards are stripped
+    assert search_characters("a_", **DB) == []
 
 
 def test_search_db_error_propagates_and_closes(monkeypatch):

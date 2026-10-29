@@ -544,7 +544,7 @@ def test_search_endpoint_short_query_runs_no_sql(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(armory_svc, "search_characters", lambda *a, **k: pytest.fail("no SQL for a short query"))
 
-    for q in ("", "v", "  v  "):
+    for q in ("", "v", "  v  ", "%%", "a_"):
         resp = client.get("/api/armory/search", params={"q": q})
         assert resp.status_code == 200
         assert "/armory/" not in resp.text
@@ -565,6 +565,32 @@ def test_search_endpoint_no_match_and_db_error_stay_200(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert "db down" in resp.text
     assert resp.text.count("<p") == 1  # one line
+
+
+def test_armory_failures_are_logged_with_their_traceback(tmp_path, monkeypatch, caplog):
+    client = _client(tmp_path, monkeypatch)
+    _proxy(tmp_path, monkeypatch)
+    _collect(monkeypatch, error=RuntimeError("characters db down"))
+
+    def down(q, **kw):
+        raise RuntimeError("search db down")
+
+    monkeypatch.setattr(armory_svc, "search_characters", down)
+
+    with caplog.at_level("WARNING", logger="app.main"):
+        assert client.get(f"/armory/{GUID}").status_code == 200
+        assert client.get(f"/api/armory/{GUID}/model").status_code == 503
+        assert client.get("/api/armory/search", params={"q": "Vegi"}).status_code == 200
+
+    failures = [r for r in caplog.records if r.name == "app.main" and r.levelname == "WARNING"]
+    page = [r for r in failures if "could not be loaded" in r.getMessage()]
+    model = [r for r in failures if "model data" in r.getMessage()]
+    search = [r for r in failures if "search" in r.getMessage()]
+    assert len(page) == len(model) == len(search) == 1, [r.getMessage() for r in failures]
+    for record, error in ((page[0], "characters db down"), (model[0], "characters db down"),
+                          (search[0], "search db down")):
+        assert record.exc_info is not None and str(record.exc_info[1]) == error
+    assert "Vegi" not in search[0].getMessage()  # what the admin typed is not logged
 
 
 # --- model API ---

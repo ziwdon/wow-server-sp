@@ -1442,7 +1442,7 @@ async def armory_character_page(request: Request, guid: _ArmoryGuid) -> HTMLResp
     try:
         context = await asyncio.to_thread(_armory_character_context, guid)
     except Exception as e:  # noqa: BLE001 — DB down must not 500 the page (Players convention)
-        log.warning("armory: character %d could not be loaded: %s", guid, e)
+        log.warning("armory: character %d could not be loaded: %s", guid, e, exc_info=True)
         return _armory_page(request, {"error": str(e), "guid": guid})
     if context is None:
         return _armory_page(request, {"not_found": True, "guid": guid}, status_code=404)
@@ -1459,6 +1459,7 @@ async def api_armory_search(request: Request, q: str = "") -> HTMLResponse:
         try:
             hits = await asyncio.to_thread(armory_svc.search_characters, q, **db_credentials())
         except Exception as e:  # noqa: BLE001 — one line in the results, never a 500
+            log.warning("armory: character search failed: %s", e, exc_info=True)
             error = str(e)
     return templates.TemplateResponse(
         request,
@@ -1568,7 +1569,7 @@ async def api_armory_model(guid: _ArmoryGuid) -> JSONResponse:
     try:
         answer = await _armory_run(_armory_model, guid)
     except Exception as e:  # noqa: BLE001 — the panel shows "unavailable" with the reason
-        log.warning("armory: model data for character %d failed: %s", guid, e)
+        log.warning("armory: model data for character %d failed: %s", guid, e, exc_info=True)
         return JSONResponse(
             {"detail": f"Could not load the character: {e}"},
             status_code=503,

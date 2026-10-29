@@ -783,20 +783,25 @@ def _lower(char: str) -> str:
     return low if len(low) == 1 else char
 
 
-def normalize_search(q: str | None) -> str | None:
-    """A typed name prefix -> the escaped ``LIKE`` prefix, or ``None`` if under 2 chars.
+_LIKE_SPECIALS = str.maketrans("", "", "\\%_")
 
-    AC stores names first letter upper, the rest lower (``normalizePlayerName``) in a
-    ``utf8mb4_bin`` column, so the prefix is brought to that form instead of wrapping the
-    column in ``LOWER()`` (which would stop the ``idx_name`` index being used). A letter
-    whose case change would change its length is kept as typed. ``\\``, ``%`` and ``_``
-    are escaped for ``LIKE ... ESCAPE '\\'``; the caller appends the ``%``.
+
+def normalize_search(q: str | None) -> str | None:
+    """A typed name prefix -> the ``LIKE`` prefix, or ``None`` if under 2 chars.
+
+    AC names never contain ``%``, ``_`` or ``\\`` (``CheckPlayerName`` allows letters
+    only), so those are dropped rather than escaped: "Vegi%" still finds Vegivaca
+    instead of looking for a literal "%". The 2-character minimum applies to what is
+    left. AC stores names first letter upper, the rest lower (``normalizePlayerName``) in
+    a ``utf8mb4_bin`` column, so the prefix is brought to that form instead of wrapping
+    the column in ``LOWER()`` (which would stop the ``idx_name`` index being used). A
+    letter whose case change would change its length is kept as typed. The caller
+    appends the ``%``.
     """
-    text = (q or "").strip()
+    text = (q or "").translate(_LIKE_SPECIALS).strip()
     if len(text) < 2:
         return None
-    text = _upper(text[0]) + "".join(_lower(c) for c in text[1:])
-    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return _upper(text[0]) + "".join(_lower(c) for c in text[1:])
 
 
 # --- DB layer (spec §6): SELECT only, one connection per call ---
@@ -810,8 +815,9 @@ def normalize_search(q: str | None) -> str | None:
 _IS_BOT = "a.username LIKE 'RNDBOT%%'"
 
 # characters.name is utf8mb4_bin (pinned characters.sql), hence normalize_search's
-# capitalised prefix instead of LOWER(c.name), which would bypass idx_name. The MySQL
-# text ESCAPE '\\' is one backslash, the escape normalize_search uses.
+# capitalised prefix instead of LOWER(c.name), which would bypass idx_name. The prefix
+# holds no '%', '_' or '\' (normalize_search strips them), so the MySQL text
+# ESCAPE '\\' (one backslash) changes nothing; it only pins the escape character.
 _SEARCH_SQL = (
     f"SELECT c.guid, c.name, c.level, c.race, c.class, {_IS_BOT} "
     "FROM acore_characters.characters c "
