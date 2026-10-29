@@ -434,6 +434,7 @@
     let timers = [];
     let scriptPromise = null;
     let sheathSet = false;
+    let hideWanted = Boolean(hideTabard && hideTabard.checked); // its last usable tick
     let watchdog = null; // the running start()'s { my, deadline, hidden }
 
     window.addEventListener('error', (event) => {
@@ -744,8 +745,14 @@
       data = answer;
       enabled = Boolean(answer.viewer && answer.viewer.enabled);
       // Nothing to hide without a tabard in the answer (none worn, its model not found, or
-      // the viewer switched off); the box keeps its tick for the next answer.
-      if (hideTabard) hideTabard.disabled = !list(answer.items).some(isTabard);
+      // the viewer switched off): the box is disabled and unticked (a greyed-out tick would
+      // suggest something is hidden). The tick it had while usable comes back with the next
+      // answer that has a tabard. Set before start(), whose viewerOptions() reads it.
+      if (hideTabard) {
+        if (!hideTabard.disabled) hideWanted = hideTabard.checked;
+        hideTabard.disabled = !list(answer.items).some(isTabard);
+        hideTabard.checked = !hideTabard.disabled && hideWanted;
+      }
       markSlots(enabled ? answer.unresolved : []);
       if (!enabled) {
         setState('off', '3D viewer is switched off');

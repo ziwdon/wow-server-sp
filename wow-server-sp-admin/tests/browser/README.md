@@ -43,7 +43,8 @@ Every check prints a `[PASS]`/`[FAIL]`/`[INFO]` line; the exit status is 1 if an
 Screenshots (`impl-*.png`) and every number (`armory-check.json`: requests, upstream URLs
 with status and size, cache growth, CSP reports, model-panel state changes) land in
 `/tmp/fx/out/`. Copy them out with `docker cp acup-armory-check:/tmp/fx/out/. <dir>`, look
-at them, and compare `impl-vegivaca-model-final.png` with the spike's render.
+at them, and compare `impl-vegivaca-model-final.png` with the spike's render (it has no
+tabard, as "Hide tabard" is ticked by default; `impl-vegivaca-tabard-shown-model.png` has it).
 
 Clean up and confirm the live stack is untouched:
 
@@ -75,11 +76,12 @@ docker ps --format '{{.Names}}\t{{.Status}}'   # ac-* and azerothcore-admin stil
   renumbered display IDs resolve through the item-XML fallback), cache growth per new
   race/gender, and 0 upstream fetches on a repeat load with a cold browser cache;
 * the sheath toggle destroys the old viewer and its canvas and renders again with one
-  canvas; "Hide tabard" is disabled exactly when the model answer has no tabard (Pitokax),
-  and on Vegivaca re-creates the viewer with the same items minus the tabard (19), the
-  torso changes beyond the idle animation's own change and loses its plain grey, the
-  paper-doll keeps the tabard slot, and it combines with the sheath toggle
-  (`impl-vegivaca-hide-tabard-1400.png`); a mouse drag rotates; at 390 px with touch, a drag on the canvas rotates the
+  canvas; "Hide tabard" is ticked by default, so every first viewer gets no tabard, and it
+  is disabled and unticked exactly when the model answer has no tabard (Pitokax); on
+  Vegivaca unticking it re-creates the viewer with the same items plus the tabard (19)
+  (`impl-vegivaca-tabard-shown-model.png`), the torso changes beyond the idle animation's
+  own change and has more plain grey with the tabard, the paper-doll keeps the tabard slot,
+  and it combines with the sheath toggle (`impl-vegivaca-hide-tabard-1400.png`); a mouse drag rotates; at 390 px with touch, a drag on the canvas rotates the
   model and does not scroll the page; the canvas fills its container at both widths;
 * icons inside hidden tab panels stay `<img>` until their tab opens, then a missing one
   becomes the empty silhouette and an existing one is kept;

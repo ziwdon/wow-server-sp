@@ -37,9 +37,10 @@
   </header>
 
   {# One card, the traditional paper-doll: left slots | 3D model | right slots, the weapon row
-     under all three, then the two 3D-view toggles (sheathe weapons, hide tabard; armory.js
-     disables the second when the model has no tabard) and the average item level. On a phone
-     the CSS puts the model first (grid areas), so the DOM keeps the columns' reading order. #}
+     under all three, then the two 3D-view toggles (sheathe weapons, hide tabard: ticked by
+     default; armory.js disables and unticks it when the model has no tabard) and the average
+     item level. On a phone the CSS puts the model first (grid areas), so the DOM keeps the
+     columns' reading order. #}
   <div class="paperdoll">
     <div class="paperdoll-col paperdoll-left">
       {% for n, label in [(0, "Head"), (1, "Neck"), (2, "Shoulder"), (14, "Back"), (4, "Chest"), (3, "Shirt"), (18, "Tabard"), (8, "Wrist")] %}
@@ -66,7 +67,7 @@
     </div>
     <div class="paperdoll-foot">
       <label class="armory-toggle"><input type="checkbox" id="armory-sheath"> Sheathe weapons</label>
-      <label class="armory-toggle"><input type="checkbox" id="armory-hide-tabard"> Hide tabard</label>
+      <label class="armory-toggle"><input type="checkbox" id="armory-hide-tabard" checked> Hide tabard</label>
       <p class="armory-avg-ilvl">{% if view.avg_ilvl is not none %}Average item level: <b>{{ view.avg_ilvl }}</b>{% else %}Nothing equipped{% endif %}</p>
     </div>
   </div>

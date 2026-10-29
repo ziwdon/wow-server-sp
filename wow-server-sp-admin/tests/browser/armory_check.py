@@ -752,9 +752,12 @@ def run_character(browser, base, guid, recorder, proxy, res: Results, out: Path,
     res.check(f"{name}: no 'no 3D' mark on the paper-doll", panel["no3d"] == 0, f"{panel['no3d']}")
     tabard = has_tabard(model.get("items"))
     toggle = panel["hideTabard"] or {}
-    res.check(f"{name}: 'Hide tabard' is {'enabled' if tabard else 'disabled'} "
+    res.check(f"{name}: 'Hide tabard' is {'enabled and ticked' if tabard else 'disabled and unticked'} "
               f"({'a' if tabard else 'no'} tabard in the model answer)",
-              toggle.get("disabled") is (not tabard) and toggle.get("checked") is False, json.dumps(toggle))
+              toggle.get("disabled") is (not tabard) and toggle.get("checked") is tabard, json.dumps(toggle))
+    first = (panel["given"] or {}).get("items")
+    res.check(f"{name}: the first viewer was given no tabard (Hide tabard is ticked by default)",
+              panel["given"] is not None and not has_tabard(first), json.dumps(first))
     upstream = recorder.since(up_before)
     bad = [c["url"] for c in upstream if not any(s.fullmatch(c["url"]) for s in UPSTREAM_SHAPES)]
     res.check(f"{name}: every upstream URL has an allow-listed shape", not bad, f"{bad[:5]}")
@@ -863,31 +866,35 @@ def run_extras(browser, base, recorder, proxy, res: Results, out: Path) -> dict:
     wait_rendered(page)
     wait_quiet(watch, recorder)
 
-    # Hide tabard: a new viewer given the same items minus the tabard (19), drawn without the
-    # grey Guild Tabard; the paper-doll keeps its tabard slot. Then together with the sheath.
-    shown = page.evaluate(PANEL_JS)
-    with_tabard = model_shot(page)
+    # Hide tabard (ticked by default): the first viewer was given the items minus the tabard
+    # (19), drawn without the grey Guild Tabard; unticking re-creates it with the same items
+    # plus the tabard. The paper-doll keeps its tabard slot. Then together with the sheath.
+    hidden = page.evaluate(PANEL_JS)
+    no_tabard = model_shot(page)
     time.sleep(1)
-    with_tabard2 = model_shot(page)  # the idle animation's own change: the noise floor
-    page.click("#armory-hide-tabard")
+    no_tabard2 = model_shot(page)  # the idle animation's own change: the noise floor
+    (out / "impl-vegivaca-hide-tabard-model.png").write_bytes(no_tabard)
+    page.screenshot(path=str(out / "impl-vegivaca-hide-tabard-1400.png"), full_page=True)
+    page.click("#armory-hide-tabard")  # untick: the tabard is drawn again
     time.sleep(0.3)
     state3, waited3 = wait_rendered(page)
     wait_quiet(watch, recorder)
-    hidden = page.evaluate(PANEL_JS)
-    no_tabard = model_shot(page)
-    (out / "impl-vegivaca-hide-tabard-model.png").write_bytes(no_tabard)
-    page.screenshot(path=str(out / "impl-vegivaca-hide-tabard-1400.png"), full_page=True)
-    given0, given1 = (shown["given"] or {}).get("items", []), (hidden["given"] or {}).get("items", [])
-    res.check("hide tabard: Vegivaca's viewer had the tabard before", has_tabard(given0), json.dumps(given0))
-    res.check("hide tabard: a new viewer, given the same items minus the tabard only",
-              hidden["viewers"] == shown["viewers"] + 1 and not has_tabard(given1)
-              and given1 == [i for i in given0 if i[0] != 19],
-              f"viewers {shown['viewers']} -> {hidden['viewers']}; {json.dumps(given1)}")
-    res.check("hide tabard: exactly one canvas and rendered again, not blank",
-              hidden["canvases"] == 1 and state3 == "rendered" and not_blank(picture_stats(no_tabard)),
-              f"canvases {hidden['canvases']}, state {state3} after {waited3} s, "
-              f"{json.dumps(picture_stats(no_tabard))}")
-    noise, change = region_diff(with_tabard, with_tabard2), region_diff(with_tabard, no_tabard)
+    shown = page.evaluate(PANEL_JS)
+    with_tabard = model_shot(page)
+    (out / "impl-vegivaca-tabard-shown-model.png").write_bytes(with_tabard)
+    given0, given1 = (hidden["given"] or {}).get("items", []), (shown["given"] or {}).get("items", [])
+    res.check("hide tabard: ticked by default, Vegivaca's viewer was given no tabard",
+              (hidden["hideTabard"] or {}).get("checked") is True and not has_tabard(given0),
+              f"{json.dumps(hidden['hideTabard'])} {json.dumps(given0)}")
+    res.check("hide tabard unticked: a new viewer, given the same items plus the tabard only",
+              shown["viewers"] == hidden["viewers"] + 1 and has_tabard(given1)
+              and given0 == [i for i in given1 if i[0] != 19],
+              f"viewers {hidden['viewers']} -> {shown['viewers']}; {json.dumps(given1)}")
+    res.check("hide tabard unticked: exactly one canvas and rendered again, not blank",
+              shown["canvases"] == 1 and state3 == "rendered" and not_blank(picture_stats(with_tabard)),
+              f"canvases {shown['canvases']}, state {state3} after {waited3} s, "
+              f"{json.dumps(picture_stats(with_tabard))}")
+    noise, change = region_diff(no_tabard, no_tabard2), region_diff(no_tabard, with_tabard)
     torso0, torso1 = region_stats(with_tabard), region_stats(no_tabard)
     res.check("hide tabard: the torso changed well beyond the idle animation's own change",
               change > max(3 * noise, 8.0), f"diff {change} vs noise {noise}; torso {torso0} -> {torso1}")
@@ -898,6 +905,9 @@ def run_extras(browser, base, recorder, proxy, res: Results, out: Path) -> dict:
                          " return s ? [s.tagName, s.getAttribute('aria-label')] : null; }")
     res.check("hide tabard: the paper-doll still shows the tabard slot",
               bool(slot) and slot[0] == "BUTTON" and "Guild Tabard" in (slot[1] or ""), json.dumps(slot))
+    page.click("#armory-hide-tabard")  # ticked again
+    time.sleep(0.3)
+    wait_rendered(page)
     page.click("#armory-sheath")  # both toggles together
     time.sleep(0.3)
     state4, _ = wait_rendered(page)
@@ -909,17 +919,14 @@ def run_extras(browser, base, recorder, proxy, res: Results, out: Path) -> dict:
     enforced = [v for v in both["csp"] if v["disposition"] == "enforce"]
     res.check("hide tabard: still zero CSP violations, no request outside the admin",
               not enforced and not watch.outside, f"{json.dumps(enforced)[:300]} {watch.outside[:3]}")
-    page.click("#armory-sheath")
-    time.sleep(0.3)
-    wait_rendered(page)
-    page.click("#armory-hide-tabard")  # back to the defaults
+    page.click("#armory-sheath")  # back to the defaults (tabard hidden, weapons drawn)
     time.sleep(0.3)
     wait_rendered(page)
     back = page.evaluate(PANEL_JS)
     given3 = back["given"] or {}
-    res.check("hide tabard unticked: the tabard is back in the viewer's items",
-              has_tabard(given3.get("items")) and given3.get("sheathMain") == 0, json.dumps(given3))
-    data["hide_tabard"] = {"shown": shown["given"], "hidden": hidden["given"], "both": given2,
+    res.check("back to the defaults: the tabard hidden again, the weapons unsheathed",
+              given3.get("items") == given0 and given3.get("sheathMain") == 0, json.dumps(given3))
+    data["hide_tabard"] = {"hidden": hidden["given"], "shown": shown["given"], "both": given2,
                            "back": given3, "noise": noise, "change": change,
                            "torso": [torso0, torso1], "slot18": slot}
     wait_quiet(watch, recorder)
