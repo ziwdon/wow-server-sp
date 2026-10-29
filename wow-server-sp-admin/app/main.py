@@ -2,7 +2,6 @@ from app.logging_config import configure as _configure_logging
 _configure_logging()
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 import hashlib
 import logging
@@ -1497,26 +1496,25 @@ def _armory_customization(proxy, model: int, race: int, appearance) -> tuple[lis
     return options, unknown, None
 
 
-def _armory_resolve(items: list, entries: dict[int, int]) -> tuple[list, list[int]]:
-    """Display-ID resolution with at most ``ARMORY_RESOLVE_WORKERS`` at once; input order kept."""
-    if not items:
-        return [], []
-    resolver = armory_resolver.get_resolver()
-    with ThreadPoolExecutor(
-        max_workers=min(ARMORY_RESOLVE_WORKERS, len(items)), thread_name_prefix="armory-resolve"
-    ) as pool:
-        results = list(pool.map(lambda item: resolver.resolve_items([item], entries), items))
-    sent = [item for batch, _unresolved in results for item in batch]
-    unresolved = sorted(slot for _batch, slots in results for slot in slots)
-    return sent, unresolved
+def _armory_pending_reason(count: int) -> str:
+    return (
+        f"Couldn't reach Wowhead's model data — {count} item{'' if count == 1 else 's'} "
+        "not shown yet; try again shortly"
+    )
 
 
 def _armory_model(guid: int) -> dict | None:
-    """The model API's answer (spec 7, R8, R12), or ``None`` for an unknown guid. Blocking."""
-    view = armory_svc.collect_character(guid, **db_credentials())
-    if view is None:
+    """The model API's answer (spec 7, R8, R12, R23), or ``None`` for an unknown guid. Blocking.
+
+    Two SELECTs (``collect_model_inputs``): with the page's six a character view stays
+    within spec 11's eight (R22). ``unresolved`` = slots Wowhead has no model for
+    (definitive); ``pending`` = slots whose lookup failed for now (nothing recorded), which
+    ``reason`` explains, as it does null ``options``.
+    """
+    inputs = armory_svc.collect_model_inputs(guid, **db_credentials())
+    if inputs is None:
         return None
-    header = view.header
+    header = inputs.header
     model = armory_svc.model_id(header.race, header.gender)
     proxy = armory_assets.get_proxy()
     enabled = proxy.settings.enabled()
@@ -1526,6 +1524,7 @@ def _armory_model(guid: int) -> dict | None:
         "unresolvedOptions": [],
         "items": [],
         "unresolved": [],
+        "pending": [],
         "viewer": {"enabled": enabled, "scriptReady": proxy.viewer_status().size > 0},
         "sheath": False,
     }
@@ -1536,12 +1535,18 @@ def _armory_model(guid: int) -> dict | None:
     options, unknown, reason = _armory_customization(proxy, model, header.race, header.appearance)
     answer["options"] = options
     answer["unresolvedOptions"] = unknown
-    if reason is not None:
-        answer["reason"] = reason
-    sent, _omitted = armory_svc.viewer_items(view.items)
-    resolved, unresolved = _armory_resolve(sent, {item.slot: item.entry for item in view.items})
+    sent, _omitted = armory_svc.viewer_items(inputs.items)
+    resolved, unresolved, pending = armory_resolver.get_resolver().resolve_items(
+        sent, {item.slot: item.entry for item in inputs.items}, workers=ARMORY_RESOLVE_WORKERS
+    )
     answer["items"] = [[item.inventory_type, item.display_id] for item in resolved]
     answer["unresolved"] = unresolved
+    answer["pending"] = pending
+    reasons = [reason] if reason is not None else []
+    if pending:
+        reasons.append(_armory_pending_reason(len(pending)))
+    if reasons:
+        answer["reason"] = "; ".join(reasons)
     return answer
 
 

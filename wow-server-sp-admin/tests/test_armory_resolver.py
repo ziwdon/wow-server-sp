@@ -27,6 +27,7 @@ from app.services.armory_resolver import (
     MAP_FILE,
     NULL_RETRY_SECONDS,
     DisplayIdResolver,
+    Miss,
     get_resolver,
     meta_path,
     reset_resolver,
@@ -635,9 +636,10 @@ def test_resolve_items_swaps_ids_and_lists_unresolved_slots(tmp_path):
     ]
     entries = {16: 19019, 3: SHIRT_ENTRY, 15: 30000, 2: 16000, 18: 5976}
 
-    sent, unresolved = rig.resolver.resolve_items(items, entries)
+    sent, unresolved, pending = rig.resolver.resolve_items(items, entries)
     assert sent == [ViewerItem(3, SHIRT_TYPE, SHIRT_WH_ID), ViewerItem(15, 13, 31000), ViewerItem(2, 3, 28351)]
-    assert unresolved == [0, 16, 18]
+    assert unresolved == [0, 16]  # definitive: no entry; DB id and Wowhead both 404
+    assert pending == [18]  # transient: the tabard's hiccup
     assert MV + "wrath/meta/item/29581.json" in rig.fetch.urls()  # the folded off-hand type asks the item meta
     assert not any("4444" in url for url in rig.fetch.urls())  # an unknown entry is never looked up
     assert rig.saved() == {
@@ -651,11 +653,11 @@ def test_resolve_items_swaps_ids_and_lists_unresolved_slots(tmp_path):
     calls = len(rig.fetch.calls)
     rig.mono.now += 61
     rig.fetch.answers[MV + "wrath/meta/armor/19/5555.json"] = _ok()
-    sent, unresolved = rig.resolver.resolve_items(items, entries)
+    sent, unresolved, pending = rig.resolver.resolve_items(items, entries)
     assert [item.slot for item in sent] == [3, 15, 2, 18]
-    assert unresolved == [0, 16]
+    assert unresolved == [0, 16] and pending == []
     assert rig.fetch.urls()[calls:] == [MV + "wrath/meta/armor/19/5555.json"]
-    assert rig.resolver.resolve_items([], {}) == ([], [])
+    assert rig.resolver.resolve_items([], {}) == ([], [], [])
 
 
 def test_resolve_items_writes_the_map_once(tmp_path, monkeypatch):
@@ -669,11 +671,115 @@ def test_resolve_items_writes_the_map_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(armory_resolver, "_write_private_file", counting)
     items = [ViewerItem(slot, 5, slot) for slot in range(1, 6)]
-    sent, unresolved = rig.resolver.resolve_items(items, {slot: 100 + slot for slot in range(1, 6)})
-    assert [item.display_id for item in sent] == [1, 2, 3, 4, 5] and unresolved == []
+    sent, unresolved, pending = rig.resolver.resolve_items(items, {slot: 100 + slot for slot in range(1, 6)})
+    assert [item.display_id for item in sent] == [1, 2, 3, 4, 5] and unresolved == [] and pending == []
     assert writes == [rig.map_path]
     rig.resolver.resolve_items(items, {slot: 100 + slot for slot in range(1, 6)})
     assert writes == [rig.map_path]  # nothing new: nothing written
+
+
+
+# --- definitive vs transient misses (R23) ---
+
+
+def test_resolve_outcome_tells_a_definitive_miss_from_a_transient_one(tmp_path):
+    rig = Rig(tmp_path, {MV + SHIRT_DB_META: _ok(), XML_6125: _status(404)})
+    assert rig.resolver.resolve_outcome(SHIRT_ENTRY, SHIRT_DB_ID, SHIRT_TYPE) == SHIRT_DB_ID
+
+    # Definitive: the DB id's meta and the item lookup are both 404 (recorded null) ...
+    assert rig.resolver.resolve_outcome(4242, 777, 7) is Miss.UNRESOLVABLE
+    assert rig.resolver.resolve_outcome(4242, 777, 7) is Miss.UNRESOLVABLE  # ... also from the map
+    # ... and so is an entry that cannot be looked up at all.
+    assert rig.resolver.resolve_outcome(0, 777, 7) is Miss.UNRESOLVABLE
+
+    # Transient: nothing recorded, a later view asks again.
+    rig.fetch.answers[MV + "wrath/meta/armor/7/888.json"] = _status(503)
+    assert rig.resolver.resolve_outcome(4343, 888, 7) is Miss.PENDING  # upstream failure
+    assert rig.resolver.resolve_outcome(4444, 999, 7) is Miss.PENDING  # the host cools down
+    rig.mono.now += 61
+    rig.proxy.settings.set_enabled(False)
+    assert rig.resolver.resolve_outcome(4545, 1111, 7) is Miss.PENDING  # switched off
+    assert sorted(int(key) for key in rig.saved()) == [4242, 6125]
+
+    # The plain resolve still answers None for both kinds.
+    assert rig.resolver.resolve(4242, 777, 7) is None
+    assert rig.resolver.resolve(4545, 1111, 7) is None
+
+
+def test_resolve_outcome_follower_timeout_is_pending(tmp_path):
+    rig = Rig(tmp_path, {XML_6125: _ok(ITEM_6125_XML), MV + SHIRT_WH_META: _ok()}, gate=XML_6125, follow_timeout_s=0.1)
+    leader = _in_thread(rig.resolver.resolve_outcome, SHIRT_ENTRY, SHIRT_DB_ID, SHIRT_TYPE)
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    assert rig.resolver.resolve_outcome(SHIRT_ENTRY, SHIRT_DB_ID, SHIRT_TYPE) is Miss.PENDING
+    rig.fetch.release.set()
+    assert _joined(*leader) == SHIRT_WH_ID
+
+
+def test_resolve_outcome_followers_share_the_leaders_definitive_miss(tmp_path):
+    rig = Rig(tmp_path, {XML_6125: _status(404)}, gate=XML_6125)
+    leader = _in_thread(rig.resolver.resolve_outcome, SHIRT_ENTRY, SHIRT_DB_ID, SHIRT_TYPE)
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    follower = _in_thread(rig.resolver.resolve_outcome, SHIRT_ENTRY, SHIRT_DB_ID, SHIRT_TYPE)
+    _wait_until(lambda: _followers(rig.resolver, SHIRT_ENTRY) == 1, "the second resolve to join the first")
+    rig.fetch.release.set()
+    assert _joined(*leader) is Miss.UNRESOLVABLE
+    assert _joined(*follower) is Miss.UNRESOLVABLE
+
+
+class _Blocking:
+    """A fetch that holds every call until ``release``; counts how many are inside at once."""
+
+    def __init__(self):
+        self.mu = threading.Lock()
+        self.active = 0
+        self.peak = 0
+        self.entered = threading.Semaphore(0)
+        self.release = threading.Event()
+
+    def __call__(self, url: str, *, if_none_match: str | None = None) -> FetchResult:
+        with self.mu:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        self.entered.release()
+        try:
+            if not self.release.wait(WAIT):
+                raise AssertionError("the test never released the fetches")
+            return _ok()
+        finally:
+            with self.mu:
+                self.active -= 1
+
+
+@pytest.mark.parametrize("workers, expected", [(1, 1), (2, 2), (4, 4), (10, 4)])
+def test_resolve_items_runs_at_most_the_given_workers_and_writes_the_map_once(
+    tmp_path, monkeypatch, workers, expected
+):
+    fetch = _Blocking()
+    # More proxy slots than workers, so only the worker count can limit the lookups at once.
+    proxy = AssetProxy(tmp_path / "armory", fetch=fetch, max_parallel=8)
+    resolver = DisplayIdResolver(proxy, tmp_path / "armory")
+    writes: list[Path] = []
+    real_write = armory_resolver._write_private_file
+
+    def counting(path, data):
+        writes.append(path)
+        real_write(path, data)
+
+    monkeypatch.setattr(armory_resolver, "_write_private_file", counting)
+    items = [ViewerItem(slot, 5, 100 + slot) for slot in range(6)]
+    entries = {slot: 7000 + slot for slot in range(6)}
+    run = _in_thread(lambda: resolver.resolve_items(items, entries, workers=workers))
+    for _ in range(expected):
+        assert fetch.entered.acquire(timeout=WAIT)
+    time.sleep(0.2)  # give a worker beyond the limit the chance to show up
+    with fetch.mu:
+        peak = fetch.peak
+    fetch.release.set()
+    sent, unresolved, pending = _joined(*run)
+    assert peak == expected
+    assert [item.slot for item in sent] == list(range(6))  # input order kept
+    assert unresolved == [] and pending == []
+    assert writes == [resolver.path]  # one write per call, however many workers
 
 
 # --- the process-wide instance ---

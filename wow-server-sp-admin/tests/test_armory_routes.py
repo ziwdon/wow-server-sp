@@ -25,11 +25,12 @@ from app.services.armory import (
     CharacterView,
     EquippedItem,
     Header,
+    ModelInputs,
     SearchHit,
-    ViewerItem,
 )
 from app.services.armory_assets import AssetProxy, FetchResult, UpstreamError
 from app.services.dbc import Glyph, Spell, Talent, TalentTab
+from tests.test_armory import FakeConn, _vegivaca_results
 
 MV = "https://wow.zamimg.com/modelviewer/"
 WAIT = 5.0
@@ -175,6 +176,9 @@ def _view(*, items=None, header=None, spec_count=1, specs=(set(), set()), glyphs
 
 
 def _collect(monkeypatch, result=None, *, error: Exception | None = None):
+    """Fake both DB reads: the page's ``collect_character`` and the model API's narrow
+    ``collect_model_inputs`` (the same character's header and items). Calls are recorded
+    as ``(guid, kwargs)``; the model read's kwargs carry ``read="model"``."""
     calls = []
 
     def fake(guid, **kw):
@@ -183,7 +187,14 @@ def _collect(monkeypatch, result=None, *, error: Exception | None = None):
             raise error
         return result
 
+    def fake_model(guid, **kw):
+        calls.append((guid, {**kw, "read": "model"}))
+        if error is not None:
+            raise error
+        return None if result is None else ModelInputs(header=result.header, items=result.items)
+
     monkeypatch.setattr(armory_svc, "collect_character", fake)
+    monkeypatch.setattr(armory_svc, "collect_model_inputs", fake_model)
     return calls
 
 
@@ -579,7 +590,8 @@ def test_model_api_returns_resolved_items_and_unresolved_slots(tmp_path, monkeyp
         ],
         "unresolvedOptions": ["Sparkles"],
         "items": [[1, 100], [4, 9182], [5, 200]],
-        "unresolved": [15],
+        "unresolved": [15],  # definitive: Wowhead has no such item
+        "pending": [],
         "viewer": {"enabled": True, "scriptReady": False},
         "sheath": False,
     }
@@ -599,7 +611,7 @@ def test_model_api_reads_top_level_options_and_reports_a_pinned_viewer(tmp_path,
 
     assert data["options"] == [{"optionId": 1, "choiceId": 101}]
     assert data["unresolvedOptions"] == []
-    assert data["items"] == [] and data["unresolved"] == []
+    assert data["items"] == [] and data["unresolved"] == [] and data["pending"] == []
     assert data["viewer"] == {"enabled": True, "scriptReady": True}
     assert "reason" not in data
 
@@ -646,7 +658,7 @@ def test_model_api_viewer_off_skips_resolver_and_upstream(tmp_path, monkeypatch)
     data = resp.json()
     assert data["viewer"] == {"enabled": False, "scriptReady": False}
     assert data["options"] is None and "switched off" in data["reason"]
-    assert data["items"] == [] and data["unresolved"] == []
+    assert data["items"] == [] and data["unresolved"] == [] and data["pending"] == []
     assert fetch.urls() == []
 
 
@@ -685,35 +697,102 @@ def test_model_api_logs_each_unknown_option_name_once(tmp_path, monkeypatch, cap
 
 def test_model_api_resolves_items_with_at_most_four_workers(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
-    _proxy_, fetch = _proxy(tmp_path, monkeypatch)
-    _model_answers(fetch, customization=_status(404))
+    mu = threading.Lock()
+    state = {"active": 0, "peak": 0}
+    release = threading.Event()
+
+    def fetch(url, *, if_none_match=None):
+        if "/meta/armor/" not in url:
+            return _status(404)
+        with mu:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            release.wait(0.3)  # long enough for a fifth worker to show up, if there were one
+            return _ok()
+        finally:
+            with mu:
+                state["active"] -= 1
+
+    # Eight proxy slots, so only the model API's worker count can limit the lookups at once.
+    proxy = AssetProxy(tmp_path / "admin-data" / "armory", fetch=fetch, max_parallel=8)
+    monkeypatch.setattr(armory_assets, "get_proxy", lambda: proxy)
     items = [_item(slot, 1, 1000 + slot) for slot in (0, 2, 3, 4, 5, 6, 7, 8)]  # eight sent pieces
     _collect(monkeypatch, _view(items=items))
-    barrier = threading.Barrier(4, timeout=WAIT)  # only passes when four resolve at once
-    active = {"now": 0, "max": 0}
-    mu = threading.Lock()
-
-    class Resolver:
-        def resolve_items(self, batch, entries):
-            with mu:
-                active["now"] += 1
-                active["max"] = max(active["max"], active["now"])
-            try:
-                barrier.wait()
-                time.sleep(0.02)
-            finally:
-                with mu:
-                    active["now"] -= 1
-            assert all(entries[v.slot] == 50000 + v.slot for v in batch)
-            return [ViewerItem(v.slot, v.inventory_type, v.display_id + 1) for v in batch], []
-
-    monkeypatch.setattr(armory_resolver, "get_resolver", lambda: Resolver())
 
     data = client.get(f"/api/armory/{GUID}/model").json()
 
-    assert active["max"] == 4
-    assert data["items"] == [[1, 1001 + slot] for slot in (0, 2, 3, 4, 5, 6, 7, 8)]  # slot order kept
-    assert data["unresolved"] == []
+    assert state["peak"] == 4
+    assert data["items"] == [[1, 1000 + slot] for slot in (0, 2, 3, 4, 5, 6, 7, 8)]  # slot order kept
+    assert data["unresolved"] == [] and data["pending"] == []
+
+
+def test_model_api_transient_item_misses_are_pending_with_a_reason(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _proxy_, fetch = _proxy(tmp_path, monkeypatch)
+    _model_answers(fetch)
+    for path in ("wrath/meta/armor/1/100.json", "wrath/meta/armor/4/9995.json",
+                 "wrath/meta/armor/5/200.json", "wrath/meta/item/300.json"):
+        fetch.answer(path, UpstreamError("timed out"))  # the CDN fails once the customisation is in
+    _collect(monkeypatch, _view())
+
+    data = client.get(f"/api/armory/{GUID}/model").json()
+
+    assert data["options"] is not None  # the customisation JSON came through
+    assert data["items"] == []
+    assert data["pending"] == [0, 3, 4, 15]  # nothing recorded: a later view asks again
+    assert data["unresolved"] == []  # no item is blamed
+    assert "Couldn't reach Wowhead's model data" in data["reason"]
+    assert "4 items not shown yet" in data["reason"]
+    assert not (tmp_path / "admin-data" / "armory" / "displayid-map.json").exists()
+
+
+def test_model_api_definitive_miss_is_unresolved_without_pending(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _proxy_, fetch = _proxy(tmp_path, monkeypatch)
+    _model_answers(fetch)  # main hand: no meta for its DB id and Wowhead has no such item (XML 404)
+    _collect(monkeypatch, _view(items=[_item(15, 17, 300, entry=12345)]))
+
+    data = client.get(f"/api/armory/{GUID}/model").json()
+
+    assert data["unresolved"] == [15]
+    assert data["pending"] == []
+    assert "reason" not in data
+
+
+def test_model_api_reason_names_the_customisation_and_the_pending_items(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _proxy_, fetch = _proxy(tmp_path, monkeypatch)
+    _model_answers(fetch, customization=UpstreamError("timed out"))  # the host then cools down
+    _collect(monkeypatch, _view(items=[_item(0, 1, 100), _item(4, 5, 200)]))
+
+    data = client.get(f"/api/armory/{GUID}/model").json()
+
+    assert data["options"] is None
+    assert data["pending"] == [0, 4] and data["unresolved"] == [] and data["items"] == []
+    assert CUSTOMIZATION_PATH in data["reason"]
+    assert "2 items not shown yet" in data["reason"]
+
+
+def test_model_api_reads_only_the_header_and_items_and_the_page_its_six(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    _proxy(tmp_path, monkeypatch)
+    conns = []
+
+    def connect(**kwargs):
+        conns.append(FakeConn(_vegivaca_results()))
+        return conns[-1]
+
+    monkeypatch.setattr(armory_svc.mysql.connector, "connect", connect)
+
+    assert client.get("/armory/2506").status_code == 200
+    assert client.get("/api/armory/2506/model").status_code == 200
+
+    assert len(conns) == 2  # one connection each
+    page, model = (len(conn.executed) for conn in conns)
+    assert page == 6
+    assert model == 2  # spec 6/11: at most 8 SELECTs per character view, here 8
+    assert all(conn.closed for conn in conns)
 
 
 # --- asset route ---

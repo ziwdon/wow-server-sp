@@ -6,7 +6,8 @@ character's rows into what Wowhead's model viewer needs (model id, customisation
 options, items). It never raises on odd data: a missing DBC record degrades to an id,
 not an error.
 
-The DB layer at the end (``search_characters``, ``collect_character``) reads those rows:
+The DB layer at the end (``search_characters``, ``collect_character`` for the page and
+``collect_model_inputs``, its header-and-items subset, for the model API) reads those rows:
 ``SELECT`` only, one short-lived connection per call (the ``players.collect_players``
 pattern). A DB error propagates to the caller, which shows it.
 
@@ -944,6 +945,14 @@ class CharacterView:
     stats_columns: tuple[str, ...]  # its column names (cursor.description)
 
 
+@dataclass(frozen=True, slots=True)
+class ModelInputs:
+    """What the model API reads (spec 6 queries 1-2 only): the header and the equipped items."""
+
+    header: Header
+    items: list[EquippedItem] = field(hash=False)  # by slot
+
+
 def _int(value: Any, default: int = 0) -> int:
     return default if value is None else int(value)
 
@@ -1085,6 +1094,36 @@ def _glyph_groups(rows) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return groups[0], groups[1]
 
 
+def _header_and_items(cur, guid: int) -> tuple[tuple, list[EquippedItem]] | None:
+    """Queries 1 and 2 on an open cursor: (the header row, the equipped items), or ``None``
+    (and only query 1 run) for a guid with no (undeleted) character."""
+    params = (guid,)
+    cur.execute(_HEADER_SQL, params)
+    rows = cur.fetchall()
+    if not rows:
+        return None
+    cur.execute(_EQUIPMENT_SQL, params)
+    return rows[0], [equipped_item(r) for r in cur.fetchall()]
+
+
+def collect_model_inputs(
+    guid: int, *, host: str, port: int, user: str, password: str
+) -> ModelInputs | None:
+    """The model API's read: the header and the equipped items only (spec §6 queries 1-2),
+    ``None`` for a guid with no (undeleted) character. Two ``SELECT``s on one connection,
+    so a character view (page + model) stays within spec §11's eight."""
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            found = _header_and_items(cur, guid)
+    finally:
+        _close(conn)
+    if found is None:
+        return None
+    row, items = found
+    return ModelInputs(header=_header(row), items=items)
+
+
 def collect_character(
     guid: int,
     *,
@@ -1104,16 +1143,12 @@ def collect_character(
     try:
         with conn.cursor() as cur:
             params = (guid,)
-            cur.execute(_HEADER_SQL, params)
-            rows = cur.fetchall()
-            if not rows:
+            found = _header_and_items(cur, guid)
+            if found is None:
                 return None
-            row = rows[0]
+            row, items = found
             header = _header(row)
             spec_count, active_spec = _int(row[15], 1), _int(row[16])
-
-            cur.execute(_EQUIPMENT_SQL, params)
-            items = [equipped_item(r) for r in cur.fetchall()]
 
             cur.execute(_AVG_ILVL_SQL, params)
             avg_rows = cur.fetchall()

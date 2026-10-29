@@ -16,8 +16,14 @@ id that does. ``DisplayIdResolver.resolve`` runs the spec 8.1 state machine:
 ``null`` is recorded only for a definitive answer: the DB id's meta is 404 and the
 XML is 404, or names no usable id, or names the DB id again, or names an id whose
 meta is 404 as well. Anything transient (switched off, cooling down, no free slot,
-429/5xx, network errors) returns ``None`` for this call and records nothing, so a
-later view asks again. Two concurrent resolves of one entry share one lookup.
+429/5xx, network errors, a follower that gave up waiting) records nothing, so a later
+view asks again. Two concurrent resolves of one entry share one lookup.
+
+``resolve_outcome`` tells the two kinds of miss apart (R23): ``Miss.UNRESOLVABLE`` is
+definitive (a recorded ``null``, or no usable entry), ``Miss.PENDING`` transient.
+``resolve_items`` sorts the items it cannot send into those two lists, so the model
+panel can say "Wowhead unreachable" instead of blaming the item; ``resolve`` answers
+``None`` for both.
 
 The map lives next to the cache, in the proxy's armory dir (``ADMIN_DATA_DIR/armory``),
 and survives a cache Clear. It is written with the armory's one private-write helper
@@ -29,6 +35,7 @@ instance, bound to ``get_proxy()``'s.
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
 import logging
 import math
@@ -36,6 +43,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,6 +51,7 @@ from typing import TYPE_CHECKING
 from app.services import armory_assets
 from app.services.armory_assets import (
     DEFAULT_TIMEOUT_SECONDS,
+    MAX_PARALLEL_FETCHES,
     SLOT_WAIT_MARGIN_SECONDS,
     AssetProxy,
     _json_bytes,
@@ -114,6 +123,17 @@ def _parse_display_id(body: bytes) -> int | None:
     return None
 
 
+class Miss(enum.Enum):
+    """Why an item has no display id to send the viewer (R23)."""
+
+    UNRESOLVABLE = "unresolvable"  # definitive: a recorded null (no model on Wowhead), or no usable entry
+    PENDING = "pending"  # transient: nothing recorded (switched off, cool-down, no slot, upstream failure)
+
+
+# A resolve's answer: the display id to send, or why there is none.
+Outcome = int | Miss
+
+
 @dataclass(frozen=True)
 class _Record:
     display_id: int | None  # None: known unresolvable
@@ -125,7 +145,7 @@ class _Flight:
     """One lookup in progress for an entry; other resolves of it wait on ``done``."""
 
     done: threading.Event = field(default_factory=threading.Event)
-    outcome: int | None = None
+    outcome: Outcome = Miss.PENDING  # kept if the leader raises: nothing was recorded
     followers: int = 0
 
 
@@ -180,43 +200,63 @@ class DisplayIdResolver:
 
     def resolve(self, entry: int, db_display_id: int, inventory_type: int) -> int | None:
         """The display id to send the viewer for this item, or None (no 3D for it, for now or for good)."""
+        outcome = self.resolve_outcome(entry, db_display_id, inventory_type)
+        return None if isinstance(outcome, Miss) else outcome
+
+    def resolve_outcome(self, entry: int, db_display_id: int, inventory_type: int) -> Outcome:
+        """The display id, or ``Miss.UNRESOLVABLE`` (definitive) / ``Miss.PENDING`` (ask again later)."""
         try:
             return self._resolve(entry, db_display_id, inventory_type)
         finally:
             self._flush()
 
     def resolve_items(
-        self, items: Sequence[ViewerItem], entries: Mapping[int, int]
-    ) -> tuple[list[ViewerItem], list[int]]:
-        """``viewer_items``' list with resolved display ids, and the DB slots left without one.
+        self, items: Sequence[ViewerItem], entries: Mapping[int, int], *, workers: int = 1
+    ) -> tuple[list[ViewerItem], list[int], list[int]]:
+        """(``viewer_items``' list with resolved display ids, unresolved slots, pending slots).
 
         ``entries`` maps DB slot -> ``item_template.entry``; an item whose slot has no
-        entry there is unresolved. The first list keeps the input order, the slots are
-        sorted. The map is written once, after all of them.
+        entry there is unresolved. Unresolved = a definitive miss (no model for it on
+        Wowhead); pending = a transient one (nothing recorded; a later view asks again).
+        Up to ``workers`` items resolve at once (at most ``MAX_PARALLEL_FETCHES``, the
+        proxy's upstream slots). The first list keeps the input order, the slot lists
+        are sorted. The map is written once, after all of them.
         """
-        sent: list[ViewerItem] = []
-        unresolved: list[int] = []
+        workers = max(1, min(int(workers), MAX_PARALLEL_FETCHES, len(items) or 1))
+
+        def one(item: ViewerItem) -> Outcome:
+            entry = entries.get(item.slot)
+            if entry is None:
+                return Miss.UNRESOLVABLE
+            return self._resolve(entry, item.display_id, item.inventory_type)
+
         try:
-            for item in items:
-                entry = entries.get(item.slot)
-                display_id = (
-                    self._resolve(entry, item.display_id, item.inventory_type) if entry is not None else None
-                )
-                if display_id is None:
-                    unresolved.append(item.slot)
-                elif display_id == item.display_id:
-                    sent.append(item)
-                else:
-                    sent.append(dataclasses.replace(item, display_id=display_id))
+            if workers == 1:
+                outcomes = [one(item) for item in items]
+            else:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="armory-resolve") as pool:
+                    outcomes = list(pool.map(one, items))
         finally:
             self._flush()
-        return sent, sorted(unresolved)
+        sent: list[ViewerItem] = []
+        unresolved: list[int] = []
+        pending: list[int] = []
+        for item, outcome in zip(items, outcomes):
+            if outcome is Miss.UNRESOLVABLE:
+                unresolved.append(item.slot)
+            elif outcome is Miss.PENDING:
+                pending.append(item.slot)
+            elif outcome == item.display_id:
+                sent.append(item)
+            else:
+                sent.append(dataclasses.replace(item, display_id=outcome))
+        return sent, sorted(unresolved), sorted(pending)
 
     # the state machine
 
-    def _resolve(self, entry: object, db_display_id: object, inventory_type: object) -> int | None:
+    def _resolve(self, entry: object, db_display_id: object, inventory_type: object) -> Outcome:
         if not (_valid_entry(entry) and _is_int(db_display_id) and _is_int(inventory_type)):
-            return None
+            return Miss.UNRESOLVABLE  # nothing to look up: no later view can do better
         with self._mu:
             records = self._loaded()
             record = records.get(entry)
@@ -225,7 +265,7 @@ class DisplayIdResolver:
                     return record.display_id
                 # Symmetric: a null dated more than that in the future (a wrong clock) is not trusted.
                 if abs(self._now() - record.checked_at) < NULL_RETRY_SECONDS:
-                    return None
+                    return Miss.UNRESOLVABLE
             flight = self._flights.get(entry)
             leading = flight is None
             if flight is None:
@@ -234,7 +274,7 @@ class DisplayIdResolver:
                 flight.followers += 1
         if not leading:
             if not flight.done.wait(self._follow_timeout):
-                return None  # the leader is still asking; this view goes without
+                return Miss.PENDING  # the leader is still asking; this view goes without
             return flight.outcome
         try:
             flight.outcome = self._look_up(entry, db_display_id, inventory_type)
@@ -246,20 +286,20 @@ class DisplayIdResolver:
                 self._flights.pop(entry, None)
             flight.done.set()
 
-    def _look_up(self, entry: int, db_display_id: int, inventory_type: int) -> int | None:
-        """Steps 2 and 3 of spec 8.1. Records definitive answers; a transient one returns None unrecorded."""
+    def _look_up(self, entry: int, db_display_id: int, inventory_type: int) -> Outcome:
+        """Steps 2 and 3 of spec 8.1. Records definitive answers; a transient one is ``Miss.PENDING``, unrecorded."""
         first = self._meta_status(inventory_type, db_display_id)
         if first == 200:
             return self._record(entry, db_display_id)
         if first != 404:
-            return None  # switched off, cooling down, busy, upstream failure
+            return Miss.PENDING  # switched off, cooling down, busy, upstream failure
         result = self.proxy.fetch_item_xml(entry)
         if result is None:
-            return None
+            return Miss.PENDING
         if result.status == 404:
             return self._record(entry, None)  # Wowhead has no such item
         if result.status != 200:
-            return None
+            return Miss.PENDING
         found = _parse_display_id(result.body)
         if found is None or found == db_display_id:
             return self._record(entry, None)
@@ -269,13 +309,13 @@ class DisplayIdResolver:
             return self._record(entry, found)
         if second == 404:
             return self._record(entry, None)
-        return None
+        return Miss.PENDING
 
     def _meta_status(self, inventory_type: int, display_id: int) -> int:
         """200 (exists), 404 (does not: also for an id the allow-list cannot express) or 503 (unknown now)."""
         return self.proxy.serve(meta_path(inventory_type, display_id)).status
 
-    def _record(self, entry: int, display_id: int | None) -> int | None:
+    def _record(self, entry: int, display_id: int | None) -> Outcome:
         with self._mu:
             self._loaded()[entry] = _Record(display_id, int(self._now()))
             self._dirty = True
@@ -283,6 +323,7 @@ class DisplayIdResolver:
             log.info(
                 "armory: no 3D model found for item %d; asking again in %d days", entry, NULL_RETRY_SECONDS // 86_400
             )
+            return Miss.UNRESOLVABLE
         return display_id
 
     # the map file

@@ -35,7 +35,9 @@ from app.services.armory import (
     Socket,
     Tooltip,
     ViewerItem,
+    ModelInputs,
     collect_character,
+    collect_model_inputs,
     dps,
     equipped_item,
     format_stat,
@@ -1274,3 +1276,41 @@ def test_avg_ilvl_uses_the_players_ranking_expression(monkeypatch):
     joins = avg_sql[avg_sql.index("LEFT JOIN"):avg_sql.index("WHERE")]
     assert "ci.slot < 19" in joins and joins in ranking
     assert "WHERE c.guid = %s" in avg_sql
+
+
+# --- the model API's narrow read (R22: header + equipment only) ---
+
+
+def test_collect_model_inputs_runs_only_the_header_and_equipment_selects(monkeypatch):
+    conn, calls = _install_db(monkeypatch, _vegivaca_results()[:2])
+
+    inputs = collect_model_inputs(2506, **DB)
+
+    assert isinstance(inputs, ModelInputs)
+    assert calls == _expected_connect() and conn.closed  # one connection
+    assert [sql for sql, _ in conn.executed] == [armory._HEADER_SQL, armory._EQUIPMENT_SQL]
+    assert all(params == (2506,) for _, params in conn.executed)
+    # the same rows decode exactly as the page's read does
+    _install_db(monkeypatch, _vegivaca_results())
+    view = collect_character(2506, **DB, store=None)
+    assert inputs.header == view.header
+    assert inputs.items == view.items
+
+
+def test_collect_model_inputs_none_for_unknown_guid(monkeypatch):
+    conn, _ = _install_db(monkeypatch, [[]])
+    assert collect_model_inputs(999, **DB) is None
+    assert len(conn.executed) == 1 and conn.closed
+
+
+def test_collect_model_inputs_db_error_propagates_and_closes(monkeypatch):
+    conn, _ = _install_db(monkeypatch, _vegivaca_results()[:2], fail_at=2)
+    with pytest.raises(mysql.connector.Error):
+        collect_model_inputs(2506, **DB)
+    assert conn.closed
+
+
+def test_collect_character_runs_exactly_six_selects(monkeypatch):
+    conn, _ = _install_db(monkeypatch, _vegivaca_results())
+    collect_character(2506, **DB, store=None)
+    assert len(conn.executed) == 6
