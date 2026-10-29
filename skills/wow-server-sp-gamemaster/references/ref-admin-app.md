@@ -114,12 +114,41 @@ The Progression page (`/progression`) lets you advance individual characters thr
 
 The Backups page lists available `azerothcore-backup-<label>-<stamp>.tar.gz` archives, creates manual backups, and restores a selected archive. Restore is a same-machine rollback path: it imports backed-up databases with `docker exec`, restores `docker-compose.admin.yml`, and takes a `prerestore` safety backup first. It refuses an archive taken on different AzerothCore/module source revisions than the running server (or one whose revisions are unknown); cross-version restores are host-only (`scripts/restore-azerothcore.sh`).
 
-Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers every label (daily, manual, prerestore, preclear) except `preupgrade` and `prerollback` (an upgrade rollback's copy of the upgraded state), which are never pruned (delete those archives by hand once no longer needed). To keep a backup longer, copy the archive off the server from `/opt/stacks/azerothcore/backups/`.
+Backups are kept for 7 days by the nightly cron run of `backup.sh`; daily pruning covers every label (daily, manual, prerestore, preclear) except `preupgrade` and `prerollback` (an upgrade rollback's copy of the upgraded state), which are never pruned (delete those archives by hand once no longer needed). To keep a backup longer or off the server, copy the archive from `/opt/stacks/azerothcore/backups/` by hand or turn on Cloud Backup (below).
 
 For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: reinstall AzerothCore first, copy the chosen archive to the new host, then run `./scripts/restore-azerothcore.sh /path/to/archive.tar.gz`. The script refuses an archive whose manifest `git_revisions` differ from the stack's checkouts: check out those revisions and rebuild first, or pass `--allow-version-mismatch` knowingly.
 
 ### Blocked Keys
 `AuctionHouseBot.GUIDs` is blocked — it's installer-managed and cannot be set via the admin UI.
+
+## Cloud Backup (Proton Drive)
+
+Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that copies each backup archive to a folder in the owner's own Proton Drive, so a dead disk or lost machine does not take every backup with it.
+
+**What it does**
+- Every 10 minutes it checks whether a selected backup is missing from the Drive folder and uploads only what is new. It never replaces a Drive file: a different file with the same name is reported in the panel (amber) and left alone — move that Drive copy to the Drive trash by hand if you want this server's version uploaded.
+- Retention is applied on the Drive itself (default 7 days, 1–90, same cut-off as the local nightly prune): older copies go to the **Proton Drive trash** (recoverable — the owner empties it), never erased. `preupgrade`/`prerollback` archives are never removed, the newest archive is always kept, and nothing is trashed until the newest backup is confirmed in the Drive.
+- Archives found in the Drive get an **In Drive** badge in the backups list. After a failed run the next automatic attempt waits 60 minutes (**Upload now** ignores that); failing for over 26 hours with no success shows **Stalled**.
+- The panel's "Recent cloud runs" lists the last runs (`ok`, `warning` = conflicts only, `partial` = some files failed, `error` = the run stopped).
+
+**Connect** (needs a TPM 2.0 chip; with none the panel says **Not available** and why, and there is no software-only fallback; a chip that failed only briefly is checked again about hourly, and **Disconnect** stays available there while a session is stored)
+1. Click **Connect to Proton Drive**, open the link on your own device (copyable; it expires in 10 minutes), sign in on Proton's page and approve. The Proton password is never typed on the server.
+2. Set the **Drive folder** (e.g. `/my-files/WoW Backups`; must start with `/my-files/` or `/shared-with-me/`). If it does not exist, **Create folder** makes the last part of the path (the folders above must exist).
+3. Tick *Copy new backups to Proton Drive automatically*, optionally pick which backup kinds to copy and the keep-for days, **Save cloud settings**. **Upload now** works as soon as the connection and folder are good, even with automatic copying off. The folder cannot be changed while an upload, folder check or Create folder is running (the panel says it is busy; other settings still save).
+
+**Disconnect** deletes the stored session from this server and stops the copies (settings are kept). It does **not** end the session at Proton: revoke it in the Proton account's session list. The same applies after uninstalling the admin app (the uninstaller prints the reminder).
+
+**Restore from the Drive:** download the archive in Proton Drive, then **Import & Restore** on the Backups tab; on a new machine reinstall AzerothCore and run `scripts/restore-azerothcore.sh ARCHIVE`.
+
+**Security in plain words**
+- The password is typed only on Proton's page, on the owner's device.
+- The stored session can read, change and trash the whole Drive and probably the rest of the account's encrypted data until revoked; it cannot change the password, 2FA or recovery settings.
+- At rest it is GPG-encrypted with a passphrase that exists only sealed to this server's TPM: a stolen disk, a copied data folder or a backup archive is useless elsewhere. Whoever controls the running server (the owner's user, root, or the admin container, which has the Docker socket) can use it.
+- The admin has no login, so anyone who can reach it (Tailscale/LAN) can use the panel like any other page, but no page reveals the session.
+- Safer later: a separate Proton account with one folder shared to it as editor (folder `/shared-with-me/…`), so the worst case is a damaged backups folder.
+- Only Proton receives data; its CLI sends crash reports/telemetry per the account's preference.
+
+**Troubleshooting:** "Can't unlock the stored session — reconnect" = the TPM seal no longer opens (TPM cleared, or the data folder was copied to another machine): press **Reconnect**. A stale `TPM_DEVICE=/dev/tpmrm0` in `azerothcore-admin/.env` on a host without that device stops the admin container from starting — set `TPM_DEVICE=/dev/null` (or delete the line and redeploy). "Could not save the cloud status file — check that the admin data folder is writable." = `azerothcore-admin/data/cloud/state.json` cannot be written; the panel still shows the latest result from memory until a write works (a restart loses it). `verify-azerothcore-admin.sh` prints a single advisory `[INFO] cloud backup: …` line (when connected, with the last success's age, e.g. `last success 5h ago (<time>)`); it never fails the verify.
 
 ## Key Architecture Notes
 
@@ -140,6 +169,7 @@ For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: r
 | `ADMIN_PORT` | Port the admin listens on |
 | `HOST_UID` / `HOST_GID` | User/group IDs for file ownership |
 | `DOCKER_GID` | Docker group GID for socket access |
+| `TPM_DEVICE` / `TSS_GID` | Cloud Backup: host TPM device mapped into the container (`/dev/tpmrm0`, or `/dev/null` when the host has none) and the `tss` group GID that can open it. The installer writes both; the redeploy appends whichever is missing and never edits existing lines |
 
 ## File Paths
 
@@ -148,6 +178,7 @@ For fresh-machine disaster recovery, use `docs/runbooks/disaster-recovery.md`: r
 | `/opt/stacks/azerothcore-admin/` | Admin stack root |
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime vars (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
+| `/opt/stacks/azerothcore-admin/data/cloud/` | Cloud Backup: `config.json`, `state.json`, `log.jsonl` and `secrets/` (the encrypted Proton session; mode 700). Never included in backup archives |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
 | `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade, prerollback) |
 

@@ -17,6 +17,11 @@ for the design.
 ./scripts/verify-azerothcore-admin.sh
 ```
 
+The verifier also prints one advisory `[INFO] cloud backup: …` line (off,
+connected with how long ago the last success was, e.g. `last success 5h ago
+(<time>)`, or the connection state and last result). It never counts as a
+failure: a problem at Proton must not fail a verify.
+
 ## Development tests
 
 The production image installs only `requirements.txt`. Run the test suite in a
@@ -48,11 +53,81 @@ or server credentials. It covers keyboard/focus/dialog/mobile/filter controls, H
 status swaps, Apply/Rollback SSE completion, fetch failures, and focused axe/
 HTML semantics.
 
+## Cloud backup (Proton Drive)
+
+Optional. It copies each backup archive to a folder in your own Proton Drive,
+so a dead disk or a lost machine does not take every backup with it. Everything
+is set up in the **Cloud backup · Proton Drive** panel on the **Backups** tab.
+
+**What it does**
+
+- Every 10 minutes it checks for a backup that is not in the Drive folder yet and
+  uploads only that. It never replaces a file that is already there: if a
+  different file with the same name exists, the panel names it and leaves it
+  alone (move that Drive copy to the trash yourself if you want this server's
+  version uploaded).
+- Old copies leave the Drive on the same schedule as locally (7 days by
+  default, 1 to 90 in the settings). They are moved to the **Proton Drive
+  trash**, not erased; you empty that trash yourself. Pre-upgrade and
+  pre-rollback archives are never removed automatically, and nothing is removed
+  until the newest backup is confirmed to be in the Drive.
+- Archives that are in the Drive get an **In Drive** badge in the backups list.
+
+**Connecting**
+
+1. The server needs a TPM 2.0 chip. Without one the panel says **Not
+   available** and why; there is no software-only fallback. If the chip only
+   failed for a moment, the app checks it again about every hour. **Disconnect**
+   still shows there while a session is stored on this server.
+2. Click **Connect to Proton Drive**, open the link on your own device (you can
+   copy it), sign in on Proton's page and approve. Your Proton password is typed
+   only there, never on the server.
+3. Enter the Drive folder, for example `/my-files/WoW Backups` (it must start
+   with `/my-files/` or `/shared-with-me/`). If it does not exist yet, use
+   **Create folder**. Tick *Copy new backups to Proton Drive automatically* and
+   save. **Upload now** works even before you enable the automatic copy.
+
+**Settings:** automatic copy on or off, the Drive folder, which kinds of backup
+to copy (all of them by default), and how many days copies stay in the Drive.
+The folder cannot be changed while an upload, a folder check or **Create
+folder** is running (the panel says it is busy); the other settings can.
+
+**Disconnect** removes the stored session from this server and stops the
+copies; your settings are kept. It does **not** end the session at Proton: to do
+that, revoke it in your Proton account's session list. Do the same after
+uninstalling the admin app.
+
+**Restoring from the Drive:** download the archive in Proton Drive, then use
+**Import & Restore** on the Backups tab. On a new machine, reinstall AzerothCore
+and run `scripts/restore-azerothcore.sh` with the archive.
+
+**How safe is it?**
+
+- The password is typed only on Proton's own page, on your device.
+- The stored session can read, change and trash your whole Drive, and probably
+  the rest of the account's encrypted data, until you revoke it. It cannot
+  change your password, 2FA or recovery settings.
+- On disk it is encrypted with a passphrase that exists only sealed to this
+  server's TPM: a stolen disk, a copied data folder or a backup archive is
+  useless elsewhere. Anyone who controls the running server (your user, root, or
+  the admin container) can use it.
+- The admin app has no login: anyone who can reach it over Tailscale or the LAN
+  can use this panel like every other page, but no page ever shows the session.
+- Safer, if you want it later: a separate Proton account with one folder shared
+  to it as editor, and the folder set to `/shared-with-me/…`. Then the worst
+  case is that the backups folder gets damaged.
+- Only Proton receives data. The Proton Drive tool sends crash reports and
+  telemetry to Proton according to your account's preference.
+
 ## Uninstalling
 
 ```bash
 ./scripts/uninstall-azerothcore-admin.sh
 ```
+
+If Cloud backup was connected, the uninstaller reminds you to revoke the Proton
+Drive session in your Proton account's session list (removing the app deletes the
+copy stored on this server, not the session at Proton).
 
 ## Manual smoke checklist
 

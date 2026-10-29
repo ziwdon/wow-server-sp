@@ -1,4 +1,7 @@
+import datetime as dt
+import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -200,3 +203,233 @@ def test_executable_verifier_skips_lan_checks_without_lan_ip(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "LAN" not in result.stdout
+
+
+# --- step 8b: cloud backup is an INFO-only line (spec 6.11) ---
+
+
+def _write_cloud_files(admin_stack: Path, config: object = None, state: object = None, *, raw: bool = False) -> None:
+    """Create ``data/cloud/{config,state}.json`` in the fake admin stack (a str is written as-is when ``raw``)."""
+    cloud = admin_stack / "data" / "cloud"
+    cloud.mkdir(parents=True, exist_ok=True)
+    for name, value in (("config.json", config), ("state.json", state)):
+        if value is None:
+            continue
+        cloud.joinpath(name).write_text(value if raw else json.dumps(value))
+
+
+def _summary(stdout: str) -> str:
+    return next(line for line in stdout.splitlines() if line.startswith("Summary:"))
+
+
+def _cloud_lines(stdout: str) -> list[str]:
+    return [line for line in stdout.splitlines() if "cloud backup" in line]
+
+
+def test_executable_verifier_reports_cloud_backup_off_without_files(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _cloud_lines(result.stdout) == ["[INFO] cloud backup: off"]
+
+
+def test_executable_verifier_cloud_line_never_changes_pass_or_fail_counts(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    without = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    _write_cloud_files(
+        admin_stack,
+        {"enabled": True, "folder": "/my-files/WoW Backups"},
+        {"connection": "disconnected", "last_result": "error"},
+    )
+    with_cloud = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert with_cloud.returncode == without.returncode == 0, with_cloud.stdout + with_cloud.stderr
+    assert _cloud_lines(with_cloud.stdout) == ["[INFO] cloud backup: disconnected, last result error"]
+    assert _summary(with_cloud.stdout) == _summary(without.stdout)
+    assert "[FAIL]" not in with_cloud.stdout and "[OK]   cloud" not in with_cloud.stdout
+
+
+def test_executable_verifier_cloud_line_is_not_a_failure_when_other_checks_fail(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    _write_cloud_files(admin_stack, {"enabled": True}, {"connection": "vault_error", "last_result": "error"})
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log, ROOT_VERIFY_EXIT="1")
+
+    assert result.returncode == 1
+    assert "1 FAIL" in result.stdout  # only the delegated AC check; the cloud line adds none
+    assert _cloud_lines(result.stdout) == ["[INFO] cloud backup: vault_error, last result error"]
+
+
+def _ago(**delta) -> str:
+    """A ``last_success`` stamp that far before now, as the admin writes it."""
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(**delta)).isoformat(timespec="seconds")
+
+
+def test_executable_verifier_reports_a_connected_cloud_backup(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    recent = _ago(hours=5)
+    _write_cloud_files(
+        admin_stack,
+        {"enabled": True},
+        {"connection": "connected", "last_result": "ok", "last_success": recent},
+    )
+
+    ok = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(ok.stdout) == [f"[INFO] cloud backup: connected, last success 5h ago ({recent})"]
+
+    state = admin_stack / "data" / "cloud" / "state.json"
+    state.write_text(json.dumps({"connection": "connected", "last_result": "partial"}))
+    never = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(never.stdout) == ["[INFO] cloud backup: connected, last success never, last result partial"]
+
+    older = _ago(hours=30)
+    state.write_text(json.dumps({"connection": "connected", "last_result": "error", "last_success": older}))
+    failing = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(failing.stdout) == [
+        f"[INFO] cloud backup: connected, last success 30h ago ({older}), last result error"
+    ]
+    assert all(r.returncode == 0 for r in (ok, never, failing))
+
+
+def test_executable_verifier_cloud_line_prints_the_last_success_age(tmp_path):
+    # Spec 6.11: the age of the last success -- minutes under 1 h, hours up to 48 h, then days (M-6).
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    utc_z = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cases = [
+        (_ago(minutes=30), "30m ago"),
+        (_ago(seconds=20), "0m ago"),
+        (_ago(hours=1, minutes=1), "1h ago"),
+        (_ago(hours=47), "47h ago"),
+        (_ago(hours=49), "2d ago"),
+        (_ago(days=9, hours=3), "9d ago"),
+        (utc_z, "2h ago"),
+    ]
+    for stamp, age in cases:
+        _write_cloud_files(admin_stack, {"enabled": True}, {"connection": "connected", "last_result": "ok", "last_success": stamp})
+        result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _cloud_lines(result.stdout) == [f"[INFO] cloud backup: connected, last success {age} ({stamp})"], stamp
+
+    # The right shape but not a real time: no age to give.
+    _write_cloud_files(
+        admin_stack, {"enabled": True}, {"connection": "connected", "last_success": "2026-13-45T99:99:99+00:00"}
+    )
+    odd = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(odd.stdout) == ["[INFO] cloud backup: connected, last success unknown"]
+
+
+def test_executable_verifier_cloud_backup_is_off_when_disabled_or_unconfigured(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    # Disabled in the settings, whatever the leftover state says.
+    _write_cloud_files(admin_stack, {"enabled": False}, {"connection": "connected", "last_result": "ok"})
+    disabled = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(disabled.stdout) == ["[INFO] cloud backup: off"]
+
+    # Only a state file (no settings yet): the defaults say disabled.
+    (admin_stack / "data" / "cloud" / "config.json").unlink()
+    no_config = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(no_config.stdout) == ["[INFO] cloud backup: off"]
+
+
+def test_executable_verifier_cloud_line_without_a_state_file_uses_defaults(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    _write_cloud_files(admin_stack, {"enabled": True})
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert _cloud_lines(result.stdout) == ["[INFO] cloud backup: disconnected, last result none"]
+
+
+def test_executable_verifier_reports_unreadable_cloud_files_as_info(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    clean = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    _write_cloud_files(admin_stack, "{not json", '{"connection": "connected"}', raw=True)
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = _cloud_lines(result.stdout)
+    assert len(lines) == 1 and lines[0].startswith("[INFO] cloud backup: status unreadable (")
+    assert "{not json" not in result.stdout and "Traceback" not in result.stdout + result.stderr
+    assert _summary(result.stdout) == _summary(clean.stdout)
+
+    # Valid JSON of the wrong shape is unreadable too, not a crash.
+    (admin_stack / "data" / "cloud" / "config.json").write_text("[1, 2]")
+    wrong = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(wrong.stdout)[0].startswith("[INFO] cloud backup: status unreadable (")
+
+
+def test_executable_verifier_survives_a_failing_python3(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    _write_cloud_files(admin_stack, {"enabled": True}, {"connection": "connected"})
+    _executable(bind / "python3", "#!/bin/sh\nexit 1\n")
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = _cloud_lines(result.stdout)
+    assert len(lines) == 1 and lines[0].startswith("[INFO] cloud backup: status unreadable (")
+    assert "0 FAIL" in result.stdout
+
+
+def test_executable_verifier_cloud_line_prints_only_the_four_status_fields(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    _write_cloud_files(
+        admin_stack,
+        {"enabled": True, "folder": "/my-files/Private Name", "labels": ["daily"], "retention_days": 7},
+        {
+            "connection": "connected",
+            "last_result": "error",
+            "last_success": "2026-10-28T03:00:12+00:00",
+            "last_error": "SECRET-ERROR-TEXT userKeyPassword",
+            "issues": [{"name": "azerothcore-backup-daily-2026-10-28.tar.gz", "kind": "conflict"}],
+            "remote": [{"name": "azerothcore-backup-daily-2026-10-28.tar.gz"}],
+        },
+    )
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    for forbidden in ("Private Name", "SECRET-ERROR-TEXT", "userKeyPassword", "azerothcore-backup-daily"):
+        assert forbidden not in result.stdout + result.stderr
+    (line,) = _cloud_lines(result.stdout)
+    assert re.fullmatch(
+        r"\[INFO\] cloud backup: connected, last success [0-9]+[mhd] ago \(2026-10-28T03:00:12\+00:00\), last result error",
+        line,
+    ), line
+
+
+def test_executable_verifier_cloud_line_ignores_odd_field_values(tmp_path):
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    # Free text in a status field is never echoed: unknown values print as "unknown".
+    _write_cloud_files(
+        admin_stack,
+        {"enabled": True},
+        {"connection": "disconnected\n[FAIL] injected", "last_result": "x" * 500, "last_success": "not a date\n"},
+    )
+
+    result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "injected" not in result.stdout and "xxxx" not in result.stdout
+    assert _cloud_lines(result.stdout) == ["[INFO] cloud backup: unknown, last result unknown"]
+
+
+def test_verify_script_cloud_step_runs_before_the_ac_delegate():
+    script = ADMIN_VERIFY_SH.read_text()
+
+    assert script.index("# 8b.") < script.index("# 9. AC stack still functional")
+    assert "$STACK_DIR/data/cloud" in script

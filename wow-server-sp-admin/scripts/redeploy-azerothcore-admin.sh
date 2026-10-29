@@ -145,6 +145,20 @@ cp "$REPO_DIR/../scripts/backup.sh" "$STAGE_DIR/build/backup.sh"
 stage_conf_dists "$STAGE_DIR/build/dist"
 cp "$REPO_DIR/docker-compose.yml" "$STAGE_DIR/docker-compose.yml"
 
+# Cloud backup needs TPM_DEVICE/TSS_GID in the admin .env for the compose file's
+# TPM mapping. Installs that predate it have neither, so append what is missing
+# (never editing existing lines). This is the one place redeploy changes .env.
+# The feature is optional, so a failure here must not stop a redeploy.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/tpm-env.sh"
+if backfill_tpm_env "$STACK_DIR/.env"; then
+    if [ -n "$TPM_ENV_ADDED" ]; then
+        echo "==> Added $TPM_ENV_ADDED to $STACK_DIR/.env for the Cloud backup TPM mapping."
+    fi
+else
+    echo "WARNING: could not add TPM settings to $STACK_DIR/.env; Cloud backup will report the TPM as unavailable." >&2
+fi
+
 echo "==> Building candidate image $CANDIDATE_IMAGE..."
 ADMIN_IMAGE="$CANDIDATE_IMAGE" docker compose -f "$STAGE_DIR/docker-compose.yml" \
     --project-directory "$STAGE_DIR/build" --env-file "$STACK_DIR/.env" build

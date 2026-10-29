@@ -23,6 +23,8 @@ import uuid
 
 from app.services import backups as backups_svc
 from app.services import app_events
+from app.services import cloud_backup
+from app.services import cloud_config as cloud_cfg
 from app.services import db_stats
 from app.services import docker_client
 from app.services import known_errors as known_errors_svc
@@ -33,6 +35,7 @@ from app.services import presence as presence_svc
 from app.services import progression as progression_svc
 from app.services import raid_unlock as raid_unlock_svc
 from app.services import wow_reference as wow_ref
+from app.services.cloud_vault import UNLOCK_FAILED_MESSAGE
 from app.services.config_index import validate_value
 from app.services.stats_cache import refresher as stats_refresher
 from app.state import db_credentials, get_state, init_state, list_keys_resolved
@@ -88,9 +91,17 @@ async def lifespan(app: FastAPI):
     presence_announcer = presence_svc.PresenceAnnouncer(presence_svc.store_from_env())
     presence_announcer.start()
     app.state.presence_announcer = presence_announcer
+    cloud = cloud_backup.get_service()
+    await cloud.start()
+    app.state.cloud_backup = cloud
     try:
         yield
     finally:
+        # First: it may be waiting on a pending sign-in. A failing stop must not keep the others running.
+        try:
+            await cloud.stop()
+        except Exception:  # noqa: BLE001
+            log.exception("could not stop the cloud backup service cleanly")
         await presence_announcer.stop()
         await maintenance_scheduler.stop()
 
@@ -477,6 +488,7 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
             "disk_gb": _humanize_gb(summary.disk_used_bytes),
             "last_human": last_human,
             "error": error,
+            "cloud_card": _safe_cloud_card(await _cloud_status_or_none()),
         },
     )
 
@@ -490,6 +502,8 @@ async def api_backups_list(request: Request) -> HTMLResponse:
     except backups_svc.BackupListingError as exc:
         error = str(exc)
         rows = []
+    cloud = await _cloud_status_or_none()
+    in_drive = cloud.in_drive if cloud is not None else frozenset()
     return templates.TemplateResponse(
         request,
         "partials/backups_list.html",
@@ -500,10 +514,13 @@ async def api_backups_list(request: Request) -> HTMLResponse:
                     "label": r.label,
                     "created": r.created.strftime("%Y-%m-%d %H:%M UTC"),
                     "size_mb": round(r.size_bytes / (1024 * 1024)),
+                    "in_drive": r.filename in in_drive,
                 }
                 for r in rows
             ],
             "error": error,
+            "cloud_folder": cloud.config.folder if cloud is not None and cloud.config.enabled else None,
+            "cloud_retention": cloud.config.retention_days if cloud is not None else None,
         },
     )
 
@@ -517,6 +534,286 @@ async def download_backup(archive_name: str) -> FileResponse:
     if archive is None:
         raise HTTPException(status_code=404, detail="archive not found")
     return FileResponse(archive, media_type="application/gzip", filename=archive.name)
+
+
+# --- Cloud backup (Proton Drive) panel on the Backups tab ---------------------------------------
+# Every /api/cloud/* route answers 200 with the re-rendered panel; a problem is text inside it, so
+# htmx swaps it in place. The blocking service calls run on worker threads (a sign-in start can
+# wait ~30 s); the state-changing ones through _await_thread_completion, so a client that goes
+# away mid-request never gets control back while the call is still working. The service owns the
+# lock and the secrets; nothing here reads the session.
+
+CLOUD_GENERIC_ERROR = "Something went wrong — see the admin log."
+CLOUD_STALLED = "No fully successful cloud run for over a day"
+CLOUD_SAVE_FAILED = "Could not save the settings (the admin data folder is not writable)."
+CLOUD_BAD_RETENTION = (
+    f"Keep-for days must be a whole number from {cloud_cfg.RETENTION_MIN} to {cloud_cfg.RETENTION_MAX}."
+)
+CLOUD_DISCONNECTED = (
+    "Removed from this server. To end the session at Proton too, "
+    "revoke it in your Proton account's session list."
+)
+_CLOUD_RUN_RESULTS = {
+    "ok": ("OK", "ok"),
+    "warning": ("Conflicts", "warn"),
+    "partial": ("Partly failed", "bad"),
+    "error": ("Failed", "bad"),
+}
+
+
+def _utc_stamp(value: object) -> str:
+    """An ISO timestamp as ``YYYY-MM-DD HH:MM UTC`` (as in the backups list); unparsable text is returned as is."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        moment = dt.datetime.fromisoformat(value)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=dt.timezone.utc)
+        return moment.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, OverflowError):  # e.g. 0001-01-01T00:00:00+14:00 does not fit in UTC
+        return value
+
+
+templates.env.filters["utc_stamp"] = _utc_stamp
+
+
+def _cloud_text(text: str | None) -> str | None:
+    """Text for the page; anything naming a stored-session field is replaced (defence in depth)."""
+    return cloud_backup._scrub(text)
+
+
+async def _cloud_status_or_none():
+    """The service's status, or ``None`` when it cannot be read (the Backups page then shows no cloud info)."""
+    try:
+        return await asyncio.to_thread(cloud_backup.get_service().status)
+    except Exception:  # noqa: BLE001 - cloud trouble must never break the local backups list
+        log.exception("could not read the cloud backup status")
+        return None
+
+
+def _cloud_primary(view) -> str:
+    """The one state the status line shows (spec 6.8)."""
+    if view.available is None:
+        return "checking"
+    if view.available is False:
+        return "unavailable"
+    if view.signin_pending:
+        return "pending"
+    return view.connection if view.connection in ("connected", "vault_error") else "disconnected"
+
+
+def _cloud_runs(entries) -> list[dict]:
+    rows = []
+    for entry in entries:
+        label, tone = _CLOUD_RUN_RESULTS.get(entry.result, (entry.result, "bad"))
+        parts = [
+            f"{len(entry.uploaded)} uploaded" if entry.uploaded else "",
+            f"{len(entry.conflicts)} conflict{'' if len(entry.conflicts) == 1 else 's'}" if entry.conflicts else "",
+            f"{len(entry.failed)} failed" if entry.failed else "",
+            f"{len(entry.trashed)} moved to trash" if entry.trashed else "",
+        ]
+        rows.append(
+            {
+                "started": entry.started,
+                "trigger": entry.trigger,
+                "label": label,
+                "tone": tone,
+                "counts": ", ".join(part for part in parts if part) or "nothing to do",
+                "error": _cloud_text(entry.error),
+            }
+        )
+    return rows
+
+
+def _cloud_card(view) -> dict | None:
+    """The "Cloud copies" summary card, or ``None`` when the status could not be read."""
+    if view is None:
+        return None
+    state = view.state
+    if not view.config.enabled:
+        return {"value": "Off", "tone": "muted", "sub": None}
+    if view.available is False:
+        return {"value": "Unavailable", "tone": "bad", "sub": None}
+    if view.available is None:
+        return {"value": "Checking…", "tone": "muted", "sub": None}
+    if view.signin_pending:
+        return {"value": "Waiting for sign-in", "tone": "muted", "sub": None}
+    if state.connection == "vault_error":
+        return {"value": "Can't unlock the session", "tone": "bad", "sub": None}
+    if state.connection != "connected":
+        return {"value": "Not connected", "tone": "bad", "sub": None}
+    if view.stalled:
+        return {"value": "Stalled", "tone": "bad", "sub": CLOUD_STALLED}
+    if state.last_result in ("partial", "error"):
+        return {"value": "Last upload failed", "tone": "bad", "sub": None}
+    sub = f"{len(view.in_drive)} in Drive"
+    if not state.last_success:
+        return {"value": "No uploads yet", "tone": "muted", "sub": sub}
+    return {"value": _utc_stamp(state.last_success), "tone": None, "sub": sub}
+
+
+def _safe_cloud_card(view) -> dict | None:
+    """``_cloud_card``, but a bug or odd state data there only drops the card, never the local summary."""
+    try:
+        return _cloud_card(view)
+    except Exception:  # noqa: BLE001
+        log.exception("could not build the Cloud copies card")
+        return None
+
+
+def _cloud_context(view, *, error, notice, form, preserve_form) -> dict:
+    ctx = {"view": view, "error": error, "notice": notice, "preserve_form": preserve_form}
+    if view is None:
+        return ctx
+    cfg, state = view.config, view.state
+    primary = _cloud_primary(view)
+    connected = primary == "connected"
+    last_error = _cloud_text(state.last_error) if primary in ("disconnected", "vault_error", "connected") else None
+    if primary == "vault_error" and last_error == UNLOCK_FAILED_MESSAGE:
+        last_error = None  # the status line already says it
+    issues = state.issues if connected else []
+    folder_notice = None
+    if connected:
+        folder_notice = state.folder_status if state.folder_status in ("missing", "not_folder") else None
+        if not cfg.folder:
+            folder_notice = "unset"
+    ctx.update(
+        primary=primary,
+        # "Checking…" (no probe result yet) also polls, so the panel resolves without a reload.
+        polling=view.signin_pending or view.busy or view.available is None,
+        # Spec 6.9: Disconnect works even when the vault cannot be unsealed, so "Not available"
+        # still offers it while a session is stored or the state says it was ever connected.
+        can_disconnect=primary in ("connected", "vault_error")
+        or (primary == "unavailable" and (view.connection != "disconnected" or view.has_stored_session)),
+        state_unsaved=view.state_unsaved,
+        form=form
+        or {
+            "enabled": cfg.enabled,
+            "folder": cfg.folder,
+            "labels": set(cfg.labels),
+            "retention_days": cfg.retention_days,
+        },
+        all_labels=cloud_cfg.ALL_LABELS,
+        last_error=last_error,
+        stalled=connected and view.stalled,
+        conflicts=[item["name"] for item in issues if item["kind"] == "conflict"],
+        failures=[
+            {"name": item["name"], "detail": _cloud_text(item["detail"])}
+            for item in issues
+            if item["kind"] == "failed"
+        ],
+        folder_notice=folder_notice,
+        can_upload=connected and bool(cfg.folder) and folder_notice is None,
+        unavailable_reason=_cloud_text(view.unavailable_reason),
+        runs=_cloud_runs(view.log),
+    )
+    return ctx
+
+
+async def _cloud_panel_response(
+    request: Request,
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+    form: dict | None = None,
+    preserve_form: bool = False,
+) -> HTMLResponse:
+    view = await _cloud_status_or_none()
+    return templates.TemplateResponse(
+        request,
+        "partials/cloud_panel.html",
+        _cloud_context(view, error=error, notice=notice, form=form, preserve_form=preserve_form),
+    )
+
+
+async def _cloud_call(method: str, *args, validation: bool = False, on_oserror: str | None = None) -> str | None:
+    """Call a service method off the event loop. Returns the text to show, or ``None`` on success.
+
+    The service's own exceptions carry user-facing text. A ``ValueError`` is shown only for a form
+    the owner typed (``validation``); anything else is logged and replaced by a generic line.
+    Every caller changes state, so the worker thread is shielded and always awaited.
+    """
+    try:
+        await _await_thread_completion(getattr(cloud_backup.get_service(), method), *args)
+    except (cloud_backup.CloudBusy, cloud_backup.CloudUnavailable, cloud_backup.CloudActionError) as exc:
+        return _cloud_text(str(exc)) or CLOUD_GENERIC_ERROR
+    except ValueError as exc:
+        if validation:
+            return _cloud_text(str(exc)) or CLOUD_GENERIC_ERROR
+        log.exception("cloud backup %s failed", method)
+        return CLOUD_GENERIC_ERROR
+    except OSError:
+        log.exception("cloud backup %s failed", method)
+        return on_oserror or CLOUD_GENERIC_ERROR
+    except Exception:  # noqa: BLE001 - never echo a raw exception to the page
+        log.exception("cloud backup %s failed unexpectedly", method)
+        return CLOUD_GENERIC_ERROR
+    return None
+
+
+@app.get("/api/cloud/panel", response_class=HTMLResponse)
+async def api_cloud_panel(request: Request) -> HTMLResponse:
+    # Also the panel's own poll: keep the settings form the owner may be typing in.
+    return await _cloud_panel_response(request, preserve_form=True)
+
+
+@app.post("/api/cloud/settings", response_class=HTMLResponse)
+async def api_cloud_settings(
+    request: Request,
+    enabled: str | None = Form(None),
+    folder: str = Form(""),
+    labels: list[str] = Form([]),
+    retention_days: str = Form(""),
+) -> HTMLResponse:
+    form = {
+        "enabled": enabled is not None,
+        "folder": folder.strip(),
+        "labels": set(labels),
+        "retention_days": retention_days.strip(),
+    }
+    if not re.fullmatch(r"[0-9]{1,6}", form["retention_days"]):
+        error = CLOUD_BAD_RETENTION
+    else:
+        cfg = cloud_cfg.CloudConfig(
+            enabled=form["enabled"],
+            folder=form["folder"],
+            labels=tuple(labels),
+            retention_days=int(form["retention_days"]),
+        )
+        error = await _cloud_call("save_settings", cfg, validation=True, on_oserror=CLOUD_SAVE_FAILED)
+    if error is not None:
+        return await _cloud_panel_response(request, error=error, form=form)
+    # Show right away whether the folder exists; busy or not connected just means "not now".
+    await _cloud_call("check_folder")
+    return await _cloud_panel_response(request, notice="Settings saved.")
+
+
+@app.post("/api/cloud/connect", response_class=HTMLResponse)
+async def api_cloud_connect(request: Request) -> HTMLResponse:
+    return await _cloud_panel_response(request, error=await _cloud_call("start_sign_in"))
+
+
+@app.post("/api/cloud/connect/cancel", response_class=HTMLResponse)
+async def api_cloud_connect_cancel(request: Request) -> HTMLResponse:
+    return await _cloud_panel_response(request, error=await _cloud_call("cancel_sign_in"))
+
+
+@app.post("/api/cloud/disconnect", response_class=HTMLResponse)
+async def api_cloud_disconnect(request: Request) -> HTMLResponse:
+    error = await _cloud_call("disconnect")
+    return await _cloud_panel_response(request, error=error, notice=None if error else CLOUD_DISCONNECTED)
+
+
+@app.post("/api/cloud/upload-now", response_class=HTMLResponse)
+async def api_cloud_upload_now(request: Request) -> HTMLResponse:
+    error = await _cloud_call("start_run", "manual")
+    return await _cloud_panel_response(request, error=error, notice=None if error else "Upload started.")
+
+
+@app.post("/api/cloud/create-folder", response_class=HTMLResponse)
+async def api_cloud_create_folder(request: Request) -> HTMLResponse:
+    error = await _cloud_call("create_folder")
+    return await _cloud_panel_response(request, error=error, notice=None if error else "Folder created.")
 
 
 from sse_starlette.sse import EventSourceResponse

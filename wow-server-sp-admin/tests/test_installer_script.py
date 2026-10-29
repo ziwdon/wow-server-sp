@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ADMIN_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ADMIN_ROOT / "scripts/install-azerothcore-admin.sh"
@@ -407,3 +409,82 @@ class InstallerScriptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _step7_env_block() -> str:
+    """The installer's Step 7 text: from the .env heredoc's preamble to the build step."""
+    source = INSTALLER.read_text()
+    return source.split("# --- Step 7: write .env ---\n", 1)[1].split("# --- Step 8", 1)[0]
+
+
+class TpmInstallerTest(unittest.TestCase):
+    def test_installer_writes_tpm_env(self):
+        source = INSTALLER.read_text()
+        env_block = source.split('cat > "$STACK_DIR/.env" <<EOF\n', 1)[1].split("\nEOF\n", 1)[0]
+        lines = env_block.splitlines()
+
+        self.assertIn("TPM_DEVICE=$TPM_DEVICE", lines)
+        self.assertIn("TSS_GID=$TSS_GID", lines)
+        # The existing keys keep their order; the TPM keys follow DOCKER_GID.
+        self.assertLess(lines.index("DOCKER_GID=$DOCKER_GID"), lines.index("TPM_DEVICE=$TPM_DEVICE"))
+
+        step7 = _step7_env_block()
+        self.assertIn('source "$SCRIPT_DIR/tpm-env.sh"', step7)
+        self.assertLess(step7.index("tpm-env.sh"), step7.index("resolve_tpm_env"))
+        self.assertLess(step7.index("resolve_tpm_env"), step7.index('cat > "$STACK_DIR/.env"'))
+        self.assertIn("# shellcheck disable=SC1091", step7)
+
+    def test_step7_writes_resolved_tpm_values_to_a_private_env_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            stack = tmp_path / "stack"
+            stack.mkdir()
+            stubs = tmp_path / "stubs"
+            stubs.mkdir()
+            _write_stub(stubs / "getent", "#!/bin/sh\necho 'tss:x:4242:'\n")
+            wrapper = tmp_path / "step7.sh"
+            wrapper.write_text(
+                "#!/bin/bash\nset -euo pipefail\n"
+                f"SCRIPT_DIR={shlex.quote(str(ADMIN_ROOT / 'scripts'))}\n"
+                f"STACK_DIR={shlex.quote(str(stack))}\n"
+                "TAILSCALE_IP=100.64.0.1\nLAN_IP=\nADMIN_PORT=8765\n" + _step7_env_block()
+            )
+            wrapper.chmod(0o700)
+            env = os.environ.copy()
+            env["PATH"] = f"{stubs}:{env['PATH']}"
+
+            env["TPM_DEVICE_PATH"] = "/dev/zero"  # any character device
+            found = subprocess.run([str(wrapper)], text=True, capture_output=True, env=env, check=False)
+            self.assertEqual(found.returncode, 0, found.stderr)
+            written = (stack / ".env").read_text().splitlines()
+            self.assertIn("TPM_DEVICE=/dev/zero", written)
+            self.assertIn("TSS_GID=4242", written)
+            self.assertNotIn("No TPM found", found.stdout)
+            self.assertEqual((stack / ".env").stat().st_mode & 0o777, 0o600)
+
+            env["TPM_DEVICE_PATH"] = str(tmp_path / "no-such-tpm")
+            absent = subprocess.run([str(wrapper)], text=True, capture_output=True, env=env, check=False)
+            self.assertEqual(absent.returncode, 0, absent.stderr)
+            self.assertIn("TPM_DEVICE=/dev/null", (stack / ".env").read_text().splitlines())
+            self.assertIn(
+                "No TPM found — the Cloud backup panel will show as unavailable.", absent.stdout
+            )
+
+    def test_compose_maps_tpm_with_safe_fallbacks(self):
+        compose = ADMIN_COMPOSE.read_text()
+
+        # /dev/null keeps one compose file valid on hosts without a TPM; whether
+        # a TPM really works is decided by a functional probe in the container.
+        self.assertIn('- "${TPM_DEVICE:-/dev/null}:/dev/tpmrm0"', compose)
+        self.assertIn('- "${TSS_GID:-1000}"', compose)
+        self.assertIn('- "${DOCKER_GID:-999}"', compose)  # existing group is kept
+        service = yaml.safe_load(compose)["services"]["azerothcore-admin"]
+        self.assertEqual(service["devices"], ["${TPM_DEVICE:-/dev/null}:/dev/tpmrm0"])
+        self.assertEqual(service["group_add"], ["${DOCKER_GID:-999}", "${TSS_GID:-1000}"])
+
+    def test_compose_service_runs_an_init_to_reap_gpg_agents(self):
+        service = yaml.safe_load(ADMIN_COMPOSE.read_text())["services"]["azerothcore-admin"]
+
+        # gpg-agent daemons killed after a vault unlock are reparented to PID 1
+        # (uvicorn), which never reaps them; docker's tini does.
+        self.assertIs(service["init"], True)

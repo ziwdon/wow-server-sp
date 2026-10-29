@@ -811,8 +811,13 @@ pre.logview {
 }
 
 /* --- Backups page --- */
-/* 3 summary cards span the full width; the action bar sits below them. */
-.backups-page .stat-row { grid-template-columns: repeat(3, 1fr); }
+/* 4 summary cards span the full width; the action bar sits below them. */
+.backups-page .stat-row { grid-template-columns: repeat(4, 1fr); }
+/* The cloud panel makes the page taller than the viewport: the page scrolls, and the backups
+   list keeps a usable minimum height (it still scrolls internally beyond that). */
+.backups-page { overflow-y: auto; }
+.backups-page > * { flex-shrink: 0; }
+.backups-page > .backups-grid { flex: 1 0 30rem; }
 /* Backups list | Activity, side by side, filling the remaining height —
    mirrors the dashboard's .lower-grid so each panel scrolls internally. */
 .backups-grid {
@@ -844,15 +849,104 @@ pre.logview {
 .badge-preupgrade { background: #4a2d63; }
 .badge-prerollback { background: #2d5a63; }
 .badge-available { background: #3a5a3a; }
+.badge-in-drive { background: none; border: 1px solid var(--blue); color: var(--blue); }
 .backups-disclaimer {
   font-size: 0.8rem; color: var(--text-muted);
   padding: 0.75rem; border-top: 1px solid var(--border, #2a2a2a);
 }
 @media (max-width: 768px) {
   .backups-page .stat-row { grid-template-columns: repeat(2, 1fr); }
+  .backups-page { overflow-y: visible; }
+  .backups-page > .backups-grid { flex: 0 0 auto; }
   .backups-grid { grid-template-columns: 1fr; overflow: visible; }
   .backups-grid > .panel { height: auto; min-height: 200px; overflow: hidden; }
   .backups-grid > .panel .panel-body { overflow-y: auto; max-height: 280px; }
+  .backup-row { flex-wrap: wrap; gap: 0.4rem 0.75rem; }
+  .backup-time { flex: 1 1 100%; }
+}
+
+/* --- Cloud backup panel (Backups tab) --- */
+.stat-value.cloud-bad { color: var(--red); }
+.stat-value.cloud-muted { color: var(--text-muted); }
+.cloud-panel .panel-body { overflow: visible; display: flex; flex-direction: column; gap: 0.75rem; }
+.cloud-panel .panel-header { gap: 0.75rem; }
+.cloud-wait { font-size: 0.75rem; color: var(--gold-bright); }
+.cloud-status { font-size: 1.05rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.cloud-status-connected { color: var(--green); }
+.cloud-status-pending { color: var(--gold-bright); }
+.cloud-status-vault_error { color: var(--red); }
+.cloud-status-checking,
+.cloud-status-unavailable,
+.cloud-status-disconnected { color: var(--text-warm); }
+.cloud-line { font-size: 0.85rem; color: var(--text-warm); line-height: 1.4; overflow-wrap: anywhere; }
+.cloud-muted { color: var(--text-muted); }
+.cloud-msg {
+  font-size: 0.85rem; line-height: 1.4; overflow-wrap: anywhere;
+  padding: 0.5rem 0.75rem; border-radius: 3px;
+  background: var(--input-bg); border: 1px solid var(--border); border-left-width: 3px;
+}
+.cloud-msg p + p { margin-top: 0.4rem; }
+.cloud-msg .btn { margin-top: 0.5rem; }
+.cloud-msg-ok { border-left-color: var(--green); color: var(--green); }
+.cloud-msg-error { border-left-color: var(--red); color: var(--red); }
+.cloud-msg-warn { border-left-color: var(--yellow); background: var(--yellow-bg); color: var(--yellow); }
+.cloud-names { list-style: none; margin: 0.35rem 0; }
+.cloud-names li { padding: 0.1rem 0; }
+.cloud-signin { display: flex; flex-direction: column; gap: 0.5rem; }
+.cloud-link-row { display: flex; align-items: flex-start; gap: 0.75rem; }
+.cloud-link { flex: 0 1 auto; min-width: 0; color: var(--gold-bright); font-size: 0.85rem; overflow-wrap: anywhere; }
+.cloud-link-row .btn-sm { flex: 0 0 auto; }
+.cloud-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.cloud-actions .btn:disabled,
+.cloud-msg .btn:disabled,
+.cloud-form .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* .maintenance-form (later in this file) makes a flex column; the extra class wins by specificity. */
+.maintenance-form.cloud-form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 0.9rem 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.cloud-form > .toggle-item,
+.cloud-form > .cloud-fieldset,
+.cloud-form > .cloud-form-actions { grid-column: 1 / -1; }
+.cloud-fieldset { border: 0; min-width: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.cloud-fieldset legend { margin-bottom: 0.4rem; }
+.cloud-labels {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.4rem 0.75rem;
+}
+.cloud-help { display: flex; flex-direction: column; gap: 0.4rem; }
+.cloud-subtitle {
+  font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--gold); padding-top: 0.5rem; border-top: 1px solid var(--border);
+}
+.cloud-runs { list-style: none; }
+.cloud-run-row {
+  display: grid;
+  grid-template-columns: 11.5rem 7rem minmax(0, 1fr);
+  gap: 0.2rem 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border-dark);
+  font-size: 0.82rem;
+}
+.cloud-run-row:last-child { border-bottom: none; }
+.cloud-run-time { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.cloud-run-result { font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.cloud-run-ok .cloud-run-result { color: var(--green); }
+.cloud-run-warn .cloud-run-result { color: var(--yellow); }
+.cloud-run-bad .cloud-run-result { color: var(--red); }
+.cloud-run-counts { color: var(--text-warm); overflow-wrap: anywhere; }
+.cloud-run-trigger { color: var(--text-dim); }
+.cloud-run-error { grid-column: 3; color: var(--red); overflow-wrap: anywhere; }
+@media (max-width: 768px) {
+  .maintenance-form.cloud-form { grid-template-columns: 1fr; }
+  .cloud-link-row { flex-direction: column; }
+  .cloud-actions .btn { flex: 1 1 auto; }
+  .cloud-run-row { grid-template-columns: 1fr; }
+  .cloud-run-error { grid-column: 1; }
 }
 
 /* --- Maintenance page --- */

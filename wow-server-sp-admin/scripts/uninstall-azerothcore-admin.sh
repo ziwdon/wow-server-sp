@@ -118,3 +118,7 @@ fi
 remove_admin_compose_file
 
 echo "Uninstall complete."
+# Removing the stack dir also removes the stored Proton session files
+# (data/cloud/secrets), but that does not end the session at Proton. Printed in
+# --dry-run too, so the owner sees it before the real run.
+echo "Cloud backup: if it was connected, revoke the Proton Drive CLI session in your Proton account's session list."

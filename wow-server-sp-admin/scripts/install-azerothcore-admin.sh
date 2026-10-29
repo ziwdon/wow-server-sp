@@ -7,6 +7,7 @@ if [ "$EUID" -eq 0 ]; then
 fi
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACK_DIR=/opt/stacks/azerothcore-admin
 AC_STACK_DIR=/opt/stacks/azerothcore
 
@@ -211,6 +212,15 @@ if [ -z "$DOCKER_GID" ]; then
     echo "WARNING: docker group not found via getent; defaulting DOCKER_GID=999." >&2
     DOCKER_GID=999
 fi
+# TPM_DEVICE / TSS_GID map the host TPM into the container for the Cloud backup
+# vault (docker-compose.yml: devices + group_add). A host without a TPM gets
+# /dev/null, so the stack still starts and the panel just reports "unavailable".
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/tpm-env.sh"
+resolve_tpm_env
+if [ "$TPM_DEVICE" = /dev/null ]; then
+    echo "No TPM found — the Cloud backup panel will show as unavailable."
+fi
 cat > "$STACK_DIR/.env" <<EOF
 TAILSCALE_IP=$TAILSCALE_IP
 LAN_IP=$LAN_IP
@@ -218,6 +228,8 @@ ADMIN_PORT=$ADMIN_PORT
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
 DOCKER_GID=$DOCKER_GID
+TPM_DEVICE=$TPM_DEVICE
+TSS_GID=$TSS_GID
 EOF
 chmod 600 "$STACK_DIR/.env"
 

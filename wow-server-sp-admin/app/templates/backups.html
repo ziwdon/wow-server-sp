@@ -25,6 +25,12 @@
     <ul id="action-log" class="action-log" sse-swap="progress,done" hx-swap="beforeend"></ul>
   </div>
 
+  {# After Activity, so a Create backup / Restore log stays in view above the tall cloud panel. #}
+  <div id="cloud-panel" class="panel cloud-panel" hx-get="/api/cloud/panel" hx-trigger="load" hx-swap="outerHTML">
+    <div class="panel-header"><span class="panel-title">Cloud backup · Proton Drive</span></div>
+    <div class="panel-body"><p class="empty-state">Loading…</p></div>
+  </div>
+
   <div class="backups-grid">
     <div id="backups-list" class="panel" hx-get="/api/backups/list" hx-trigger="load, refresh">
       <div class="panel-body"><p class="empty-state">Loading…</p></div>

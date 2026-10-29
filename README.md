@@ -21,6 +21,7 @@ Clients connect over [Tailscale](https://tailscale.com) — a personal VPN that 
 - Stats — top characters by level, kills, and playtime
 - Settings — browse, edit, and apply any of the ~1 800 server config keys; live apply + rollback
 - Backups — trigger manual backups, browse archives, and restore from any snapshot
+- Cloud backup (optional) — copy new backup archives to a folder in your own Proton Drive; the session is encrypted and sealed to the server's TPM
 - Progression — unlock expansion content per character — manually advance characters through Classic, TBC, and WotLK
 
 **AI assistant skill** (`skills/wow-server-sp-gamemaster/`)

@@ -14,4 +14,11 @@
     <div class="stat-label">Disk Used</div>
     <div class="stat-value">{{ disk_gb }} GB</div>
   </div>
+  {% if cloud_card %}
+  <div class="stat-card">
+    <div class="stat-label">Cloud copies</div>
+    <div class="stat-value{% if cloud_card.tone %} cloud-{{ cloud_card.tone }}{% endif %}">{{ cloud_card.value }}</div>
+    {% if cloud_card.sub %}<div class="stat-sub">{{ cloud_card.sub }}</div>{% endif %}
+  </div>
+  {% endif %}
 </div>
