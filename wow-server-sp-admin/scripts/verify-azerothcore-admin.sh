@@ -156,12 +156,14 @@ fi
 # (paths as argv, never interpolated into code) that prints exactly one short
 # line built from four fields -- enabled, connection, last_result, last_success --
 # each checked against a fixed shape; nothing else from the files (folder name,
-# error text, archive names) can reach the output.
+# error text, archive names) can reach the output. The last success is shown with
+# its age (spec 6.11): minutes under 1 h, hours up to 48 h, days after that.
 cloud_dir="$STACK_DIR/data/cloud"
 cloud_line=""
 cloud_why="python3 could not read the status files"
 if command -v python3 >/dev/null 2>&1; then
     cloud_line="$(timeout 5 python3 - "$cloud_dir/config.json" "$cloud_dir/state.json" 2>/dev/null <<'PY'
+import datetime
 import json
 import re
 import sys
@@ -184,6 +186,24 @@ def load(path):
     if not isinstance(data, dict):
         raise SystemExit("unexpected content")
     return data
+
+
+def age(stamp):
+    """How long ago ``stamp`` was ("5h ago"), or None when it is not a real time."""
+    text = stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp  # Python < 3.11 wants an offset
+    try:
+        moment = datetime.datetime.fromisoformat(text)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        seconds = int((datetime.datetime.now(datetime.timezone.utc) - moment).total_seconds())
+    except (ValueError, OverflowError):
+        return None
+    seconds = max(seconds, 0)  # a clock that went back: "just now"
+    if seconds < 3600:
+        return "%dm ago" % (seconds // 60)
+    if seconds <= 48 * 3600:
+        return "%dh ago" % (seconds // 3600)
+    return "%dd ago" % (seconds // 86400)
 
 
 try:
@@ -209,6 +229,9 @@ if connection == "connected":
         success = "never"
     elif not (isinstance(success, str) and len(success) <= 40 and STAMP.fullmatch(success)):
         success = "unknown"
+    else:
+        ago = age(success)
+        success = "%s (%s)" % (ago, success) if ago else "unknown"
     line = "connected, last success " + success
     if result in ("partial", "error"):
         line += ", last result " + result

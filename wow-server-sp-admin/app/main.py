@@ -520,6 +520,7 @@ async def api_backups_list(request: Request) -> HTMLResponse:
             ],
             "error": error,
             "cloud_folder": cloud.config.folder if cloud is not None and cloud.config.enabled else None,
+            "cloud_retention": cloud.config.retention_days if cloud is not None else None,
         },
     )
 
@@ -538,9 +539,12 @@ async def download_backup(archive_name: str) -> FileResponse:
 # --- Cloud backup (Proton Drive) panel on the Backups tab ---------------------------------------
 # Every /api/cloud/* route answers 200 with the re-rendered panel; a problem is text inside it, so
 # htmx swaps it in place. The blocking service calls run on worker threads (a sign-in start can
-# wait ~30 s). The service owns the lock and the secrets; nothing here reads the session.
+# wait ~30 s); the state-changing ones through _await_thread_completion, so a client that goes
+# away mid-request never gets control back while the call is still working. The service owns the
+# lock and the secrets; nothing here reads the session.
 
 CLOUD_GENERIC_ERROR = "Something went wrong — see the admin log."
+CLOUD_STALLED = "No fully successful cloud run for over a day"
 CLOUD_SAVE_FAILED = "Could not save the settings (the admin data folder is not writable)."
 CLOUD_BAD_RETENTION = (
     f"Keep-for days must be a whole number from {cloud_cfg.RETENTION_MIN} to {cloud_cfg.RETENTION_MAX}."
@@ -639,7 +643,7 @@ def _cloud_card(view) -> dict | None:
     if state.connection != "connected":
         return {"value": "Not connected", "tone": "bad", "sub": None}
     if view.stalled:
-        return {"value": "Stalled", "tone": "bad", "sub": None}
+        return {"value": "Stalled", "tone": "bad", "sub": CLOUD_STALLED}
     if state.last_result in ("partial", "error"):
         return {"value": "Last upload failed", "tone": "bad", "sub": None}
     sub = f"{len(view.in_drive)} in Drive"
@@ -677,6 +681,11 @@ def _cloud_context(view, *, error, notice, form, preserve_form) -> dict:
         primary=primary,
         # "Checking…" (no probe result yet) also polls, so the panel resolves without a reload.
         polling=view.signin_pending or view.busy or view.available is None,
+        # Spec 6.9: Disconnect works even when the vault cannot be unsealed, so "Not available"
+        # still offers it while a session is stored or the state says it was ever connected.
+        can_disconnect=primary in ("connected", "vault_error")
+        or (primary == "unavailable" and (view.connection != "disconnected" or view.has_stored_session)),
+        state_unsaved=view.state_unsaved,
         form=form
         or {
             "enabled": cfg.enabled,
@@ -722,9 +731,10 @@ async def _cloud_call(method: str, *args, validation: bool = False, on_oserror: 
 
     The service's own exceptions carry user-facing text. A ``ValueError`` is shown only for a form
     the owner typed (``validation``); anything else is logged and replaced by a generic line.
+    Every caller changes state, so the worker thread is shielded and always awaited.
     """
     try:
-        await asyncio.to_thread(getattr(cloud_backup.get_service(), method), *args)
+        await _await_thread_completion(getattr(cloud_backup.get_service(), method), *args)
     except (cloud_backup.CloudBusy, cloud_backup.CloudUnavailable, cloud_backup.CloudActionError) as exc:
         return _cloud_text(str(exc)) or CLOUD_GENERIC_ERROR
     except ValueError as exc:

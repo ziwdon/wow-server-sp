@@ -619,6 +619,24 @@ def test_run_kwargs_never_inherit_stdin_or_the_app_env(cli, respond, runs, monke
     assert not kwargs.get("shell")
 
 
+def test_every_cli_process_runs_with_umask_077(cli, archive, respond, runs, paths):
+    # Spec 6.2: the CLI's cache, logs and session files are created private (M-2).
+    respond(stdout="[]")
+    cli.list_folder(FOLDER)
+    respond(stdout=UPLOAD_OK)
+    cli.upload(archive, FOLDER)
+    assert [kwargs["umask"] for _, kwargs in runs] == [0o077, 0o077]
+
+    calls = []
+
+    def popen(argv, **kwargs):
+        calls.append(kwargs)
+        return object()
+
+    ProtonDriveCli(paths, popen=popen).start_login()
+    assert calls[0]["umask"] == 0o077
+
+
 def test_child_sees_only_the_wrapper_env_and_devnull_stdin(cli, respond, argv_log, paths, monkeypatch):
     monkeypatch.setenv("ADMIN_SECRET_TOKEN", "s3cret")
     respond(stdout="[]")

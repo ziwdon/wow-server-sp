@@ -17,11 +17,21 @@ from fastapi.testclient import TestClient
 
 from app.services import cloud_backup
 from app.services.cloud_config import RemoteFile
-from app.services.cloud_vault import UNLOCK_FAILED_MESSAGE
+from app.services.cloud_vault import UNLOCK_FAILED_MESSAGE, VaultError
 from tests.test_cloud_service import D27, FOLDER, NEW, NOW, SECRET_WORDS, URL, Rig, iso, log_entry, outcome
 
 ALL_SECRET_WORDS = (*SECRET_WORDS, "cachePassword")
 BAD_RETENTION = "Keep-for days must be a whole number from 1 to 90."
+NO_TPM_TEXT = (
+    "Could not use this server's TPM security chip, which cloud backup needs to keep the Proton "
+    "session encrypted."
+)
+DISCONNECTED_TEXT = (
+    "Removed from this server. To end the session at Proton too, "
+    "revoke it in your Proton account's session list."
+)
+STATE_UNSAVED_TEXT = "Could not save the cloud status file — check that the admin data folder is writable."
+OTHER = "/my-files/Other"
 
 
 @pytest.fixture(autouse=True)
@@ -186,8 +196,8 @@ STATE_CASES = {
     ),
     "unavailable": (
         _unavailable,
-        ["Not available", "no usable TPM security chip"],
-        ['hx-post="/api/cloud/connect"', 'id="cloud-settings-form"'],
+        ["Not available", NO_TPM_TEXT],
+        ['hx-post="/api/cloud/connect"', 'id="cloud-settings-form"', "no usable TPM"],
     ),
     "disconnected": (
         lambda rig: None,
@@ -209,8 +219,8 @@ STATE_CASES = {
     ),
     "stalled": (
         _stalled,
-        ["Stalled — no successful upload for over a day", "Proton said no (boom)"],
-        [],
+        ["Stalled — no fully successful cloud run for over a day.", "Proton said no (boom)"],
+        ["no successful upload"],
     ),
     "conflicts": (
         _conflicts,
@@ -509,7 +519,47 @@ def test_connect_unavailable_shows_the_reason(client, rig):
 
     text = shown(client.post("/api/cloud/connect"))
 
-    assert "no usable TPM security chip" in text
+    assert NO_TPM_TEXT in text
+
+
+@pytest.mark.parametrize(
+    "connection, stored, offered",
+    [
+        ("connected", True, True),
+        ("connected", False, True),
+        ("vault_error", False, True),
+        ("disconnected", True, True),
+        ("disconnected", False, False),
+    ],
+)
+def test_unavailable_panel_still_offers_disconnect_when_there_is_something_to_remove(
+    client, rig, connection, stored, offered
+):
+    # Spec 6.9: Disconnect works even when the vault cannot be unsealed (M-1).
+    _unavailable(rig)
+    rig.set_state(connection)
+    rig.vault.set_exists(stored)
+
+    text = panel(client)
+
+    assert "Not available" in text
+    assert ('hx-post="/api/cloud/disconnect"' in text) is offered
+    assert 'hx-post="/api/cloud/connect"' not in text and 'hx-post="/api/cloud/upload-now"' not in text
+    if offered:
+        button = re.search(r'<button[^>]*hx-post="/api/cloud/disconnect"[^>]*>', text).group(0)
+        assert "hx-confirm=" in button
+
+
+def test_disconnect_works_while_cloud_backup_is_unavailable(client, rig):
+    _unavailable(rig)
+    rig.set_state("connected")
+    rig.vault.unlock_errors.append(VaultError(UNLOCK_FAILED_MESSAGE))  # the TPM cannot unseal it
+
+    text = shown(client.post("/api/cloud/disconnect"))
+
+    assert DISCONNECTED_TEXT in text
+    assert "wipe" in rig.vault.calls and rig.store.load_state().connection == "disconnected"
+    assert 'hx-post="/api/cloud/disconnect"' not in text  # nothing left to remove
 
 
 def test_disconnect_removes_the_session_and_says_how_to_end_it_at_proton(client, rig):
@@ -614,6 +664,26 @@ def test_busy_actions_show_busy_message(client, rig):
         rig.svc._release()
 
 
+@pytest.mark.parametrize("holder", ["run", "check", "create"])
+def test_settings_cannot_move_the_folder_while_a_drive_task_uses_it(client, rig, holder):
+    # A run, folder check or folder creation keeps using the folder it started with (I-1).
+    _connected(rig)
+    before = rig.store.config_path.read_bytes()
+    rig.svc._acquire(holder)
+    try:
+        text = shown(
+            client.post("/api/cloud/settings", data={"enabled": "1", "folder": OTHER, "retention_days": "9"})
+        )
+    finally:
+        rig.svc._release()
+
+    assert cloud_backup.BUSY in text and re.search(r'role="alert"[^>]*>' + re.escape(cloud_backup.BUSY), text)
+    assert "Settings saved." not in text
+    assert f'value="{OTHER}"' in text and 'value="9"' in text  # what was typed stays in the form
+    assert rig.store.config_path.read_bytes() == before
+    assert rig.cli.calls == []
+
+
 def test_unexpected_errors_are_logged_not_echoed(client, rig, monkeypatch, caplog):
     _connected(rig)
 
@@ -627,6 +697,60 @@ def test_unexpected_errors_are_logged_not_echoed(client, rig, monkeypatch, caplo
     assert "Something went wrong — see the admin log." in text
     assert "kaboom" not in text and "hunter2" not in text and "RuntimeError" not in text
     assert any(record.levelname == "ERROR" and record.exc_info for record in caplog.records)
+
+
+def test_panel_warns_while_the_cloud_status_file_cannot_be_saved(client, rig, monkeypatch):
+    _connected(rig)
+    real_save = rig.store.save_state
+
+    def read_only(state):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(rig.store, "save_state", read_only)
+    rig.svc.check_folder()  # any state write; this one fails
+
+    warned = panel(client)
+    assert re.search(r'class="cloud-msg cloud-msg-error[^"]*"[^>]*>' + re.escape(STATE_UNSAVED_TEXT), warned)
+    assert "Read-only file system" not in warned
+
+    monkeypatch.setattr(rig.store, "save_state", real_save)
+    rig.svc.check_folder()  # a later write works: the warning goes away
+    assert STATE_UNSAVED_TEXT not in panel(client)
+
+
+def test_state_changing_cloud_routes_wait_for_their_worker_thread(client, rig, monkeypatch):
+    # CLAUDE.md: a cancellable mutation on a worker thread goes through _await_thread_completion (M-5).
+    import app.main as main
+
+    seen: list[str] = []
+    real = main._await_thread_completion
+
+    async def spy(func, /, *args):
+        seen.append(func.__name__)
+        return await real(func, *args)
+
+    monkeypatch.setattr(main, "_await_thread_completion", spy)
+    monkeypatch.setattr(cloud_backup, "run_sync", lambda **kw: outcome("ok"))
+    _folder_missing(rig)
+
+    routes = {
+        "connect": ["start_sign_in"],
+        "connect/cancel": ["cancel_sign_in"],
+        "upload-now": ["start_run"],
+        "create-folder": ["create_folder"],
+        "settings": ["save_settings", "check_folder"],
+        "disconnect": ["disconnect"],
+    }
+    for route, methods in routes.items():
+        seen.clear()
+        data = {"folder": FOLDER, "retention_days": "7"} if route == "settings" else None
+        shown(client.post(f"/api/cloud/{route}", data=data))
+        assert rig.svc.wait_idle(5)
+        assert seen == methods, route
+
+    seen.clear()
+    panel(client)
+    assert seen == []  # reading the panel changes nothing
 
 
 def test_status_failure_shows_a_plain_message(client, rig, monkeypatch):
@@ -683,7 +807,7 @@ CARD_CASES = {
     "disconnected": (lambda rig: rig.configure(enabled=True), "Not connected", None, "cloud-bad"),
     "vault_error": (_vault_error, "Can't unlock", None, "cloud-bad"),
     "unavailable": (lambda rig: (rig.configure(enabled=True), _unavailable(rig)), "Unavailable", None, "cloud-bad"),
-    "stalled": (_card_stalled, "Stalled", None, "cloud-bad"),
+    "stalled": (_card_stalled, "Stalled", "No fully successful cloud run for over a day", "cloud-bad"),
     "failed": (_card_failed, "Last upload failed", None, "cloud-bad"),
 }
 
@@ -726,6 +850,25 @@ def test_summary_card_and_in_drive_badges(client, rig, tmp_path):
     assert listing.count("badge-in-drive") == 1
 
 
+def test_an_archive_with_a_conflict_gets_no_in_drive_badge(client, rig, tmp_path):
+    # The Drive holds a different file under that name, so this archive is not in the Drive (I-2).
+    local_archive(tmp_path, NEW)
+    local_archive(tmp_path, D27)
+    rig.configure(enabled=True)
+    rig.set_state(
+        "connected", folder_status="ok", last_result="warning", last_success=iso(NOW),
+        remote=[RemoteFile(NEW, 1, None), RemoteFile(D27, 1, None)],
+        issues=[{"name": NEW, "kind": "conflict", "detail": "A different file with this name is already there."}],
+    )
+
+    listing = shown(client.get("/api/backups/list"))
+
+    rows = {name: row for row in listing.split("<li ")[1:] for name in (NEW, D27) if f'data-archive="{name}"' in row}
+    assert "In Drive" not in rows[NEW]
+    assert "In Drive" in rows[D27]
+    assert NEW in panel(client)  # the panel names the conflict instead
+
+
 def test_disclaimer_mentions_the_drive_folder_only_when_enabled(client, rig, tmp_path):
     local_archive(tmp_path, NEW)
     rig.configure(enabled=False)
@@ -743,6 +886,18 @@ def test_disclaimer_mentions_the_drive_folder_only_when_enabled(client, rig, tmp
         "Copies also go to Proton Drive folder"
     ) in on
     assert "and leave it on the same schedule; old copies go to the Drive trash, which you empty yourself." in on
+
+
+@pytest.mark.parametrize("days, kept", [(14, "and are kept there for 14 days;"), (1, "and are kept there for 1 day;")])
+def test_disclaimer_names_the_cloud_retention_when_it_differs_from_seven_days(client, rig, tmp_path, days, kept):
+    local_archive(tmp_path, NEW)
+    rig.configure(enabled=True, retention_days=days)
+
+    text = shown(client.get("/api/backups/list"))
+
+    assert "Backups are automatically deleted after 7 days" in text
+    assert f"Copies also go to Proton Drive folder <code>{FOLDER}</code> {kept} old copies go to the Drive trash" in text
+    assert "same schedule" not in text
 
 
 def test_disclaimer_folder_is_escaped(client, rig, tmp_path):

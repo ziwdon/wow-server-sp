@@ -39,6 +39,7 @@ DEFAULT_BINARY = "/usr/local/bin/proton-drive"
 SHORT_TIMEOUT_SECONDS = 120
 UPLOAD_TIMEOUT_SECONDS = 3600
 MAX_MESSAGE_CHARS = 300
+CHILD_UMASK = 0o077  # spec 6.2: the CLI's cache, logs and session files are created private
 
 # The first one or two argv words of every command the app may run (spec 6.4).
 _ALLOWED_COMMANDS = frozenset(
@@ -349,6 +350,7 @@ class ProtonDriveCli:
                 bufsize=1,
                 env=self.env(),
                 start_new_session=True,
+                umask=CHILD_UMASK,
             )
         except OSError:
             raise _cannot_run() from None
@@ -375,6 +377,7 @@ class ProtonDriveCli:
                 errors="replace",
                 timeout=timeout,
                 env=self.env(),
+                umask=CHILD_UMASK,
             )
         except subprocess.TimeoutExpired:
             raise CloudCliError(

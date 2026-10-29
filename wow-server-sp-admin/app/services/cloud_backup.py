@@ -21,18 +21,24 @@ stderr is drained from the start so a chatty CLI cannot fill the pipe and stall.
 
 ``status()`` reads files only (no process is ever started for a page render).
 State and log writes are advisory: a failure is logged and the work carries on.
+When state.json cannot be written, the newest state is kept in memory and used
+(by ``status()`` and ``due()``, so a result and its back-off still count) until a
+later write works; the panel says so meanwhile.
+
 No text the service shows or stores is allowed to carry session material: the
 service never reads the session, and CLI text that names a session field is
 replaced before it is kept (``_scrub``).
 
-Routes call the blocking methods via ``asyncio.to_thread``; ``start()``/``stop()``
-run the loop as an asyncio task like ``MaintenanceScheduler``/``PresenceAnnouncer``.
+Routes call the blocking methods on a worker thread (the state-changing ones through
+``main._await_thread_completion``); ``start()``/``stop()`` run the loop as an asyncio
+task like ``MaintenanceScheduler``/``PresenceAnnouncer``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -59,6 +65,7 @@ log = logging.getLogger(__name__)
 
 # Looked up at call time (not bound as defaults), so tests can shorten them.
 WAKE_SECONDS = 600  # the loop's cadence (spec 6.6: "every 10 minutes")
+REPROBE_SECONDS = 3600  # while the TPM is unusable, the loop checks it again this often
 FIRST_LINE_TIMEOUT_SECONDS = 30.0  # for the login's {"signInUrl": ...} line
 SIGN_IN_DEADLINE_SECONDS = 11 * 60  # the CLI itself gives up after 10 minutes
 SIGN_IN_SETUP_TIMEOUT_SECONDS = 180.0  # vault check/creation before the login starts (key generation)
@@ -81,8 +88,8 @@ SIGN_IN_URL_PREFIX = "https://account.proton.me/"
 
 MISSING_PROGRAM = "The Proton Drive program is missing from this admin image."
 NO_TPM = (
-    "This server has no usable TPM security chip. Cloud backup needs it to keep the Proton "
-    "session encrypted, so it is unavailable here."
+    "Could not use this server's TPM security chip, which cloud backup needs to keep the Proton "
+    "session encrypted."
 )
 PROBE_FAILED = "Could not check whether cloud backup can run on this server — see the admin log."
 CHECKING = "Still checking whether this server can store the session safely — try again in a moment."
@@ -109,6 +116,11 @@ HIDDEN_DETAIL = "Proton Drive reported an error (details hidden because they may
 
 # Field names of the CLI's stored session (spec 2). Text naming one is never kept or shown.
 _SESSION_WORDS = ("userkeypassword", "accesstoken", "refreshtoken", "cachepassword")
+
+# What may hold the cloud lock while using the folder it read at its start for every CLI call
+# (a run's uploads and trashes too): the folder setting cannot change under them (I-1). A
+# sign-in only checks the folder (read-only, its result guarded by R-8), so it does not count.
+_FOLDER_HOLDERS = frozenset({"run", "check", "create"})
 
 # State that describes one Drive folder; reset when the folder setting changes (R-8).
 _FOLDER_FIELDS = frozenset(
@@ -150,7 +162,9 @@ class CloudStatusView:
     config: CloudConfig
     state: CloudState
     log: list[CloudLogEntry]
-    in_drive: frozenset[str]
+    in_drive: frozenset[str]  # in the last listing, and not a conflict
+    has_stored_session: bool  # a vault is on disk (file checks only), so Disconnect has work to do
+    state_unsaved: bool  # state.json could not be written; ``state`` is the newer in-memory copy
 
 
 # --- small helpers ---
@@ -360,12 +374,18 @@ class CloudService:
         self._threads: list[threading.Thread] = []
         self._available: bool | None = None
         self._unavailable_reason: str | None = None
+        self._probed_at: float | None = None  # time.monotonic() of the last probe
+        self._unsaved_state: CloudState | None = None  # newest state while state.json cannot be written
         self._task: asyncio.Task | None = None
 
     # --- availability and status ---
 
     def probe(self) -> None:
-        """Decide once whether cloud backup can work here: the CLI binary, then the TPM."""
+        """Decide whether cloud backup can work here: the CLI binary, then the TPM.
+
+        Run at start-up, then again by ``tick`` about hourly while the answer is "no"
+        for any reason but a missing binary (only a new admin image brings that back).
+        """
         try:
             if not self.cli.paths.binary.exists():
                 available, reason = False, MISSING_PROGRAM  # no TPM probe, so no process, without it
@@ -378,15 +398,30 @@ class CloudService:
             available, reason = False, PROBE_FAILED
         with self._mu:
             self._available, self._unavailable_reason = available, reason
+            self._probed_at = time.monotonic()
         log.info("cloud backup available: %s%s", available, f" ({reason})" if reason else "")
+
+    def _reprobe_due(self) -> bool:
+        with self._mu:
+            available, reason, probed_at = self._available, self._unavailable_reason, self._probed_at
+        if available is not False or reason == MISSING_PROGRAM or probed_at is None:
+            return False
+        return time.monotonic() - probed_at >= REPROBE_SECONDS
 
     def status(self) -> CloudStatusView:
         """Everything the Backups page shows. Reads files only; never starts a process."""
         cfg = self.store.load_config()
-        state = self.store.load_state()
+        with self._state_mu:
+            state = self._load_state()
+            unsaved = self._unsaved_state is not None
         with self._mu:
             signin = self._signin
             available, reason = self._available, self._unavailable_reason
+        try:
+            stored = self.vault.exists()
+        except OSError:
+            stored = True  # cannot tell: keep Disconnect reachable
+        conflicts = {item.get("name") for item in state.issues if item.get("kind") == "conflict"}
         return CloudStatusView(
             available=available,
             unavailable_reason=reason,
@@ -398,15 +433,19 @@ class CloudService:
             config=cfg,
             state=state,
             log=self.store.read_log()[:STATUS_LOG_ENTRIES],
-            in_drive=frozenset(item.name for item in state.remote),
+            # A conflict is a different file under that name: this server's archive is not there.
+            in_drive=frozenset(item.name for item in state.remote) - conflicts,
+            has_stored_session=stored,
+            state_unsaved=unsaved,
         )
 
     @staticmethod
     def _stalled(cfg: CloudConfig, state: CloudState, now: datetime) -> bool:
-        """Failing for more than 26 h with no success since (spec 6.6), never on a first failure.
+        """Failing, with no success for more than 26 h (spec 6.6).
 
         Counted from the last success, or, if there never was one, from the first
-        failure (``failing_since``). Nothing readable to count from: not stalled.
+        failure (``failing_since``): a first failure is stalled only when the last
+        success is already that old. Nothing readable to count from: not stalled.
         """
         if not (cfg.enabled and state.last_result in ("partial", "error")):
             return False
@@ -416,11 +455,19 @@ class CloudService:
     # --- settings and the folder ---
 
     def save_settings(self, cfg: CloudConfig) -> None:
-        """Validate and save. A new folder forgets what was learned about the old one (R-8)."""
+        """Validate and save. A new folder forgets what was learned about the old one (R-8).
+
+        A new folder is refused with ``CloudBusy`` (nothing saved) while a run, a
+        folder check or a folder creation holds the cloud lock: they would go on
+        using the old folder (I-1). They read the folder under ``_state_mu`` after
+        taking the lock, so this check and their read cannot interleave.
+        """
         cfg.validate()
         new = cfg.canonical()
         with self._state_mu:
             old_folder = self.store.load_config().folder
+            if new.folder != old_folder and self._holder in _FOLDER_HOLDERS:
+                raise CloudBusy(BUSY)
             self.store.save_config(new)
             if new.folder != old_folder:
                 self._update_state(_folder_reset())
@@ -429,8 +476,10 @@ class CloudService:
         """``fs info`` the configured folder and record what it is. Errors go to ``last_error``."""
         self._acquire("check")
         try:
-            cfg = self.store.load_config()
-            if self.store.load_state().connection != "connected" or not cfg.folder:
+            with self._state_mu:  # see save_settings
+                cfg = self.store.load_config()
+                connected = self._load_state().connection == "connected"
+            if not connected or not cfg.folder:
                 return
             try:
                 with self.vault.unlocked():
@@ -480,13 +529,17 @@ class CloudService:
         return {"folder_status": "ok", **_PROBLEM_FIXED}
 
     def _require_ready(self) -> CloudConfig:
-        """The config, if a run or folder action can go ahead; else ``CloudActionError``."""
-        connection = self.store.load_state().connection
+        """The config, if a run or folder action can go ahead; else ``CloudActionError``.
+
+        Called with the cloud lock held; reads under ``_state_mu`` (see ``save_settings``).
+        """
+        with self._state_mu:
+            connection = self._load_state().connection
+            cfg = self.store.load_config()
         if connection == "vault_error":
             raise CloudActionError(UNLOCK_FAILED_MESSAGE)
         if connection != "connected":
             raise CloudActionError(NOT_CONNECTED)
-        cfg = self.store.load_config()
         if not cfg.folder:
             raise CloudActionError(NO_FOLDER)
         return cfg
@@ -501,7 +554,7 @@ class CloudService:
             raise CloudUnavailable(CHECKING)
         if not available:
             raise CloudUnavailable(reason or NO_TPM)
-        if self.store.load_state().connection == "connected":
+        if self._load_state().connection == "connected":
             raise CloudActionError(ALREADY_CONNECTED)
         self._acquire("signin")
         signin = _SignIn()
@@ -767,7 +820,7 @@ class CloudService:
         cfg = self.store.load_config()
         if not cfg.enabled or not cfg.folder:
             return False
-        state = self.store.load_state()
+        state = self._load_state()
         if state.connection != "connected":
             return False
         retry_at = _parse_time(state.next_auto_attempt)
@@ -888,8 +941,13 @@ class CloudService:
             await asyncio.sleep(WAKE_SECONDS)
 
     def tick(self) -> None:
-        """One wake-up: start an automatic run if one is due. Never raises."""
+        """One wake-up: start an automatic run if one is due. Never raises.
+
+        While the TPM is unusable, it is first checked again once ``REPROBE_SECONDS`` have passed.
+        """
         try:
+            if self._reprobe_due():
+                self.probe()
             if self.due(self._clock()):
                 self.start_run("auto")
         except (CloudBusy, CloudActionError):
@@ -933,9 +991,11 @@ class CloudService:
         ``folder`` is the folder the fields were learned from: if the setting has
         changed since, the folder-specific fields are dropped (R-8). ``if_unset``
         holds timestamps that are written only when the stored one is unset or unreadable.
+        When the write fails, the new state is kept in memory (``_load_state`` returns
+        it) until a later write succeeds (M-4).
         """
         with self._state_mu:
-            state = self.store.load_state()
+            state = self._load_state()
             same_folder = folder is None or self.store.load_config().folder == folder
             for key, value in fields.items():
                 if key in _FOLDER_FIELDS and not same_folder:
@@ -950,8 +1010,19 @@ class CloudService:
                 self.store.save_state(state)
             except OSError as exc:
                 log.warning("could not save the cloud backup state: %s", exc)
+                self._unsaved_state = state
             except Exception:  # noqa: BLE001
                 log.exception("could not save the cloud backup state")
+                self._unsaved_state = state
+            else:
+                self._unsaved_state = None
+
+    def _load_state(self) -> CloudState:
+        """The current state: the in-memory copy while state.json cannot be written, else the file."""
+        with self._state_mu:
+            if self._unsaved_state is not None:
+                return copy.deepcopy(self._unsaved_state)
+            return self.store.load_state()
 
 
 # --- the process-wide instance ---

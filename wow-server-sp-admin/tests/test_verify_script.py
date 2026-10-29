@@ -1,5 +1,7 @@
+import datetime as dt
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -264,31 +266,64 @@ def test_executable_verifier_cloud_line_is_not_a_failure_when_other_checks_fail(
     assert _cloud_lines(result.stdout) == ["[INFO] cloud backup: vault_error, last result error"]
 
 
+def _ago(**delta) -> str:
+    """A ``last_success`` stamp that far before now, as the admin writes it."""
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(**delta)).isoformat(timespec="seconds")
+
+
 def test_executable_verifier_reports_a_connected_cloud_backup(tmp_path):
     script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
     bind, log = _fake_commands(tmp_path)
+    recent = _ago(hours=5)
     _write_cloud_files(
         admin_stack,
         {"enabled": True},
-        {"connection": "connected", "last_result": "ok", "last_success": "2026-10-28T03:00:12+00:00"},
+        {"connection": "connected", "last_result": "ok", "last_success": recent},
     )
 
     ok = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
-    assert _cloud_lines(ok.stdout) == ["[INFO] cloud backup: connected, last success 2026-10-28T03:00:12+00:00"]
+    assert _cloud_lines(ok.stdout) == [f"[INFO] cloud backup: connected, last success 5h ago ({recent})"]
 
     state = admin_stack / "data" / "cloud" / "state.json"
     state.write_text(json.dumps({"connection": "connected", "last_result": "partial"}))
     never = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
     assert _cloud_lines(never.stdout) == ["[INFO] cloud backup: connected, last success never, last result partial"]
 
-    state.write_text(
-        json.dumps({"connection": "connected", "last_result": "error", "last_success": "2026-10-27T03:00:00+00:00"})
-    )
+    older = _ago(hours=30)
+    state.write_text(json.dumps({"connection": "connected", "last_result": "error", "last_success": older}))
     failing = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
     assert _cloud_lines(failing.stdout) == [
-        "[INFO] cloud backup: connected, last success 2026-10-27T03:00:00+00:00, last result error"
+        f"[INFO] cloud backup: connected, last success 30h ago ({older}), last result error"
     ]
     assert all(r.returncode == 0 for r in (ok, never, failing))
+
+
+def test_executable_verifier_cloud_line_prints_the_last_success_age(tmp_path):
+    # Spec 6.11: the age of the last success -- minutes under 1 h, hours up to 48 h, then days (M-6).
+    script, admin_stack, ac_stack = _fake_admin_layout(tmp_path)
+    bind, log = _fake_commands(tmp_path)
+    utc_z = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cases = [
+        (_ago(minutes=30), "30m ago"),
+        (_ago(seconds=20), "0m ago"),
+        (_ago(hours=1, minutes=1), "1h ago"),
+        (_ago(hours=47), "47h ago"),
+        (_ago(hours=49), "2d ago"),
+        (_ago(days=9, hours=3), "9d ago"),
+        (utc_z, "2h ago"),
+    ]
+    for stamp, age in cases:
+        _write_cloud_files(admin_stack, {"enabled": True}, {"connection": "connected", "last_result": "ok", "last_success": stamp})
+        result = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _cloud_lines(result.stdout) == [f"[INFO] cloud backup: connected, last success {age} ({stamp})"], stamp
+
+    # The right shape but not a real time: no age to give.
+    _write_cloud_files(
+        admin_stack, {"enabled": True}, {"connection": "connected", "last_success": "2026-13-45T99:99:99+00:00"}
+    )
+    odd = _run_admin_verifier(script, admin_stack, ac_stack, bind, log)
+    assert _cloud_lines(odd.stdout) == ["[INFO] cloud backup: connected, last success unknown"]
 
 
 def test_executable_verifier_cloud_backup_is_off_when_disabled_or_unconfigured(tmp_path):
@@ -369,9 +404,11 @@ def test_executable_verifier_cloud_line_prints_only_the_four_status_fields(tmp_p
 
     for forbidden in ("Private Name", "SECRET-ERROR-TEXT", "userKeyPassword", "azerothcore-backup-daily"):
         assert forbidden not in result.stdout + result.stderr
-    assert _cloud_lines(result.stdout) == [
-        "[INFO] cloud backup: connected, last success 2026-10-28T03:00:12+00:00, last result error"
-    ]
+    (line,) = _cloud_lines(result.stdout)
+    assert re.fullmatch(
+        r"\[INFO\] cloud backup: connected, last success [0-9]+[mhd] ago \(2026-10-28T03:00:12\+00:00\), last result error",
+        line,
+    ), line
 
 
 def test_executable_verifier_cloud_line_ignores_odd_field_values(tmp_path):

@@ -426,6 +426,35 @@ def test_status_never_calls_the_cli(rig, monkeypatch):
     assert len(view.log) == 10 and view.log[0].started == iso(NOW - timedelta(hours=1))  # newest first
     assert view.busy is False and view.signin_pending is False and view.signin_url is None
     assert view.stalled is False
+    assert view.has_stored_session is True and view.state_unsaved is False
+
+
+def test_in_drive_leaves_out_names_that_are_a_conflict(rig):
+    # A conflict is a same-name Drive file with other content: this server's archive is not there (I-2).
+    rig.local(NEW)
+    rig.local(D27)
+    rig.configure(enabled=True)
+    rig.set_state(
+        remote=[RemoteFile(NEW, 3, "aa"), RemoteFile(D27, 4, "bb")],
+        issues=[
+            {"name": NEW, "kind": "conflict", "detail": CONFLICT_DETAIL},
+            {"name": D27, "kind": "failed", "detail": "Upload failed."},
+        ],
+    )
+
+    view = rig.svc.status()
+
+    assert view.in_drive == frozenset({D27})
+    assert [f.name for f in view.state.remote] == [NEW, D27]  # the stored listing is unchanged
+    assert rig.svc.due(NOW) is False  # and a known conflict still does not start a run every wake-up
+
+
+def test_has_stored_session_reads_the_vault_files_only(rig):
+    rig.vault.calls.clear()
+    assert rig.svc.status().has_stored_session is True
+    rig.vault.set_exists(False)
+    assert rig.svc.status().has_stored_session is False
+    assert rig.vault.calls == []  # no unlock, no TPM probe
 
 
 def test_unavailable_without_tpm_or_binary(rig):
@@ -449,7 +478,10 @@ def test_unavailable_without_tpm_or_binary(rig):
     rig.vault.tpm = False
     rig.svc.probe()
     view = rig.svc.status()
-    assert view.available is False and "no usable TPM security chip" in view.unavailable_reason
+    assert view.available is False and view.unavailable_reason == (
+        "Could not use this server's TPM security chip, which cloud backup needs to keep the Proton "
+        "session encrypted."
+    )
     with pytest.raises(CloudUnavailable, match="TPM"):
         rig.svc.start_sign_in()
     assert rig.cli.started == [] and not locked(rig.svc)
@@ -468,6 +500,48 @@ def test_probe_that_crashes_reports_unavailable(rig, monkeypatch):
     rig.svc.probe()
     view = rig.svc.status()
     assert view.available is False and view.unavailable_reason
+
+
+def test_unusable_tpm_is_checked_again_about_hourly(rig, monkeypatch):
+    # A TPM that failed once (contention or a timeout at start-up) must not turn the feature
+    # off until the next restart: the loop checks it again about every hour (M-1).
+    assert cloud_backup.REPROBE_SECONDS == 3600
+    rig.vault.tpm = False
+    rig.svc.probe()
+    probes = rig.vault.calls.count("tpm")
+
+    rig.svc.tick()  # within the hour: no new check
+    assert rig.vault.calls.count("tpm") == probes and rig.svc.status().available is False
+
+    monkeypatch.setattr(cloud_backup, "REPROBE_SECONDS", 0)
+    rig.vault.tpm = True
+    rig.svc.tick()
+    assert rig.vault.calls.count("tpm") == probes + 1
+    assert rig.svc.status().available is True and rig.svc.status().unavailable_reason is None
+    rig.svc.tick()
+    assert rig.vault.calls.count("tpm") == probes + 1  # available: never probed again
+
+    # A probe that crashed is checked again too.
+    def broken() -> bool:
+        raise RuntimeError("unexpected")
+
+    working = rig.vault.tpm_available
+    monkeypatch.setattr(rig.vault, "tpm_available", broken)
+    rig.svc.probe()
+    assert rig.svc.status().available is False
+    monkeypatch.setattr(rig.vault, "tpm_available", working)
+    rig.svc.tick()
+    assert rig.svc.status().available is True
+
+    # A missing program is not a TPM problem: only a new admin image brings it back.
+    rig.cli.paths.binary.unlink()
+    rig.svc.probe()
+    rig.cli.paths.binary.write_text("back\n")
+    rig.vault.calls.clear()
+    rig.svc.tick()
+    view = rig.svc.status()
+    assert view.available is False and view.unavailable_reason == cloud_backup.MISSING_PROGRAM
+    assert rig.vault.calls == []
 
 
 # --- sign-in ---
@@ -810,17 +884,96 @@ def test_save_settings_forgets_the_listing_when_the_folder_changes(rig):
     assert rig.store.load_config().folder == "/my-files/Other"
 
 
-def test_run_finishing_after_a_folder_change_keeps_its_listing_out(rig, gated_run):
-    gate, _ = gated_run
-    rig.configure()
+OTHER = "/my-files/Other"
+
+
+def test_folder_change_is_refused_while_a_run_uses_the_folder(rig, monkeypatch):
+    # A run uses the folder it read at its start for every upload and every trash, so
+    # moving the setting under it would keep changing the old folder (I-1).
+    rig.local(NEW, b"tonight's archive")
+    rig.configure(enabled=True)
     rig.set_state()
+    old = daily("2026-10-01")  # past retention: the run moves it to the trash at the end
+    rig.cli.entries = [RemoteEntry(old, "file", "u-old", 3, "cc")]
+    entered, gate = threading.Event(), threading.Event()
+    real_upload = rig.cli.upload
+
+    def gated_upload(archive, folder):
+        entered.set()
+        assert gate.wait(5), "the test never opened the gate"
+        return real_upload(archive, folder)
+
+    monkeypatch.setattr(rig.cli, "upload", gated_upload)
     rig.svc.start_run("manual")
-    rig.svc.save_settings(CloudConfig(folder="/my-files/Other"))
-    gate.set()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(CloudBusy) as err:
+            rig.svc.save_settings(CloudConfig(enabled=True, folder=OTHER))
+        assert str(err.value) == cloud_backup.BUSY
+        assert rig.store.load_config().folder == FOLDER  # nothing saved
+
+        # A save that keeps the folder (here a retention change) still works mid-run.
+        rig.svc.save_settings(CloudConfig(enabled=True, folder=FOLDER, retention_days=10))
+        assert rig.store.load_config().retention_days == 10
+    finally:
+        gate.set()
     assert rig.svc.wait_idle(5)
+
+    assert rig.cli.names("upload") == [NEW] and rig.cli.names("trash") == [old]
+    assert {call[1] for call in rig.cli.calls} == {FOLDER}  # the run never left its own folder
     state = rig.store.load_state()
-    assert state.last_result == "ok"  # the run itself is recorded...
-    assert state.remote == [] and state.folder_status is None  # ...but not the old folder's listing
+    assert state.last_result == "ok" and [f.name for f in state.remote] == [NEW]
+    assert rig.store.load_config().folder == FOLDER
+
+
+@pytest.mark.parametrize("holder", ["run", "check", "create"])
+def test_folder_change_is_refused_while_a_folder_task_holds_the_lock(rig, holder):
+    rig.configure()
+    rig.set_state(remote=[RemoteFile(NEW, 1, "aa")], folder_status="ok")
+    rig.svc._acquire(holder)
+    try:
+        with pytest.raises(CloudBusy):
+            rig.svc.save_settings(CloudConfig(folder=OTHER))
+        rig.svc.save_settings(CloudConfig(folder=FOLDER, retention_days=12))
+    finally:
+        rig.svc._release()
+    assert rig.store.load_config() == CloudConfig(folder=FOLDER, retention_days=12)
+    state = rig.store.load_state()
+    assert [f.name for f in state.remote] == [NEW] and state.folder_status == "ok"  # nothing forgotten
+
+    rig.svc.save_settings(CloudConfig(folder=OTHER))  # free again: the change goes through
+    assert rig.store.load_config().folder == OTHER
+
+
+def test_folder_change_during_a_sign_in_is_allowed_and_keeps_the_old_check_out(rig, monkeypatch):
+    # A sign-in only reads the folder (fs info): changing it then is fine, and the check
+    # of the old folder is not recorded for the new one (R-8).
+    rig.configure()
+    entered, gate = threading.Event(), threading.Event()
+    real_info = rig.cli.info
+
+    def gated_info(folder):
+        entered.set()
+        assert gate.wait(5), "the test never opened the gate"
+        return real_info(folder)
+
+    monkeypatch.setattr(rig.cli, "info", gated_info)
+    proc = rig.cli.queue_login()
+    rig.svc.start_sign_in()
+    proc.finish(0)
+    try:
+        assert entered.wait(5)
+        assert rig.svc.status().signin_pending is True
+        rig.svc.save_settings(CloudConfig(folder=OTHER))
+    finally:
+        gate.set()
+    assert rig.svc.wait_idle(5)
+
+    assert rig.store.load_config().folder == OTHER
+    state = rig.store.load_state()
+    assert state.connection == "connected"  # the sign-in itself is recorded...
+    assert state.folder_status is None  # ...but not what it found about the old folder
+    assert rig.cli.calls == [("start_login", None), ("version", None), ("info", FOLDER)]
 
 
 @pytest.mark.parametrize(
@@ -1252,6 +1405,69 @@ def test_state_write_failure_does_not_stop_loop(rig, monkeypatch, caplog):
     assert rig.svc.wait_idle(5)
     assert len(runs) == 2 and not locked(rig.svc)
     assert "No space left on device" in caplog.text
+
+
+def disk_full(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+
+
+def test_unsaved_run_result_stays_in_memory_with_its_back_off(rig, monkeypatch):
+    # state.json cannot be written: the run's result is still shown, the back-off still
+    # holds, and the panel is told, until a later save works (M-4).
+    rig.local(NEW)
+    rig.configure(enabled=True)
+    rig.set_state(remote=[RemoteFile(D27, 1, "x")])
+    real_save = rig.store.save_state
+    monkeypatch.setattr(rig.store, "save_state", disk_full)
+
+    def failing_run(**kw):
+        rig.clock.advance(minutes=5)
+        return outcome("error", folder_status=None, listed=False, error="Proton said no")
+
+    monkeypatch.setattr(cloud_backup, "run_sync", failing_run)
+    rig.svc.start_run("manual")
+    assert rig.svc.wait_idle(5)
+    end = NOW + timedelta(minutes=5)
+
+    assert rig.store.load_state().last_result is None  # nothing reached the file
+    view = rig.svc.status()
+    assert view.state_unsaved is True
+    assert view.state.last_result == "error" and view.state.last_error == "Proton said no"
+    assert view.state.next_auto_attempt == iso(end + timedelta(minutes=60))
+    assert view.state.failing_since == iso(end) and view.in_drive == frozenset({D27})
+    assert rig.svc.due(end + timedelta(minutes=10)) is False  # the back-off applies
+    assert rig.svc.due(end + timedelta(minutes=61)) is True
+
+    # The next write that works stores everything kept so far and clears the warning.
+    monkeypatch.setattr(rig.store, "save_state", real_save)
+    rig.svc.check_folder()
+    assert rig.svc.status().state_unsaved is False
+    stored = rig.store.load_state()
+    assert stored.last_result == "error" and stored.failing_since == iso(end)
+    assert stored.folder_status == "ok" and stored.next_auto_attempt is None  # the check's own fields
+
+
+def test_unsaved_listing_still_stops_the_wake_ups(rig, monkeypatch):
+    rig.local(NEW)
+    rig.configure(enabled=True)
+    rig.set_state()
+    monkeypatch.setattr(rig.store, "save_state", disk_full)
+    runs: list[dict] = []
+
+    def listed(**kw):
+        runs.append(kw)
+        return outcome("ok", uploaded=[NEW], remote=[RemoteFile(NEW, 3, "aa")])
+
+    monkeypatch.setattr(cloud_backup, "run_sync", listed)
+    rig.svc.tick()
+    assert rig.svc.wait_idle(5)
+    rig.svc.tick()
+    assert rig.svc.wait_idle(5)
+
+    assert len(runs) == 1  # NEW is known to be in the Drive, even though state.json is stale
+    view = rig.svc.status()
+    assert view.state_unsaved is True and view.in_drive == frozenset({NEW})
+    assert view.state.last_result == "ok" and view.state.last_success == iso(NOW)
 
 
 async def test_loop_probes_on_a_thread_ticks_and_stop_cancels_a_sign_in(rig, monkeypatch):

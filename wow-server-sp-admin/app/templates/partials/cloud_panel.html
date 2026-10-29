@@ -49,8 +49,11 @@
     {% if error %}<p class="cloud-msg cloud-msg-error" role="alert">{{ error }}</p>{% endif %}
     {% if notice %}<p class="cloud-msg cloud-msg-ok" role="status">{{ notice }}</p>{% endif %}
 
+    {% if state_unsaved %}
+    <p class="cloud-msg cloud-msg-error cloud-unsaved">Could not save the cloud status file — check that the admin data folder is writable.</p>
+    {% endif %}
     {% if stalled %}
-    <p class="cloud-msg cloud-msg-error cloud-stalled">Stalled — no successful upload for over a day.</p>
+    <p class="cloud-msg cloud-msg-error cloud-stalled">Stalled — no fully successful cloud run for over a day.</p>
     {% endif %}
     {% if last_error %}
     <p class="cloud-msg cloud-msg-error">{{ last_error }}</p>
@@ -81,7 +84,7 @@
     <p class="cloud-line cloud-muted">Choose a Drive folder below and save, so backups have somewhere to go.</p>
     {% endif %}
 
-    {% if primary in ('disconnected', 'vault_error', 'pending', 'connected') %}
+    {% if primary in ('disconnected', 'vault_error', 'pending', 'connected') or can_disconnect %}
     <div class="cloud-actions">
       {% if primary in ('disconnected', 'vault_error') %}
       <button type="button" class="btn btn-gold" hx-post="/api/cloud/connect" hx-target="#cloud-panel" hx-swap="outerHTML" hx-indicator="#cloud-wait" hx-disabled-elt="this"
@@ -94,7 +97,7 @@
       <button type="button" class="btn btn-green" hx-post="/api/cloud/upload-now" hx-target="#cloud-panel" hx-swap="outerHTML" hx-indicator="#cloud-wait" hx-disabled-elt="this"
               {% if view.busy %}disabled{% endif %}>Upload now</button>
       {% endif %}
-      {% if primary in ('connected', 'vault_error') %}
+      {% if can_disconnect %}
       <button type="button" class="btn btn-danger" hx-post="/api/cloud/disconnect" hx-target="#cloud-panel" hx-swap="outerHTML" hx-indicator="#cloud-wait" hx-disabled-elt="this"
               hx-confirm="Disconnect from Proton Drive? This removes the stored Proton session from this server and stops the copies; your settings are kept. It does not end the session at Proton: to do that, revoke it in your Proton account's session list."
               {% if view.busy %}disabled{% endif %}>Disconnect</button>

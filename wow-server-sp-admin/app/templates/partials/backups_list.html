@@ -23,7 +23,7 @@
 <p class="backups-disclaimer">
   ⚠ Backups are automatically deleted after 7 days — to keep one longer, copy its
   file from <code>/opt/stacks/azerothcore/backups/</code>.
-  {% if cloud_folder %}Copies also go to Proton Drive folder <code>{{ cloud_folder }}</code> and leave it on the same schedule; old copies go to the Drive trash, which you empty yourself.{% endif %}
+  {% if cloud_folder %}Copies also go to Proton Drive folder <code>{{ cloud_folder }}</code> {% if cloud_retention == 7 %}and leave it on the same schedule{% else %}and are kept there for {{ cloud_retention }} day{% if cloud_retention != 1 %}s{% endif %}{% endif %}; old copies go to the Drive trash, which you empty yourself.{% endif %}
   <strong>Archives contain database contents and configuration secrets (including
   DB passwords) — store and transfer them securely.</strong>
 </p>
