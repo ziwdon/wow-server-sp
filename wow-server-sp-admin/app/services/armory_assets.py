@@ -307,6 +307,12 @@ class AssetCache:
 
     Thread-safe for the proxy's worker threads: writes, eviction and ``clear`` hold
     one lock; a ``get`` racing an eviction is simply a miss.
+
+    The byte total is kept running under that lock (learnt with one walk the first
+    time it is needed, and again after ``clear``), so a write below the cap never
+    walks the tree. Only a total over the cap walks it: that walk re-counts the tree
+    (correcting any drift, e.g. a file changed by hand) before evicting, and each
+    eviction frees at least a fifth of the cap, so walks stay rare.
     """
 
     def __init__(
@@ -320,6 +326,7 @@ class AssetCache:
         self.cap_bytes = int(cap_bytes)
         self._clock = clock
         self._lock = threading.RLock()
+        self._total: int | None = None  # running byte total of the tree; None = not known yet
 
     # paths
 
@@ -357,8 +364,23 @@ class AssetCache:
                 continue
             os.chmod(current, 0o700)  # mkdir's mode is filtered by the umask
 
+    @staticmethod
+    def _regular_size(path: Path) -> int:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return 0
+        return st.st_size if stat.S_ISREG(st.st_mode) else 0
+
+    def _adjust_total(self, delta: int) -> None:
+        """Caller holds the lock. An unknown total stays unknown (it is learnt by the next walk)."""
+        if self._total is not None:
+            self._total = max(0, self._total + delta)
+
     def _write_file(self, target: Path, body: bytes) -> None:
+        """Caller holds the lock."""
         self._make_private_dirs(target.parent)
+        replaced = self._regular_size(target)
         fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -371,6 +393,7 @@ class AssetCache:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
+        self._adjust_total(len(body) - replaced)
         self._touch(target)
 
     def _touch(self, path: Path) -> None:
@@ -388,7 +411,9 @@ class AssetCache:
         negative = self._negative_path(local_path)
         with self._lock:
             self._write_file(target, bytes(body))
+            marker_size = self._regular_size(negative)  # 0 for our own (empty) markers
             self._discard(negative)
+            self._adjust_total(-marker_size)
             self._evict(keep=target)
         return target
 
@@ -429,6 +454,7 @@ class AssetCache:
         age = self._clock() - st.st_mtime_ns / 1_000_000_000
         if -_CLOCK_SLACK_SECONDS <= age < NEGATIVE_TTL_SECONDS:
             return True
+        # Markers are empty, so expiring one leaves the running total as it is (no lock needed).
         with contextlib.suppress(OSError):
             self._discard(marker)
         return False
@@ -451,15 +477,23 @@ class AssetCache:
                     yield path.relative_to(root).as_posix(), path, st
 
     def size_bytes(self) -> int:
-        return sum(st.st_size for _rel, _path, st in self._files())
+        """Bytes of every regular file under ``root`` (the running total; one walk if not known yet)."""
+        with self._lock:
+            if self._total is None:
+                self._total = sum(st.st_size for _rel, _path, st in self._files())
+            return self._total
 
     @staticmethod
     def _kept(rel: str) -> bool:
         return rel.startswith(VIEWER_DIR + "/")
 
     def _evict(self, *, keep: Path | None) -> int:
+        """Caller holds the lock. Walks the tree only when the total is unknown or over the cap."""
+        if self._total is not None and self._total <= self.cap_bytes:
+            return 0
         files = list(self._files())
         total = sum(st.st_size for _rel, _path, st in files)
+        self._total = total  # re-counted: any drift is corrected here
         if total <= self.cap_bytes:
             return 0
         goal = int(self.cap_bytes * EVICT_TO_FRACTION)
@@ -481,6 +515,7 @@ class AssetCache:
                 continue
             total -= size
             removed += 1
+        self._total = total
         return removed
 
     def evict_if_needed(self) -> int:
@@ -495,6 +530,7 @@ class AssetCache:
         """
         with self._lock:
             root = self.root.resolve()
+            self._total = None  # what is left (live/viewer/, stubborn files) is re-counted when next needed
             if not root.is_dir():
                 return 0
             removed = 0

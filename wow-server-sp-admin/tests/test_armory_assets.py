@@ -595,6 +595,61 @@ def test_cache_evicts_oldest_to_eighty_percent_but_keeps_viewer_files(tmp_path):
     assert huge.read_bytes() == b"h" * 500
 
 
+def test_cache_put_under_the_cap_does_not_walk_the_tree(tmp_path, monkeypatch):
+    """A miss write is O(1): the byte total is kept running and the tree is walked only over the cap."""
+    clock = Clock()
+    root = tmp_path / "cache"
+    cache = AssetCache(root, cap_bytes=1000, clock=clock)
+    walks: list[int] = []
+    real_files = AssetCache._files
+
+    def counting_files(self):
+        walks.append(1)
+        return real_files(self)
+
+    monkeypatch.setattr(AssetCache, "_files", counting_files)
+
+    def fresh_walk() -> int:
+        return sum(os.lstat(p).st_size for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+
+    cache.put("wrath/m2/1.m2", b"a" * 100)  # the first write learns the total with one walk
+    assert len(walks) == 1
+    walks.clear()
+    for i in range(2, 8):
+        clock.now += 1
+        cache.put(f"wrath/m2/{i}.m2", b"b" * 100)
+    cache.mark_negative("wrath/m2/99.m2")
+    assert cache.get("wrath/m2/1.m2") is not None  # touched at the newest time
+    assert cache.negative("wrath/m2/99.m2") is True
+    assert cache.size_bytes() == 700 == fresh_walk()
+    assert walks == []
+
+    # Replacing a file counts only the difference.
+    cache.put("wrath/m2/2.m2", b"c" * 250)
+    assert cache.size_bytes() == 850 == fresh_walk()
+    assert walks == []
+
+    # Over the cap: one walk, eviction to <= 80 %, and the running total matches the tree again.
+    clock.now += 1
+    cache.put("wrath/skin/1.skin", b"d" * 200)  # 1050 > 1000
+    assert len(walks) == 1
+    assert cache.size_bytes() == fresh_walk() == 750  # 3.m2, 4.m2, 5.m2 (least recently hit) went
+    walks.clear()
+    clock.now += 1
+    cache.put("wrath/skin/2.skin", b"e" * 10)
+    assert walks == []
+    assert cache.size_bytes() == fresh_walk() == 760
+
+    # Clear resets it; the next size is learnt from the tree once.
+    cache.put("live/viewer/viewer.min.js", b"v" * 30)
+    assert cache.clear() == 7  # 1, 2, 6, 7 .m2, two .skin files and the negative marker
+    assert cache.size_bytes() == fresh_walk() == 30
+    walks.clear()
+    cache.put("wrath/m2/1.m2", b"f" * 5)
+    assert walks == []
+    assert cache.size_bytes() == fresh_walk() == 35
+
+
 def test_cache_clear_keeps_viewer_files_and_drops_negatives(tmp_path):
     clock = Clock()
     root = tmp_path / "cache"
