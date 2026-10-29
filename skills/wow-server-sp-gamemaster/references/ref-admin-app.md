@@ -104,6 +104,31 @@ The Progression page (`/progression`) lets you advance individual characters thr
 - Progression is **forward-only** — the service rejects downgrade requests server-side as well as in the UI
 - The internal key `"vanilla"` is displayed as **"Classic"** throughout the UI; the database and service always use `"vanilla"`
 
+## Armory Page
+
+The Armory tab (`/armory`, one character at `/armory/<guid>`) is a read-only character sheet. Search by name (at least 2 letters; humans first, then bots tagged `bot`), or click any character name on the Players page.
+
+**What it shows**
+- Header: name in class colour, level, race, class, account (or `bot`), online / last seen.
+- A **3D model** of the character in its gear (drag to rotate, *Sheathe weapons* toggle), drawn by Wowhead's model viewer. The browser never contacts Wowhead: the admin fetches each model file once, caches it in `azerothcore-admin/data/armory/cache/` (max 300 MB) and serves it itself; nothing is fetched that no one viewed (≈ 3–4 MB the first time a race/gender is shown, ~15 KB per new item).
+- A **paper-doll** of the 19 equipment slots with tooltips (stats, enchant, gems, socket bonus, random suffix, set bonuses) and the average item level (same formula as the Players ranking). A small **"no 3D"** mark on a slot = Wowhead has no model for that item; the rest still renders.
+- Tabs **Talents** (both specs, the three trees), **Glyphs** (3 major, 3 minor) and **Stats**.
+
+**The stats setting.** AzerothCore saves character stats only when `PlayerSave.Stats.MinLevel` ≥ 1 (default 0 = never). Set it to 1 in **Settings** (search `PlayerSave.Stats`, Apply restarts the worldserver); each character's Stats tab fills after its next logout. Keep `PlayerSave.Stats.SaveOnlyOnLogout = 1` (default). Until a row exists the tab says so and shows the current value.
+
+**Footer controls**
+- **3D viewer: On/Off** — Off stops all traffic to Wowhead (stored in `data/armory/armory.json`); already-cached models keep rendering, others show "3D viewer is switched off". The paper-doll and tabs never depend on it.
+- **Clear cached model data** — deletes the cached model files and the "not found" memory; they are fetched again on the next view. It keeps the viewer script.
+- **Update** / **Revert** — the viewer script is fetched once and pinned, so a change at Wowhead cannot break the page by itself. **Update** fetches the current version and keeps the old one; if the model then stops drawing, **Revert** pins the previous copy again.
+- The footer also reports problems: "Wowhead unreachable since …" (models not yet cached are unavailable for a minute at a time; nothing else is affected), a cache folder that cannot be written, or reference files missing (talents/glyphs/tooltips then show ids).
+
+**Good to know**
+- Read-only: only `SELECT`s on the characters database, no console commands, no worldserver restarts.
+- Talent/spell/item-set names come from the game's DBC files in AzerothCore's client-data volume (`azerothcore_ac-client-data`, mounted read-only). Because the admin uses that volume, uninstall the admin **before** AzerothCore when removing everything.
+- `data/armory/` holds only re-fetchable data and is not in backup archives.
+- `verify-azerothcore-admin.sh` prints one advisory line, e.g. `[INFO] armory: dbc ok, cache 12 MB, viewer fetched <time>, 3d on`; it never fails the verify.
+- On an install older than the Armory, the first redeploy stops and prints a `curl` command that fetches `jquery.min.js` (the viewer needs jQuery); run it once and redeploy again.
+
 ## Maintenance Page
 
 - **Bot Control** — `Reset bots` (sends `playerbot rndbot init`: every random bot **currently logged in** keeps its name/race/class but is re-rolled to a fresh level within `RandomBotMinLevel`/`MaxLevel`, new talents and gear, and teleported to a level-appropriate zone; offline bots are untouched, no accounts or characters are deleted) and `Clear bots` (destructive: stops the server, safety backup, deletes every RNDBOT account and its characters, restarts; pool regenerates on next boot).
@@ -183,6 +208,7 @@ Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that co
 | `/opt/stacks/azerothcore-admin/.env` | Admin runtime vars (mode 600) |
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
 | `/opt/stacks/azerothcore-admin/data/cloud/` | Cloud Backup: `config.json`, `state.json`, `log.jsonl` and `secrets/` (the encrypted Proton session; mode 700). Never included in backup archives |
+| `/opt/stacks/azerothcore-admin/data/armory/` | Armory: `armory.json` (3D viewer On/Off), `displayid-map.json` (item → Wowhead model id) and `cache/` (Wowhead model files, icons and the pinned viewer script; max 300 MB). Re-fetchable; never included in backup archives |
 | `/opt/stacks/azerothcore-admin/data/customization/` | Customization: `config.json` (header name, logo type and sha256) and `logo.<ext>`. Never included in backup archives |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
 | `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade, prerollback) |

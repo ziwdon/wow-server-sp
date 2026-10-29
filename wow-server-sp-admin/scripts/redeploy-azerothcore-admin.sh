@@ -68,6 +68,13 @@ if ! flock -n 9; then
     exit 75
 fi
 
+# The Armory mounts AC's client-data volume (docker-compose.yml, external), which
+# the AC installer's Phase 4 creates. Read-only check, before anything is staged.
+if ! docker volume inspect azerothcore_ac-client-data >/dev/null 2>&1; then
+    echo "ERROR: client-data volume azerothcore_ac-client-data not found — install AzerothCore first (Phase 4 creates it)" >&2
+    exit 1
+fi
+
 CANDIDATE_IMAGE="azerothcore-admin:redeploy-$(date -u +%Y%m%dT%H%M%SZ)"
 
 wait_for_healthy() {
@@ -115,7 +122,7 @@ cp "$STACK_DIR/docker-compose.yml" "$PREVIOUS_COMPOSE"
 
 # Vendor assets are deliberately absent from the repo. Carry the installed
 # copies into the isolated candidate build context before syncing source.
-for vendor in htmx.min.js htmx-sse.js; do
+for vendor in htmx.min.js htmx-sse.js jquery.min.js; do
     if [ -f "$STACK_DIR/build/app/static/$vendor" ]; then
         cp -a "$STACK_DIR/build/app/static/$vendor" "$STAGE_DIR/build/app/static/$vendor"
     fi
@@ -125,18 +132,29 @@ echo "==> Syncing candidate code..."
 rsync -a --delete \
     --exclude='app/static/htmx.min.js' \
     --exclude='app/static/htmx-sse.js' \
+    --exclude='app/static/jquery.min.js' \
     "$REPO_DIR/" "$STAGE_DIR/build/"
 
 # The repository intentionally has no dist/ directory. rsync --delete removes
 # the pre-created candidate directory, so recreate it before staging configs.
 mkdir -p "$STAGE_DIR/build/dist"
 
-for vendor in htmx.min.js htmx-sse.js; do
+# Where install-azerothcore-admin.sh fetches each vendor file from (keep in sync).
+# An install older than the Armory has no jquery.min.js yet: this names the fetch.
+vendor_url() {
+    case "$1" in
+        htmx.min.js) echo "https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js" ;;
+        htmx-sse.js) echo "https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" ;;
+        jquery.min.js) echo "https://unpkg.com/jquery@3.7.1/dist/jquery.min.js" ;;
+    esac
+}
+
+for vendor in htmx.min.js htmx-sse.js jquery.min.js; do
     vendor_path="$STAGE_DIR/build/app/static/$vendor"
     vendor_size="$(wc -c < "$vendor_path" 2>/dev/null || echo 0)"
     if [ "$vendor_size" -le 200 ]; then
         echo "ERROR: $vendor is a placeholder (${vendor_size} bytes) — cannot build." >&2
-        echo "Run install-azerothcore-admin.sh to vendor HTMX, then retry." >&2
+        echo "Fetch it, then retry: curl -sSfL -o \"$STACK_DIR/build/app/static/$vendor\" \"$(vendor_url "$vendor")\"" >&2
         exit 1
     fi
 done

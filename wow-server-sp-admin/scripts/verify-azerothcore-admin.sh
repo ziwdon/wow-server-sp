@@ -248,6 +248,104 @@ case "$cloud_line" in
     *) info "cloud backup: $cloud_line" ;;
 esac
 
+# 8c. Armory -- advisory only, for the same reason as 8b: an outage at Wowhead or a
+# missing reference file must never fail a verify (redeploy would roll back), and
+# the page degrades on its own. Only `info` is used, so PASS/FAIL cannot change.
+#  - dbc: one read-only `test -r` per file the admin reads (DBC_FILES in
+#    app/services/dbc.py; a test keeps the two lists equal) in the running admin
+#    container, through its ro mount of AC's client-data volume;
+#  - cache: `du -sm` of data/armory/cache (0 when it does not exist yet);
+#  - viewer / 3d: one bounded python3 call (paths as argv) that prints only fixed
+#    words plus a validated ISO time -- nothing else from the files reaches the
+#    output. "fetched" follows the pinned script (a non-empty regular file), the
+#    date its viewer.meta.json; an unreadable or odd armory.json means On, as in
+#    the app (ArmorySettings).
+armory_dir="$STACK_DIR/data/armory"
+armory_dbc_files=(Talent.dbc TalentTab.dbc Spell.dbc SpellIcon.dbc GlyphProperties.dbc SpellItemEnchantment.dbc GemProperties.dbc ItemRandomProperties.dbc ItemRandomSuffix.dbc ItemSet.dbc ItemDisplayInfo.dbc RandPropPoints.dbc)
+if [ "$status" = "running" ]; then
+    armory_missing=()
+    for armory_dbc in "${armory_dbc_files[@]}"; do
+        timeout 5 docker exec azerothcore-admin test -r "/client-data/dbc/$armory_dbc" >/dev/null 2>&1 \
+            || armory_missing+=("$armory_dbc")
+    done
+    if [ "${#armory_missing[@]}" -eq 0 ]; then
+        armory_dbc_part="ok"
+    else
+        armory_dbc_part="missing: $(IFS=,; echo "${armory_missing[*]}")"
+    fi
+else
+    armory_dbc_part="unknown (admin container not running)"
+fi
+armory_cache_mb=0
+if [ -d "$armory_dir/cache" ]; then
+    armory_cache_mb="$(timeout 30 du -sm "$armory_dir/cache" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+fi
+case "$armory_cache_mb" in
+    '' | *[!0-9]*) armory_cache_part="unknown" ;;
+    *) armory_cache_part="$armory_cache_mb MB" ;;
+esac
+armory_line=""
+if command -v python3 >/dev/null 2>&1; then
+    armory_line="$(timeout 5 python3 - "$armory_dir/armory.json" "$armory_dir/cache/live/viewer/viewer.min.js" \
+        "$armory_dir/cache/live/viewer/viewer.meta.json" 2>/dev/null <<'PY'
+import datetime
+import json
+import os
+import re
+import stat
+import sys
+
+STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,16}(Z|[+-][0-9]{2}:[0-9]{2})?")
+MAX_JSON = 64 * 1024
+
+
+def load(path):
+    """The file's JSON object, or None (missing, unreadable, too big, not an object)."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_JSON + 1)
+        data = json.loads(raw) if len(raw) <= MAX_JSON else None
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def real_time(stamp):
+    text = stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp  # Python < 3.11 wants an offset
+    try:
+        datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+settings = load(sys.argv[1])
+enabled = settings.get("enabled") if settings is not None else None
+three_d = "off" if enabled is False else "on"
+
+try:
+    st = os.lstat(sys.argv[2])
+    pinned = stat.S_ISREG(st.st_mode) and st.st_size > 0
+except OSError:
+    pinned = False
+if not pinned:
+    viewer = "not fetched"
+else:
+    meta = load(sys.argv[3])
+    fetched = meta.get("fetched_at") if meta is not None else None
+    if isinstance(fetched, str) and len(fetched) <= 40 and STAMP.fullmatch(fetched) and real_time(fetched):
+        viewer = "fetched " + fetched
+    else:
+        viewer = "fetched (date unknown)"
+print("viewer %s, 3d %s" % (viewer, three_d))
+PY
+)" || armory_line=""
+fi
+case "$armory_line" in
+    '' | *$'\n'*) armory_line="viewer unknown, 3d unknown" ;;
+esac
+info "armory: dbc $armory_dbc_part, cache $armory_cache_part, $armory_line"
+
 # 9. AC stack still functional (delegate)
 # The admin install/redeploy never modifies the running AC server, so AC runtime
 # noise in Errors.log (e.g. graveyard fallback lines that accumulate over hours

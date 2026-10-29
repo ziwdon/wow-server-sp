@@ -17,7 +17,7 @@ def _executable(path: Path, body: str) -> None:
 def _stack(tmp_path: Path) -> Path:
     stack = tmp_path / "admin-stack"
     (stack / "build" / "app" / "static").mkdir(parents=True)
-    for name in ("htmx.min.js", "htmx-sse.js"):
+    for name in ("htmx.min.js", "htmx-sse.js", "jquery.min.js"):
         (stack / "build" / "app" / "static" / name).write_bytes(b"x" * 201)
     stack.joinpath("docker-compose.yml").write_text("old-compose\n")
     stack.joinpath(".env").write_text("TAILSCALE_IP=100.64.0.5\nADMIN_PORT=8765\n")
@@ -41,6 +41,10 @@ if [ "$1" = compose ]; then
     exit 0
 fi
 if [ "$1" = image ]; then
+    exit 0
+fi
+if [ "$1 $2" = "volume inspect" ]; then
+    if [ "${ADMIN_REDEPLOY_CASE:-healthy}" = no-client-data ]; then exit 1; fi
     exit 0
 fi
 if [ "$1" = inspect ]; then
@@ -237,3 +241,33 @@ def test_redeploy_uses_sudo_to_create_missing_data_dir(tmp_path):
         f"chown {uid_gid} {stack}/data",
     ]
     assert (stack / "data").is_dir()
+
+
+def test_missing_client_data_volume_stops_before_anything_is_staged(tmp_path):
+    stack = _stack(tmp_path)
+    result, calls = _run(stack, _stubs(tmp_path), "no-client-data")
+
+    assert result.returncode == 1
+    assert (
+        "client-data volume azerothcore_ac-client-data not found — install AzerothCore first "
+        "(Phase 4 creates it)"
+    ) in result.stderr
+    assert calls == "volume inspect azerothcore_ac-client-data\n"
+    assert not [p for p in stack.glob(".redeploy.*") if p.is_dir()]  # no stage dir (the lock file stays)
+    assert stack.joinpath("docker-compose.yml").read_text() == "old-compose\n"
+
+
+def test_redeploy_without_vendored_jquery_names_the_fetch_and_does_not_build(tmp_path):
+    # An install from before the Armory has the HTMX files but no jquery.min.js.
+    stack = _stack(tmp_path)
+    (stack / "build" / "app" / "static" / "jquery.min.js").unlink()
+    result, calls = _run(stack, _stubs(tmp_path), "healthy")
+
+    assert result.returncode == 1
+    assert "ERROR: jquery.min.js is a placeholder (0 bytes)" in result.stderr
+    assert (
+        f'curl -sSfL -o "{stack}/build/app/static/jquery.min.js" '
+        '"https://unpkg.com/jquery@3.7.1/dist/jquery.min.js"'
+    ) in result.stderr
+    assert " build" not in calls and " up" not in calls
+    assert stack.joinpath("docker-compose.yml").read_text() == "old-compose\n"

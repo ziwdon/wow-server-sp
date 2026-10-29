@@ -22,6 +22,11 @@ connected with how long ago the last success was, e.g. `last success 5h ago
 (<time>)`, or the connection state and last result). It never counts as a
 failure: a problem at Proton must not fail a verify.
 
+It prints a second advisory line for the Armory, e.g. `[INFO] armory: dbc ok,
+cache 12 MB, viewer fetched 2026-10-29T12:34:56+00:00, 3d on` (which reference
+files are readable, the model cache size, when the viewer script was fetched,
+and whether the 3D viewer is on). It never counts as a failure either.
+
 ## Development tests
 
 The production image installs only `requirements.txt`. Run the test suite in a
@@ -119,6 +124,50 @@ and run `scripts/restore-azerothcore.sh` with the archive.
 - Only Proton receives data. The Proton Drive tool sends crash reports and
   telemetry to Proton according to your account's preference.
 
+## Armory
+
+The **Armory** tab shows one character at a time: search by name (or click a
+name on the Players page), then see the saved gear on a paper-doll with
+tooltips, the talents of both specs, the glyphs, the saved stats, and a 3D model
+of the character wearing that gear.
+
+**Where the data comes from.** Everything but the 3D model comes from this
+server: the characters database (read only) and the game's reference files
+(talents, spells, item sets …) from AzerothCore's client-data volume, which the
+admin mounts read-only. The 3D model is drawn in your browser by Wowhead's model
+viewer, but your browser never talks to Wowhead: the admin fetches each model
+file once, keeps it on disk (`data/armory/cache/`, at most 300 MB), and serves
+it from there. The first view of a race and gender costs about 3–4 MB from
+Wowhead, each new item about 15 KB, and a repeat view nothing. Wowhead sees this
+server's internet address and which models and items were asked for — never a
+character or account name. Nothing is fetched that no one asked to see.
+
+**Stats.** AzerothCore saves a character's stats only when the setting
+`PlayerSave.Stats.MinLevel` is 1 or more (it is 0 by default, which never saves
+them). Set it on the **Settings** page; a character's stats then appear after
+its next logout. Leave `PlayerSave.Stats.SaveOnlyOnLogout` at 1 (the default).
+Until then the Stats tab says so and shows the current value.
+
+**The footer of the Armory page:**
+
+- **3D viewer: On/Off** — Off stops every request to Wowhead; models already in
+  the cache still show.
+- **Clear cached model data** — deletes the cached model files (they are fetched
+  again when needed); it keeps the viewer script.
+- **Update** — the viewer script is fetched once and then kept as it is, so a
+  change at Wowhead cannot break the page unannounced. Update fetches the
+  current one; if the model then stops drawing, **Revert** goes back to the
+  previous copy.
+
+If a piece of gear shows a small "no 3D" mark, Wowhead has no model for it; the
+rest of the character still renders. The Armory's data is all re-fetchable, so
+it is not part of the backup archives.
+
+**Deploying it on an older install:** the Armory needs jQuery next to HTMX. The
+redeploy stops with the exact `curl` command to fetch it once (into
+`/opt/stacks/azerothcore-admin/build/app/static/jquery.min.js`); run it, then
+redeploy again.
+
 ## Uninstalling
 
 ```bash
@@ -128,6 +177,10 @@ and run `scripts/restore-azerothcore.sh` with the archive.
 If Cloud backup was connected, the uninstaller reminds you to revoke the Proton
 Drive session in your Proton account's session list (removing the app deletes the
 copy stored on this server, not the session at Proton).
+
+When removing everything, uninstall the admin app **before** AzerothCore: the
+admin uses AzerothCore's client-data volume, and the AzerothCore uninstaller
+cannot remove that volume while the admin is still running.
 
 ## Manual smoke checklist
 

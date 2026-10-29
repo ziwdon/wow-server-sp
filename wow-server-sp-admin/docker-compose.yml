@@ -58,10 +58,14 @@ services:
       - /opt/stacks/azerothcore-admin/snapshots:/admin-snapshots:rw
       # rw mount for admin-owned runtime state such as maintenance schedules.
       - /opt/stacks/azerothcore-admin/data:/admin-data:rw
+      # ro: the AC client data (the Armory reads dbc/*.dbc from it). Never
+      # under /ac -- this is a named volume, not a path of the AC stack dir.
+      - client-data:/client-data:ro
     environment:
       AC_STACK_DIR: /ac
       ADMIN_SNAPSHOTS_DIR: /admin-snapshots
       ADMIN_DATA_DIR: /admin-data
+      CLIENT_DATA_DIR: /client-data
       ADMIN_LOG_LEVEL: info
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
@@ -82,3 +86,16 @@ networks:
   # services attached.
   azerothcore_ac-network:
     external: true
+
+volumes:
+  # The AC stack's docker-compose.yml declares the named volume `ac-client-data`
+  # (filled by ac-client-data-init in installer Phase 4; dbc/, maps/, mmaps/,
+  # vmaps/). With COMPOSE_PROJECT_NAME=azerothcore Docker names it
+  # `azerothcore_ac-client-data`, so it is joined as external under that exact
+  # name: the admin never creates, fills or removes it. The DBC files are
+  # world-readable (644), so the non-root admin user needs no group change.
+  # While the admin container runs, the volume is in use: uninstall the admin
+  # before AC, or the AC uninstaller's `docker volume rm` of it fails.
+  client-data:
+    external: true
+    name: azerothcore_ac-client-data

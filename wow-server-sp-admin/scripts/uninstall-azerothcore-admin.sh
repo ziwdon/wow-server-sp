@@ -117,6 +117,11 @@ fi
 # path is a directory or another non-regular file, leave it for manual review.
 remove_admin_compose_file
 
+# data/armory/ went with the stack dir above. It is a cache of what Wowhead serves
+# anyone (no account, no session to revoke), so there is nothing to keep. The AC
+# client-data volume it read is AC's and stays; with the admin gone it is no
+# longer in use, so the AC uninstaller can remove it.
+echo "Armory: $STACK_DIR/data/armory/ holds only re-fetchable cache (Wowhead model data, the viewer script, the display-ID map) and the 3D viewer on/off switch; nothing else to do."
 echo "Uninstall complete."
 # Removing the stack dir also removes the stored Proton session files
 # (data/cloud/secrets), but that does not end the session at Proton. Printed in
