@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="dashboard-content customization-page">
+
+  {% if error %}<p class="banner error" role="alert">{{ error }}</p>{% endif %}
+  {% if saved %}<p class="banner ok" role="status">Saved.</p>{% endif %}
+
+  <div class="maintenance-grid">
+    <form class="panel maintenance-card" id="customization-form" method="post"
+          action="/api/customization" enctype="multipart/form-data">
+      <div class="panel-header"><span class="panel-title">Header</span></div>
+      <div class="panel-body maintenance-form">
+        <label class="maintenance-field">
+          <span class="sidebar-label">Name</span>
+          <input class="search-input" type="text" name="name" id="custom-name"
+                 value="{{ current.custom_name }}" maxlength="{{ max_name_length }}"
+                 placeholder="{{ default_name }}" autocomplete="off">
+          <span class="maintenance-help">Shown in the header and the browser tab. Leave empty for "{{ default_name }}". Up to {{ max_name_length }} characters.</span>
+        </label>
+
+        <div class="maintenance-field">
+          <span class="sidebar-label">Logo</span>
+          <div class="custom-logo-row">
+            <div class="custom-logo-box" id="custom-logo-box">
+              {% if current.logo_url %}<img src="{{ current.logo_url }}" alt="Current logo" width="36" height="36">{% else %}<span class="nav-icon">⚔</span>{% endif %}
+            </div>
+            <button type="button" class="btn btn-muted" id="custom-choose-logo">Choose image…</button>
+            <input type="file" name="logo" id="custom-logo-input" hidden
+                   accept="image/png,image/jpeg,image/webp,image/gif">
+            <button type="button" class="btn btn-muted" id="custom-remove-logo">Remove logo</button>
+            <input type="hidden" name="remove_logo" id="custom-remove-flag" value="1" disabled>
+          </div>
+          <span class="maintenance-help">PNG, JPG, WebP or GIF, up to 512 KB. Square images look best; it is shown at 36×36. Without a logo the header shows ⚔. The logo is also used as the browser tab icon.</span>
+        </div>
+
+        <div class="maintenance-field">
+          <span class="sidebar-label">Preview</span>
+          <div class="custom-preview">
+            <span class="nav-brand" id="custom-preview-brand"
+                  data-logo-url="{{ current.logo_url or "" }}" data-default-name="{{ default_name }}">
+              {% if current.logo_url %}<img class="nav-logo" src="{{ current.logo_url }}" alt="" width="36" height="36">{% else %}<span class="nav-icon">⚔</span>{% endif %}
+              <span class="nav-name">{{ current.name }}</span>
+            </span>
+          </div>
+          <span class="maintenance-help" id="custom-pending" hidden>Not saved yet.</span>
+        </div>
+
+        <div class="custom-actions">
+          <button class="btn btn-gold" type="submit">Save</button>
+          <button class="btn btn-muted" type="button" id="custom-reset">Reset to defaults</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+</div>
+<script>
+(function () {
+  var form = document.getElementById('customization-form');
+  var nameInput = document.getElementById('custom-name');
+  var fileInput = document.getElementById('custom-logo-input');
+  var removeFlag = document.getElementById('custom-remove-flag');
+  var preview = document.getElementById('custom-preview-brand');
+  var box = document.getElementById('custom-logo-box');
+  var pending = document.getElementById('custom-pending');
+  var savedBanner = document.querySelector('.customization-page > .banner.ok');
+  var savedName = nameInput.value;
+  var objectUrl = null;
+
+  function logoNode(src, cls) {
+    if (!src) {
+      var sword = document.createElement('span');
+      sword.className = 'nav-icon';
+      sword.textContent = '⚔';
+      return sword;
+    }
+    var img = document.createElement('img');
+    if (cls) img.className = cls;
+    img.src = src;
+    img.alt = '';
+    img.width = 36;
+    img.height = 36;
+    return img;
+  }
+
+  function currentLogo() {
+    if (objectUrl) return objectUrl;
+    if (!removeFlag.disabled) return '';
+    return preview.dataset.logoUrl;
+  }
+
+  function render() {
+    var logo = currentLogo();
+    preview.replaceChild(logoNode(logo, 'nav-logo'), preview.firstElementChild);
+    preview.querySelector('.nav-name').textContent = nameInput.value.trim() || preview.dataset.defaultName;
+    box.replaceChildren(logoNode(logo));
+    pending.hidden = !(objectUrl || !removeFlag.disabled || nameInput.value !== savedName);
+    if (savedBanner && !pending.hidden) savedBanner.hidden = true;
+  }
+
+  nameInput.addEventListener('input', render);
+  document.getElementById('custom-choose-logo').addEventListener('click', function () {
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', function () {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = fileInput.files.length ? URL.createObjectURL(fileInput.files[0]) : null;
+    if (objectUrl) removeFlag.disabled = true;
+    render();
+  });
+  function dropLogo() {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = null;
+    fileInput.value = '';
+    removeFlag.disabled = false;
+  }
+  document.getElementById('custom-remove-logo').addEventListener('click', function () {
+    dropLogo();
+    render();
+  });
+  document.getElementById('custom-reset').addEventListener('click', function () {
+    nameInput.value = '';
+    dropLogo();
+    render();
+  });
+  form.addEventListener('submit', function (e) {
+    var file = fileInput.files[0];
+    if (file && file.size > 512 * 1024) {
+      e.preventDefault();
+      showActionToast('The logo can be at most 512 KB.');
+    }
+  });
+})();
+</script>
+{% endblock %}

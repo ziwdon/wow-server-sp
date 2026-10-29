@@ -178,3 +178,9 @@ After install, verify these flows work end-to-end:
    live SSE progress thanks to broadcast subscribe + history replay.
 10. **Rollback**: click "Rollback last apply"; previous value is restored
    and another restart runs.
+11. **Customization**: open **Customization**, enter a name, choose a small
+   square PNG and Save. The header, the browser tab title
+   (`<name> · <page>`) and the tab icon change on every page; a second
+   Save with no new image keeps the logo; **Remove logo** + Save brings
+   back ⚔. An SVG or a file over 512 KB is refused with a red banner and
+   nothing changes.

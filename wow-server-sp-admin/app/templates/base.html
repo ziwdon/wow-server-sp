@@ -1,17 +1,22 @@
+{% set brand = branding() -%}
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ title }}</title>
-<link rel="stylesheet" href="/static/app.css?v={{ css_ver }}">
+<title>{{ brand.name }}{% if title %} · {{ title }}{% endif %}</title>
+{% if brand.logo_url %}<link rel="icon" href="{{ brand.logo_url }}">
+{% endif %}<link rel="stylesheet" href="/static/app.css?v={{ css_ver }}">
 <script src="/static/htmx.min.js" defer></script>
 <script src="/static/htmx-sse.js" defer></script>
 <script src="/static/action-ui.js" defer></script>
 </head>
 <body>
 <nav class="topnav">
-  <a class="nav-brand" href="/"><span class="nav-icon">⚔</span> AzerothCore Admin</a>
+  <a class="nav-brand" href="/">
+    {% if brand.logo_url %}<img class="nav-logo" src="{{ brand.logo_url }}" alt="" width="36" height="36">{% else %}<span class="nav-icon">⚔</span>{% endif %}
+    <span class="nav-name">{{ brand.name }}</span>
+  </a>
   <div class="nav-links">
     <a class="nav-link {% if request.url.path == '/' %}active{% endif %}" href="/">Dashboard</a>
     <a class="nav-link {% if request.url.path == '/players' %}active{% endif %}" href="/players">Players</a>
@@ -20,6 +25,7 @@
     <a class="nav-link {% if request.url.path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
     <a class="nav-link {% if request.url.path == '/maintenance' %}active{% endif %}" href="/maintenance">Maintenance</a>
     <a class="nav-link {% if request.url.path == '/backups' %}active{% endif %}" href="/backups">Backups</a>
+    <a class="nav-link {% if request.url.path == '/customization' %}active{% endif %}" href="/customization">Customization</a>
   </div>
   <div class="nav-right">
     <span id="last-refresh"></span>
