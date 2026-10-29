@@ -1,7 +1,8 @@
 {% extends "base.html" %}
-{# Armory (spec 5). Minimal markup from Task 9; Task 10 adds the paper-doll, the tabs, armory.js
-   and the CSS. The route passes view/tooltips/trees/glyphs/stats/stats_note/dbc_missing and the
-   embedded blob (armory_data) for a loaded character; not_found (404) or error otherwise. #}
+{# Armory (spec 5): the search box, then either nothing (/armory), the character view
+   (/armory/<guid>, partials/armory_character.html), a 404 note or the DB error banner, and the
+   footer strip in both views. armory.js is referenced only here, and only with a character
+   loaded: it drives the tabs, the tooltips and the 3D model panel. No inline script. #}
 {% block main %}
 <div class="dashboard-content armory-page">
 
@@ -23,20 +24,7 @@
   {% endif %}
 
   {% if view %}
-  {% set h = view.header %}
-  <section class="armory-character" aria-labelledby="armory-name">
-    <header class="armory-header">
-      <h1 id="armory-name" class="armory-name" style="color: {{ h.class_color }}">{{ h.name }}</h1>
-      <p class="armory-subtitle">
-        <span>Level {{ h.level }} {{ h.race_name }} {{ h.class_name }}</span>
-        · <span style="color: {{ h.faction_color }}">{{ h.faction }}</span>
-        · {% if h.is_bot %}<span class="armory-bot">bot</span>{% else %}<span>{{ h.account }}</span>{% endif %}
-        · {% if h.online %}<span>Online</span>{% else %}<span>Last seen {{ h.logout_time|epoch_stamp }}</span>{% endif %}
-      </p>
-    </header>
-    <div id="armory-model" class="armory-model" data-guid="{{ h.guid }}" data-model-api="/api/armory/{{ h.guid }}/model"></div>
-    <script type="application/json" id="armory-data">{{ armory_data|tojson }}</script>
-  </section>
+  {% include "partials/armory_character.html" %}
   {% endif %}
 
   <div id="armory-footer" class="armory-footer" hx-get="/api/armory/footer" hx-trigger="load">
@@ -44,4 +32,5 @@
   </div>
 
 </div>
+{% if view %}<script src="/static/armory.js?v={{ armory_js_ver }}" defer></script>{% endif %}
 {% endblock %}

@@ -1,0 +1,155 @@
+{# Armory character view (spec 5), included by armory.html when a character is loaded.
+   Context (main._armory_character_context): view (CharacterView), tooltips {DB slot: Tooltip},
+   trees [per talent group: [TalentTree]], glyphs [per talent group: [GlyphRow]], stats
+   ([(label, value)] or None), stats_note ({"min_level": ...} when stats is None), armory_data
+   (the embedded blob). No inline script or event handler: armory.js attaches everything. #}
+{% set h = view.header %}
+{% set active = view.active_spec if view.active_spec in (0, 1) and trees|length == 2 else 0 %}
+{% macro icon(name, size=40) -%}
+{% if name %}<img class="armory-icon" data-armory-icon src="/armory/assets/icons/{{ name }}.jpg" alt="" width="{{ size }}" height="{{ size }}"{% if size < 40 %} loading="lazy"{% endif %}>{% else %}<span class="armory-icon armory-icon--empty" aria-hidden="true"></span>{% endif %}
+{%- endmacro %}
+{% macro doll_slot(n, label, tip) -%}
+{% if tip %}
+<button type="button" class="slot slot--filled" id="slot-{{ n }}" data-tip-slot="{{ n }}" aria-label="{{ label }}: {{ tip.name }}">
+  <span class="slot-icon" style="border-color: {{ tip.quality_color }}">{{ icon(tip.icon) }}</span>
+  <span class="slot-text">
+    <span class="slot-name" style="color: {{ tip.quality_color }}">{{ tip.name }}</span>
+    <span class="slot-label">{{ label }}</span>
+  </span>
+</button>
+{% else %}
+<div class="slot slot--empty" id="slot-{{ n }}">
+  <span class="slot-icon slot-icon--empty" aria-hidden="true"></span>
+  <span class="slot-text"><span class="slot-label">{{ label }}</span></span>
+</div>
+{% endif %}
+{%- endmacro %}
+{% macro spec_label(i, count, active) %}Spec {{ i + 1 }}{% if count == 2 and i == active %} (active){% endif %}{% endmacro %}
+<section class="armory-character" aria-labelledby="armory-name">
+  <header class="armory-header">
+    <h1 id="armory-name" class="armory-name" style="color: {{ h.class_color }}">{{ h.name }}</h1>
+    <p class="armory-subtitle">
+      <span>Level {{ h.level }} {{ h.race_name }} {{ h.class_name }}</span>
+      · <span style="color: {{ h.faction_color }}">{{ h.faction }}</span>
+      · {% if h.is_bot %}<span class="armory-bot">bot</span>{% else %}<span>{{ h.account }}</span>{% endif %}
+      · {% if h.online %}<span class="armory-online">Online</span>{% else %}<span>Last seen {{ h.logout_time|epoch_stamp }}</span>{% endif %}
+    </p>
+  </header>
+
+  <div class="armory-layout">
+    <div class="armory-model-col">
+      <div id="armory-model" class="armory-model" data-guid="{{ h.guid }}" data-model-api="/api/armory/{{ h.guid }}/model" data-state="loading">
+        <div class="armory-model-canvas"></div>
+        <div class="armory-model-msg" role="status">
+          <span class="armory-spinner" aria-hidden="true"></span>
+          <span class="armory-model-text">Fetching model…</span>
+        </div>
+        <p class="armory-model-note" hidden></p>
+      </div>
+      <label class="armory-sheath"><input type="checkbox" id="armory-sheath"> Sheathe weapons</label>
+    </div>
+
+    <div class="armory-doll-col">
+      <div class="paperdoll">
+        <div class="paperdoll-col paperdoll-left">
+          {% for n, label in [(0, "Head"), (1, "Neck"), (2, "Shoulder"), (14, "Back"), (4, "Chest"), (3, "Shirt"), (18, "Tabard"), (8, "Wrist")] %}
+          {{ doll_slot(n, label, tooltips.get(n)) }}
+          {% endfor %}
+        </div>
+        <div class="paperdoll-col paperdoll-right">
+          {% for n, label in [(9, "Hands"), (5, "Waist"), (6, "Legs"), (7, "Feet"), (10, "Finger"), (11, "Finger"), (12, "Trinket"), (13, "Trinket")] %}
+          {{ doll_slot(n, label, tooltips.get(n)) }}
+          {% endfor %}
+        </div>
+        <div class="paperdoll-bottom">
+          {% for n, label in [(15, "Main Hand"), (16, "Off Hand"), (17, "Ranged")] %}
+          {{ doll_slot(n, label, tooltips.get(n)) }}
+          {% endfor %}
+        </div>
+      </div>
+      <p class="armory-avg-ilvl">{% if view.avg_ilvl is not none %}Average item level: <b>{{ view.avg_ilvl }}</b>{% else %}Nothing equipped{% endif %}</p>
+    </div>
+  </div>
+
+  <div class="armory-tabs" role="tablist" aria-label="Talents, glyphs and stats">
+    <button type="button" class="armory-tab" role="tab" id="armory-tab-talents" aria-selected="true" aria-controls="armory-panel-talents" tabindex="0">Talents</button>
+    <button type="button" class="armory-tab" role="tab" id="armory-tab-glyphs" aria-selected="false" aria-controls="armory-panel-glyphs" tabindex="-1">Glyphs</button>
+    <button type="button" class="armory-tab" role="tab" id="armory-tab-stats" aria-selected="false" aria-controls="armory-panel-stats" tabindex="-1">Stats</button>
+  </div>
+
+  <div class="armory-tabpanel" role="tabpanel" id="armory-panel-talents" aria-labelledby="armory-tab-talents" tabindex="0">
+    {% if not trees or not trees[0] %}
+    <p class="armory-unavailable">Talent data is unavailable: the talent reference files (DBC) could not be read — see the footer.</p>
+    {% else %}
+    {% if trees|length == 2 %}
+    <div class="armory-subtabs" role="tablist" aria-label="Talent specs">
+      {% for i in range(2) %}
+      <button type="button" class="armory-subtab" role="tab" id="armory-spec-tab-{{ i }}" aria-selected="{{ 'true' if i == active else 'false' }}" aria-controls="armory-spec-{{ i }}" tabindex="{{ 0 if i == active else -1 }}">{{ spec_label(i, trees|length, active) }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% for spec in trees %}
+    {% set i = loop.index0 %}
+    <div class="talent-spec"{% if trees|length == 2 %} role="tabpanel" id="armory-spec-{{ i }}" aria-labelledby="armory-spec-tab-{{ i }}"{% if i != active %} hidden{% endif %}{% endif %}>
+      <p class="talent-summary"><b>{{ spec|map(attribute="points")|join(" / ") }}</b> <span>({{ spec|map(attribute="tab.name")|join(" / ") }})</span></p>
+      <div class="talent-trees">
+        {% for tree in spec %}
+        <div class="talent-tree-box">
+          <h2 class="talent-tree-title"><span>{{ tree.tab.name or ("Tree #" ~ tree.tab.id) }}</span> <span class="talent-tree-points">{{ tree.points }}</span></h2>
+          <div class="talent-tree">
+            {% for cell in tree.cells %}
+            {% set name = cell.spell.name if cell.spell and cell.spell.name else "Talent #" ~ cell.talent_id %}
+            <button type="button" class="talent{% if cell.rank == 0 %} talent--unlearned{% elif cell.rank == cell.max_rank %} talent--maxed{% endif %}"
+                    style="grid-row: {{ cell.tier + 1 }}; grid-column: {{ cell.column + 1 }}"
+                    aria-label="{{ name }}, rank {{ cell.rank }} of {{ cell.max_rank }}"
+                    data-tip-title="{{ name }}" data-tip-rank="Rank {{ cell.rank }}/{{ cell.max_rank }}" data-tip-desc="{{ cell.spell.description if cell.spell else '' }}">
+              {{ icon(cell.icon, 36) }}
+              <span class="talent-rank">{{ cell.rank }}/{{ cell.max_rank }}</span>
+            </button>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+
+  <div class="armory-tabpanel" role="tabpanel" id="armory-panel-glyphs" aria-labelledby="armory-tab-glyphs" tabindex="0" hidden>
+    <div class="glyph-specs">
+      {% for rows in glyphs %}
+      <div class="glyph-spec">
+        {% if glyphs|length == 2 %}<h2 class="glyph-spec-title">{{ spec_label(loop.index0, glyphs|length, active) }}</h2>{% endif %}
+        {% for title, major in [("Major glyphs", true), ("Minor glyphs", false)] %}
+        <h3 class="glyph-group-title">{{ title }}</h3>
+        <ul class="glyph-list">
+          {% for g in rows if g.major == major %}
+          <li class="glyph{% if not g.name %} glyph--empty{% endif %}">
+            <span class="glyph-icon">{{ icon(g.icon, 32) }}</span>
+            <span class="glyph-name">{{ g.name or "Empty socket" }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="armory-tabpanel" role="tabpanel" id="armory-panel-stats" aria-labelledby="armory-tab-stats" tabindex="0" hidden>
+    {% if stats is none %}
+    <p class="armory-stats-note">No stats saved for this character yet. Stats are written at logout and need <code>PlayerSave.Stats.MinLevel</code> ≥ 1 (<a href="/settings">Settings</a> → search <code>PlayerSave.Stats</code>). Current value: {{ stats_note.min_level if stats_note else "unset" }}.</p>
+    {% else %}
+    <p class="armory-stats-asof">Saved stats, as of last logout ({{ h.logout_time|epoch_stamp }})</p>
+    <dl class="armory-stats">
+      {% for label, value in stats %}
+      <div class="armory-stat"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+      {% endfor %}
+    </dl>
+    {% endif %}
+  </div>
+
+  <div id="armory-tooltip" class="armory-tooltip" role="tooltip" hidden></div>
+  <script type="application/json" id="armory-data">{{ armory_data|tojson }}</script>
+</section>

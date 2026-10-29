@@ -216,6 +216,7 @@ templates.env.globals["css_ver"] = _file_hash("app.css")
 templates.env.globals["js_ver"] = _file_hash("settings.js")
 templates.env.globals["backups_js_ver"] = _file_hash("backups.js")
 templates.env.globals["stats_js_ver"] = _file_hash("stats.js")
+templates.env.globals["armory_js_ver"] = _file_hash("armory.js")
 templates.env.globals["last_online"] = wow_ref.relative_last_online
 templates.env.globals["branding"] = lambda: customization_svc.store_from_env().branding()
 

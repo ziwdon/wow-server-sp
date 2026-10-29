@@ -1,10 +1,11 @@
 {# Armory footer strip: the inner content of #armory-footer. Every /api/armory/footer|settings|
    cache/clear|viewer/* route answers 200 with this fragment; htmx swaps it into #armory-footer.
-   Nothing here touches the AC stack. #}
+   Nothing here touches the AC stack. data-viewer-enabled lets armory.js reload the model panel
+   when the switch changes. #}
 {% if error %}<p class="armory-footer-msg armory-footer-error" role="alert">{{ error }}</p>{% endif %}
 {% if notice %}<p class="armory-footer-msg armory-footer-ok" role="status">{{ notice }}</p>{% endif %}
 {% if status %}
-<div class="armory-footer-row">
+<div class="armory-footer-row" data-viewer-enabled="{{ 1 if status.enabled else 0 }}">
   <form class="armory-footer-item" hx-post="/api/armory/settings" hx-target="#armory-footer">
     <span>3D viewer: {{ "On" if status.enabled else "Off" }}</span>
     <input type="hidden" name="enabled" value="{{ 'off' if status.enabled else 'on' }}">
