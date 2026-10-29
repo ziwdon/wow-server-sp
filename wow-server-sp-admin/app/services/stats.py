@@ -251,7 +251,7 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
             pool_rows = cur.fetchall()
 
             cur.execute(
-                "SELECT c.name, c.class, c.race, c.level, ROUND(AVG(it.ItemLevel)) AS avg_ilvl "
+                "SELECT c.name, c.class, c.race, c.level, ROUND(AVG(it.ItemLevel)) AS avg_ilvl, c.guid "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 "LEFT JOIN acore_playerbots.playerbots_account_type pat ON pat.account_id = c.account "
@@ -267,7 +267,7 @@ def collect_stats(*, host: str, port: int, user: str, password: str) -> StatsSna
             top_pve_rows = cur.fetchall()
 
             cur.execute(
-                "SELECT c.name, c.class, c.race, c.totalKills, c.totalHonorPoints "
+                "SELECT c.name, c.class, c.race, c.totalKills, c.totalHonorPoints, c.guid "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 "LEFT JOIN acore_playerbots.playerbots_account_type pat ON pat.account_id = c.account "

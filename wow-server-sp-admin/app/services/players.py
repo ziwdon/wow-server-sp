@@ -54,6 +54,7 @@ class CharRow:
     zone_name: str
     latency: int
     last_logout: int  # unix ts of last logout; 0 = never logged in
+    guid: int  # characters.guid (c.guid), the /armory/<guid> link target
     online_now: bool = False  # confirmed human session (set by apply_presence)
 
 
@@ -74,6 +75,7 @@ class RankRow:
     faction_color: str
     level: int
     avg_ilvl: int | None  # None → render "—" (no equipped-gear data)
+    guid: int  # characters.guid (c.guid), the /armory/<guid> link target
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,7 @@ class PvpRankRow:
     faction_color: str
     honor_kills: int
     honor: int
+    guid: int  # characters.guid (c.guid), the /armory/<guid> link target
 
 
 @dataclass(frozen=True)
@@ -104,8 +107,8 @@ class PlayersSnapshot:
 
 
 def char_row(row) -> CharRow:
-    """Map a roster row: (username, name, class_id, race_id, level, online, zone_id, latency, logout_time)."""
-    username, name, class_id, race_id, level, online, zone_id, latency, logout_time = row
+    """Map a roster row: (username, name, class_id, race_id, level, online, zone_id, latency, logout_time, guid)."""
+    username, name, class_id, race_id, level, online, zone_id, latency, logout_time, guid = row
     cls = wr.class_name(int(class_id))
     fac = wr.faction(int(race_id))
     return CharRow(
@@ -121,6 +124,7 @@ def char_row(row) -> CharRow:
         zone_name=wr.zone_name(int(zone_id)),
         latency=int(latency or 0),
         last_logout=int(logout_time or 0),
+        guid=int(guid),
     )
 
 
@@ -181,9 +185,9 @@ def group_by_account(chars: list[CharRow]) -> tuple[AccountGroup, ...]:
 
 
 def rank_rows(rows) -> tuple[RankRow, ...]:
-    """Map pre-ordered top rows (name, class_id, race_id, level, avg_ilvl) → RankRow."""
+    """Map pre-ordered top rows (name, class_id, race_id, level, avg_ilvl, guid) → RankRow."""
     out: list[RankRow] = []
-    for i, (name, class_id, race_id, level, avg_ilvl) in enumerate(rows, start=1):
+    for i, (name, class_id, race_id, level, avg_ilvl, guid) in enumerate(rows, start=1):
         cls = wr.class_name(int(class_id))
         fac = wr.faction(int(race_id))
         out.append(
@@ -197,15 +201,16 @@ def rank_rows(rows) -> tuple[RankRow, ...]:
                 faction_color=wr.faction_color(fac),
                 level=int(level),
                 avg_ilvl=None if avg_ilvl is None else int(avg_ilvl),
+                guid=int(guid),
             )
         )
     return tuple(out)
 
 
 def pvp_rank_rows(rows) -> tuple[PvpRankRow, ...]:
-    """Map pre-ordered PvP rows (name, class_id, race_id, kills, honor)."""
+    """Map pre-ordered PvP rows (name, class_id, race_id, kills, honor, guid)."""
     out: list[PvpRankRow] = []
-    for i, (name, class_id, race_id, honor_kills, honor) in enumerate(rows, start=1):
+    for i, (name, class_id, race_id, honor_kills, honor, guid) in enumerate(rows, start=1):
         cls = wr.class_name(int(class_id))
         fac = wr.faction(int(race_id))
         out.append(
@@ -219,6 +224,7 @@ def pvp_rank_rows(rows) -> tuple[PvpRankRow, ...]:
                 faction_color=wr.faction_color(fac),
                 honor_kills=int(honor_kills or 0),
                 honor=int(honor or 0),
+                guid=int(guid),
             )
         )
     return tuple(out)
@@ -239,7 +245,7 @@ def collect_players(
         with conn.cursor() as cur:
             # 1. Roster — drives online_now + all_groups.
             cur.execute(
-                "SELECT a.username, c.name, c.class, c.race, c.level, c.online, c.zone, c.latency, c.logout_time "
+                "SELECT a.username, c.name, c.class, c.race, c.level, c.online, c.zone, c.latency, c.logout_time, c.guid "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 f"WHERE {_REAL} "
@@ -260,7 +266,7 @@ def collect_players(
 
             # 3. Top PvE by level, then gear (avg equipped item level), then name.
             cur.execute(
-                "SELECT c.name, c.class, c.race, c.level, ROUND(AVG(it.ItemLevel)) AS avg_ilvl "
+                "SELECT c.name, c.class, c.race, c.level, ROUND(AVG(it.ItemLevel)) AS avg_ilvl, c.guid "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 "LEFT JOIN acore_characters.character_inventory ci "
@@ -276,7 +282,7 @@ def collect_players(
 
             # 4. Top PvP by lifetime honor kills, then current honor, then name.
             cur.execute(
-                "SELECT c.name, c.class, c.race, c.totalKills, c.totalHonorPoints "
+                "SELECT c.name, c.class, c.race, c.totalKills, c.totalHonorPoints, c.guid "
                 "FROM acore_characters.characters c "
                 "JOIN acore_auth.account a ON a.id = c.account "
                 f"WHERE {_REAL} "

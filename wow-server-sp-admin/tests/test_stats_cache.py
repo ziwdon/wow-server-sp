@@ -33,8 +33,8 @@ def _snap(fetched_at: float) -> StatsSnapshot:
         bots_by_bracket_stacked=[
             StackedBucket("1-10", 450, (StackedSegment("#88c870", 100), StackedSegment("#888070", 300), StackedSegment("#7ab0e0", 50))),
         ],
-        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 80, 251),),
-        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", "Horde", "#C03030", 99, 1200),),
+        top_pve=(RankRow(1, "Sariel", "Druid", "#FF7C0A", "Night Elf", "Alliance", "#4080C0", 80, 251, 2506),),
+        top_pvp=(PvpRankRow(1, "Rndslayer", "Hunter", "#AAD372", "Orc", "Horde", "#C03030", 99, 1200, 9002),),
     )
 
 
@@ -53,7 +53,24 @@ def test_json_round_trip(tmp_path):
     assert got.top_pve[0].avg_ilvl == 251
     assert got.top_pvp[0].name == "Rndslayer"
     assert got.top_pvp[0].honor_kills == 99
+    assert got.top_pve[0].guid == 2506
+    assert got.top_pvp[0].guid == 9002
     assert got.fetched_at == 123.0
+
+
+def test_cache_written_before_rank_rows_had_a_guid_is_discarded_and_refreshed(tmp_path):
+    """No guid is made up for an old cache: it is dropped, so the page's stale check refreshes."""
+    path = tmp_path / "stats" / "snap.json"
+    stats_cache.StatsRefresher(cache_path=path)._store(_snap(time.time()))
+    raw = json.loads(path.read_text())
+    for row in raw["top_pve"] + raw["top_pvp"]:
+        del row["guid"]
+    path.write_text(json.dumps(raw))
+
+    r = stats_cache.StatsRefresher(cache_path=path)
+    r.load_from_disk()
+    assert r.get() is None
+    assert r.is_stale() is True
 
 
 def test_atomic_write_leaves_no_tmp(tmp_path):

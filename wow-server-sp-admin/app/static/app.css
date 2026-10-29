@@ -1888,6 +1888,8 @@ button.slot:focus-visible { background: var(--yellow-bg); outline: none; }
 /* Character names elsewhere (Players page) that link here: no visible change but on hover. */
 .char-link { color: inherit; text-decoration: none; }
 .char-link:hover { text-decoration: underline; cursor: pointer; }
+/* A linked Players-page name cell is the <a> grid item: clip it like the .player-row > span cells. */
+.player-row > .char-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .armory-spinner { animation-duration: 3s; }

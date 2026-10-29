@@ -94,13 +94,13 @@ def test_collect_stats_builds_snapshot(mock_connect):
         [(1, 3), (2, 0)],  # faction players
         [(1, 1500, 170), (2, 0, 500)],  # pool breakdown (account_type, online, offline)
         [
-            ("Sariel", 11, 4, 80, 251),
-            ("Rndchamp", 1, 1, 80, 232),
-        ],  # top PvE
+            ("Sariel", 11, 4, 80, 251, 2506),
+            ("Rndchamp", 1, 1, 80, 232, 9001),
+        ],  # top PvE (… avg_ilvl, guid)
         [
-            ("Rndslayer", 3, 2, 99, 1200),
-            ("Pitocas", 3, 3, 42, 1500),
-        ],  # top PvP
+            ("Rndslayer", 3, 2, 99, 1200, 9002),
+            ("Pitocas", 3, 3, 42, 1500, 44),
+        ],  # top PvP (… honor, guid)
     ]
     conn = mock_connect.return_value
     conn.cursor.return_value.__enter__.return_value = cur
@@ -131,8 +131,14 @@ def test_collect_stats_builds_snapshot(mock_connect):
     assert snap.top_pvp[0].rank == 1
     assert snap.top_pvp[0].honor_kills == 99
     assert snap.top_pvp[1].honor == 1500
+    # The ranking rows share players.rank_rows/pvp_rank_rows, so they carry c.guid too.
+    assert [r.guid for r in snap.top_pve] == [2506, 9001]
+    assert [r.guid for r in snap.top_pvp] == [9002, 44]
 
     executed_sql = " ".join(call.args[0] for call in cur.execute.call_args_list)
+    assert "AS avg_ilvl, c.guid FROM" in executed_sql
+    assert "GROUP BY c.guid, c.name, c.class, c.race, c.level " in executed_sql
+    assert "c.totalHonorPoints, c.guid FROM" in executed_sql
     assert "pat.account_type = 1" in executed_sql
     assert "c.online = 1" in executed_sql
     assert "ORDER BY c.level DESC, avg_ilvl DESC, c.name ASC LIMIT 5" in executed_sql
