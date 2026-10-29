@@ -20,6 +20,18 @@ services:
     # container's first docker SDK call dies with PermissionError(13).
     group_add:
       - "${DOCKER_GID:-999}"
+      # /dev/tpmrm0 is tss:tss 0660 on the host; the Cloud backup vault seals
+      # its GPG passphrase to the TPM. TSS_GID is resolved by scripts/tpm-env.sh
+      # (install writes it, redeploy appends it to an existing .env).
+      - "${TSS_GID:-1000}"
+    # Host TPM for the Cloud backup vault. Hosts without one map /dev/null so
+    # this one file stays valid everywhere; whether a TPM really works is
+    # decided by a functional probe in the container, not by this mapping.
+    devices:
+      - "${TPM_DEVICE:-/dev/null}:/dev/tpmrm0"
+    # PID 1 reaper: gpg-agent daemons are killed after each vault unlock and
+    # reparented to PID 1 (uvicorn), which never reaps them -> zombies.
+    init: true
     ports:
       - "${TAILSCALE_IP}:${ADMIN_PORT:-8765}:8000"
       # Optional LAN bind (LAN_IP in .env). Unset falls back to loopback --
