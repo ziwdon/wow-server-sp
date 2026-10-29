@@ -1488,7 +1488,8 @@ pre.logview {
 /* The Armory page (spec 5): search, character header, 3D model panel + paper-doll, the
    Talents / Glyphs / Stats tabs, the tooltip and the footer strip. Item-quality, class and
    faction colours arrive as inline styles (wow_reference); everything else uses :root tokens.
-   Layout is two columns above 768px and stacked below (the mobile block at the end). */
+   The paper-doll card is left slots | 3D model | right slots above 768px; below it the model
+   comes first and the two slot columns sit side by side under it (the mobile block at the end). */
 .armory-page { overflow-y: auto; }
 .armory-page > * { flex-shrink: 0; }
 .armory-page [hidden],
@@ -1537,21 +1538,32 @@ pre.logview {
 }
 .armory-not-found { text-align: left; padding-left: 0; }
 
-/* Character header */
-.armory-character { display: flex; flex-direction: column; gap: 1rem; }
+/* Character header. The section stops at 1360px (what a 1400px window gives it) so that on a
+   wider screen the paper-doll card, whose content is at most ~1150px, does not grow empty
+   margins; it stays left-aligned like the search box. */
+.armory-character { display: flex; flex-direction: column; gap: 1rem; width: 100%; max-width: 1360px; }
 .armory-header { display: flex; flex-direction: column; gap: 0.2rem; }
 .armory-name { font-size: 1.6rem; font-weight: 700; letter-spacing: 0.02em; }
 .armory-subtitle { font-size: 0.88rem; color: var(--text-warm); }
 .armory-online { color: var(--green); }
 
-/* Model panel | paper-doll */
-.armory-layout {
+/* Paper-doll card: left slots | 3D model | right slots, then the weapon row and the foot
+   (sheath toggle, average item level) under all three. The model column grows with the
+   viewport up to 420px; the slot columns are capped at 340px and the three are centred, so a
+   wide screen gets margins at the card's edges instead of gaps between names and model. Each
+   slot column spreads its eight slots over the model's height, like the game's character frame. */
+.paperdoll {
   display: grid;
-  grid-template-columns: minmax(260px, 400px) minmax(0, 1fr);
-  gap: 1.25rem;
-  align-items: start;
+  grid-template-columns: minmax(0, 340px) clamp(240px, 30vw, 420px) minmax(0, 340px);
+  grid-template-areas: "left model right" "bottom bottom bottom" "foot foot foot";
+  justify-content: center;
+  gap: 0.75rem 1.5rem;
+  padding: 0.75rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
 }
-.armory-model-col { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.paperdoll > .armory-model { grid-area: model; align-self: center; }
 .armory-model {
   position: relative;
   width: 100%;
@@ -1599,6 +1611,14 @@ pre.logview {
   background: var(--sidebar-bg);
   border-top: 1px solid var(--border);
 }
+.paperdoll-foot {
+  grid-area: foot;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem 2rem;
+}
 .armory-sheath {
   display: inline-flex;
   align-items: center;
@@ -1609,25 +1629,21 @@ pre.logview {
 }
 .armory-sheath input { accent-color: var(--gold); }
 
-.armory-doll-col { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
-.paperdoll {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  grid-template-areas: "left right" "bottom bottom";
-  gap: 0.75rem 1.25rem;
-  padding: 0.75rem;
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+.paperdoll-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.35rem;
+  min-width: 0;
 }
-.paperdoll-col { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
 .paperdoll-left { grid-area: left; }
 .paperdoll-right { grid-area: right; }
 .paperdoll-bottom {
   grid-area: bottom;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.5rem;
+  grid-template-columns: repeat(3, minmax(0, 220px));
+  justify-content: center;
+  gap: 0.5rem 1rem;
   padding-top: 0.6rem;
   border-top: 1px solid var(--border-dark);
 }
@@ -1902,10 +1918,13 @@ button.slot:focus-visible { background: var(--yellow-bg); outline: none; }
   .armory-page { overflow: visible; }
   .armory-search { max-width: none; }
   .armory-name { font-size: 1.3rem; }
-  .armory-layout { grid-template-columns: 1fr; }
-  .armory-model { max-width: 420px; margin: 0 auto; }
-  .armory-sheath { align-self: center; }
-  .paperdoll { gap: 0.5rem 0.75rem; padding: 0.5rem; }
+  .paperdoll {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas: "model model" "left right" "bottom bottom" "foot foot";
+    gap: 0.5rem 0.75rem;
+    padding: 0.5rem;
+  }
+  .paperdoll > .armory-model { max-width: 420px; margin: 0 auto 0.25rem; }
   .slot-icon { width: 36px; height: 36px; }
   .talent-trees { grid-template-columns: 1fr; }
   .armory-tab { padding: 0.45rem 0.8rem; }

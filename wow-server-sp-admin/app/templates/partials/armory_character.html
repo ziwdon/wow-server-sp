@@ -36,37 +36,35 @@
     </p>
   </header>
 
-  <div class="armory-layout">
-    <div class="armory-model-col">
-      <div id="armory-model" class="armory-model" data-guid="{{ h.guid }}" data-model-api="/api/armory/{{ h.guid }}/model" data-state="loading">
-        <div class="armory-model-canvas"></div>
-        <div class="armory-model-msg" role="status">
-          <span class="armory-spinner" aria-hidden="true"></span>
-          <span class="armory-model-text">Fetching model…</span>
-        </div>
-        <p class="armory-model-note" hidden></p>
-      </div>
-      <label class="armory-sheath"><input type="checkbox" id="armory-sheath"> Sheathe weapons</label>
+  {# One card, the traditional paper-doll: left slots | 3D model | right slots, the weapon row
+     under all three, then the sheath toggle and the average item level. On a phone the CSS
+     puts the model first (grid areas), so the DOM keeps the columns' reading order. #}
+  <div class="paperdoll">
+    <div class="paperdoll-col paperdoll-left">
+      {% for n, label in [(0, "Head"), (1, "Neck"), (2, "Shoulder"), (14, "Back"), (4, "Chest"), (3, "Shirt"), (18, "Tabard"), (8, "Wrist")] %}
+      {{ doll_slot(n, label, tooltips.get(n)) }}
+      {% endfor %}
     </div>
-
-    <div class="armory-doll-col">
-      <div class="paperdoll">
-        <div class="paperdoll-col paperdoll-left">
-          {% for n, label in [(0, "Head"), (1, "Neck"), (2, "Shoulder"), (14, "Back"), (4, "Chest"), (3, "Shirt"), (18, "Tabard"), (8, "Wrist")] %}
-          {{ doll_slot(n, label, tooltips.get(n)) }}
-          {% endfor %}
-        </div>
-        <div class="paperdoll-col paperdoll-right">
-          {% for n, label in [(9, "Hands"), (5, "Waist"), (6, "Legs"), (7, "Feet"), (10, "Finger"), (11, "Finger"), (12, "Trinket"), (13, "Trinket")] %}
-          {{ doll_slot(n, label, tooltips.get(n)) }}
-          {% endfor %}
-        </div>
-        <div class="paperdoll-bottom">
-          {% for n, label in [(15, "Main Hand"), (16, "Off Hand"), (17, "Ranged")] %}
-          {{ doll_slot(n, label, tooltips.get(n)) }}
-          {% endfor %}
-        </div>
+    <div id="armory-model" class="armory-model" data-guid="{{ h.guid }}" data-model-api="/api/armory/{{ h.guid }}/model" data-state="loading">
+      <div class="armory-model-canvas"></div>
+      <div class="armory-model-msg" role="status">
+        <span class="armory-spinner" aria-hidden="true"></span>
+        <span class="armory-model-text">Fetching model…</span>
       </div>
+      <p class="armory-model-note" hidden></p>
+    </div>
+    <div class="paperdoll-col paperdoll-right">
+      {% for n, label in [(9, "Hands"), (5, "Waist"), (6, "Legs"), (7, "Feet"), (10, "Finger"), (11, "Finger"), (12, "Trinket"), (13, "Trinket")] %}
+      {{ doll_slot(n, label, tooltips.get(n)) }}
+      {% endfor %}
+    </div>
+    <div class="paperdoll-bottom">
+      {% for n, label in [(15, "Main Hand"), (16, "Off Hand"), (17, "Ranged")] %}
+      {{ doll_slot(n, label, tooltips.get(n)) }}
+      {% endfor %}
+    </div>
+    <div class="paperdoll-foot">
+      <label class="armory-sheath"><input type="checkbox" id="armory-sheath"> Sheathe weapons</label>
       <p class="armory-avg-ilvl">{% if view.avg_ilvl is not none %}Average item level: <b>{{ view.avg_ilvl }}</b>{% else %}Nothing equipped{% endif %}</p>
     </div>
   </div>

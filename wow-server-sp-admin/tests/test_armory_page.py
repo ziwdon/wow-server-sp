@@ -270,6 +270,44 @@ def test_paperdoll_slot_order_matches_spec(tmp_path, monkeypatch):
         assert ids == [f"slot-{n}" for n in slots], cls
 
 
+def _element_children(node: Node) -> list[Node]:
+    return [c for c in node.children if isinstance(c, Node)]
+
+
+def test_model_panel_sits_in_the_paperdoll_between_the_slot_columns(tmp_path, monkeypatch):
+    # One card, the traditional paper-doll: left slots | 3D model | right slots, the weapon row
+    # under all three, then the sheath toggle and the average item level (owner request).
+    html, doc = _page(tmp_path, monkeypatch)
+
+    dolls = doc.find_all(cls="paperdoll")
+    assert len(dolls) == 1
+    doll = dolls[0]
+    model = doc.by_id("armory-model")
+    assert model.parent is doll  # a grid item of the card itself
+    kinds = []
+    for child in _element_children(doll):
+        if child is model:
+            kinds.append("model")
+        else:
+            kinds.append(next(c for c in ("paperdoll-left", "paperdoll-right", "paperdoll-bottom",
+                                          "paperdoll-foot") if c in child.classes()))
+    assert kinds == ["paperdoll-left", "model", "paperdoll-right", "paperdoll-bottom", "paperdoll-foot"]
+
+    foot = doll.find(cls="paperdoll-foot")
+    sheath = doc.by_id("armory-sheath")
+    ilvl = foot.find(cls="armory-avg-ilvl")
+    assert sheath.parent.parent is foot and ilvl is not None
+    assert foot.children.index(sheath.parent) < foot.children.index(ilvl)
+    assert ilvl.norm() == "Average item level: 60"
+
+    # The tab strip still follows the card.
+    section = doc.find(tag="section", cls="armory-character")
+    top = _element_children(section)
+    holder = next(c for c in top if c is doll or doll in c.iter())
+    assert top.index(holder) < top.index(section.find(cls="armory-tabs"))
+    assert not doc.find_all(cls="armory-layout")  # the old two-column wrapper is gone
+
+
 def test_icons_only_for_non_empty_icon_names(tmp_path, monkeypatch):
     html, doc = _page(tmp_path, monkeypatch)
 
@@ -453,7 +491,7 @@ def test_armory_js_and_css_loaded_only_on_armory_pages(tmp_path, monkeypatch):
 
     css = _armory_css()
     before = STYLESHEET.read_text().split("/* Armory */", 1)[0]
-    for selector in (".armory-layout", ".paperdoll", ".slot", ".no-3d", ".talent-tree",
+    for selector in (".paperdoll-foot", ".paperdoll", ".slot", ".no-3d", ".talent-tree",
                      ".talent--unlearned", ".armory-tooltip", ".armory-footer", ".char-link"):
         assert selector in css, selector
         assert not re.search(re.escape(selector) + r"[\s,{:.\[]", before), f"{selector} outside the Armory section"
@@ -465,13 +503,38 @@ def test_armory_js_and_css_loaded_only_on_armory_pages(tmp_path, monkeypatch):
         assert media.strip() in ("@media (max-width: 768px)", "@media (prefers-reduced-motion: reduce)"), media
 
 
-def test_armory_layout_is_two_columns_on_desktop_and_stacked_on_phone():
-    css = _armory_css()
+def _rule(css: str, selector: str) -> str:
+    match = re.search(r"(?m)^\s*" + re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert match, f"no {selector} rule"
+    return match.group(1)
 
+
+def _areas(block: str) -> list[list[str]]:
+    match = re.search(r"grid-template-areas:\s*((?:\"[^\"]*\"\s*)+);", block)
+    assert match, "no grid-template-areas"
+    return [row.split() for row in re.findall(r"\"([^\"]*)\"", match.group(1))]
+
+
+def test_paperdoll_is_slots_model_slots_on_desktop_and_model_first_on_phone():
+    css = _armory_css()
     desktop = css.split("@media", 1)[0]
-    assert re.search(r"\.armory-layout\s*\{[^}]*grid-template-columns:\s*minmax\(", desktop)
     phone = css[css.index("@media (max-width: 768px)"):]
-    assert re.search(r"\.armory-layout\s*\{[^}]*grid-template-columns:\s*1fr", phone)
+
+    # Desktop: three columns, the model in the middle; weapons and the foot span all three.
+    doll = _rule(desktop, ".paperdoll")
+    tracks = re.search(r"grid-template-columns:\s*([^;]+);", doll).group(1)
+    assert len(re.findall(r"minmax\([^)]*\)|clamp\([^)]*\)|[\d.]+fr|[\d.]+px", tracks)) == 3, tracks
+    assert _areas(doll) == [["left", "model", "right"], ["bottom"] * 3, ["foot"] * 3]
+    assert "grid-area: model" in _rule(desktop, ".paperdoll > .armory-model")
+    assert "grid-area: foot" in _rule(desktop, ".paperdoll-foot")
+    assert ".armory-layout" not in css and ".armory-model-col" not in css and ".armory-doll-col" not in css
+    # A wide screen does not stretch the card into empty margins: the section has a cap.
+    assert re.search(r"max-width:\s*\d+px", _rule(desktop, ".armory-character"))
+
+    # Phone: the model first at full width, then the two slot columns side by side, weapons, foot.
+    doll = _rule(phone, ".paperdoll")
+    assert re.search(r"grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)", doll)
+    assert _areas(doll) == [["model", "model"], ["left", "right"], ["bottom", "bottom"], ["foot", "foot"]]
     assert re.search(r"\.talent-trees\s*\{[^}]*grid-template-columns:\s*1fr", phone)
 
 
