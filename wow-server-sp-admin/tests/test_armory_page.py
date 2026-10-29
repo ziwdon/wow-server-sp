@@ -250,7 +250,11 @@ def test_character_page_has_model_panel_paperdoll_tabs_and_blob(tmp_path, monkey
     assert blob["itemsBySlot"]["0"]["icon"] == "inv_100"
 
     scripts = [s.attrs.get("src", "") for s in doc.find_all(tag="script")]
-    assert any(src.startswith("/static/armory.js?v=") for src in scripts)
+    armory = next(i for i, src in enumerate(scripts) if src.startswith("/static/armory.js?v="))
+    # The viewer needs jQuery (Task 13's browser run); both deferred, so jQuery runs first.
+    assert scripts.index("/static/jquery.min.js") < armory
+    tags = {s.attrs.get("src"): s for s in doc.find_all(tag="script") if s.attrs.get("src")}
+    assert "defer" in tags["/static/jquery.min.js"].attrs
 
 
 def test_paperdoll_slot_order_matches_spec(tmp_path, monkeypatch):
@@ -436,11 +440,12 @@ def test_character_header_and_doll_carry_no_inline_handlers(tmp_path, monkeypatc
 
 def test_armory_js_and_css_loaded_only_on_armory_pages(tmp_path, monkeypatch):
     html, doc = _page(tmp_path, monkeypatch)
-    assert "/static/armory.js" in html
+    assert "/static/armory.js" in html and "/static/jquery.min.js" in html
     client = _client(tmp_path, monkeypatch)
-    for page in ("/", "/players", "/stats", "/settings", "/backups"):
+    for page in ("/", "/players", "/stats", "/settings", "/backups", "/armory"):
         body = client.get(page).text
         assert "armory.js" not in body, page
+        assert "jquery.min.js" not in body, page  # only with a character (and its viewer)
 
     resp = client.get("/static/armory.js")
     assert resp.status_code == 200
@@ -477,7 +482,12 @@ def test_armory_js_bootstraps_the_viewer_like_the_spike():
     assert "'/armory/assets/live/viewer/viewer.min.js'" in script
     assert "'/armory/assets/wrath/'" in script
     assert "zamimg" not in script and "wowhead.com" not in script
-    assert "jquery.min.js" not in script  # Task 13 settles whether the viewer needs it
+    # The viewer needs jQuery (Task 13): a jQuery container, no plain-element fallback, and a
+    # clear "did not load" message instead of the viewer's own load-time error.
+    assert "container: window.jQuery(box)" in script
+    assert "window.jQuery ?" not in script
+    assert "'/static/jquery.min.js'" in script and "if (!window.jQuery)" in script
+    assert "htmlPrefilter" in script
     # The WH shim the viewer expects (spike page.html / the package's setup.js).
     for needle in ("defaultAnimation: 'Stand'", "getImageExtension", "INVENTORY_TYPE_HEAD: 1",
                    "INVENTORY_TYPE_SHOULDERS: 3", "INVENTORY_TYPE_CHEST: 5", "INVENTORY_TYPE_ROBE: 20",
@@ -497,6 +507,30 @@ def test_armory_js_bootstraps_the_viewer_like_the_spike():
     assert "no-3d" in script and "unresolved" in script and "pending" in script
     # No HTML injection from data: text goes through textContent.
     assert "innerHTML" not in script and "insertAdjacentHTML" not in script
+
+
+def _foreign_link_rule() -> re.Pattern[str]:
+    """armory.js's FOREIGN_LINK regex literal, as a Python pattern (same syntax subset)."""
+    match = re.search(r"const FOREIGN_LINK = /(.+)/([a-z]*);", SCRIPT.read_text())
+    assert match, "FOREIGN_LINK not found in armory.js"
+    assert set(match.group(2)) == {"g", "i"}
+    return re.compile(match.group(1).replace("\\/", "/"), re.I)
+
+
+def test_armory_js_drops_the_viewers_foreign_stylesheet_link_only():
+    rule = _foreign_link_rule()
+    # The exact string the live viewer appends through $("head").append(...) (Task 13).
+    viewer_link = '<link rel="stylesheet" href="//wow.zamimg.com/modelviewer/viewer/viewer.css" type="text/css" />'
+    assert rule.sub("", viewer_link) == ""
+    for foreign in ('<link rel="stylesheet" href="https://example.com/x.css">',
+                    "<LINK href='http://example.com/a.css' rel=stylesheet>",
+                    "<link rel=stylesheet href=//cdn.example/x.css>"):
+        assert rule.sub("", foreign) == "", foreign
+    kept = ['<link rel="stylesheet" href="/static/app.css">', '<div class="x"></div>',
+            '<a href="//example.com/">x</a>', '<img src="//example.com/i.png">']
+    for html in kept:
+        assert rule.sub("", html) == html, html
+    assert rule.sub("", "<div></div>" + viewer_link + "<span></span>") == "<div></div><span></span>"
 
 
 # --- footer strip ---

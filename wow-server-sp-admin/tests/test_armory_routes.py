@@ -37,8 +37,10 @@ WAIT = 5.0
 GUID = 2506
 CUSTOMIZATION_PATH = "wrath/meta/charactercustomization/11.json"  # Tauren male: 6 * 2 - 1 + 0
 
-# The brief's initial policy (Task 13 trims it empirically); only these sources may appear.
-ALLOWED_CSP_SOURCES = {"'self'", "'unsafe-inline'", "'unsafe-eval'", "data:", "blob:"}
+# The policy Task 13 pinned in a real browser run (main.ARMORY_CSP's comment says why each
+# source is there); only these sources may appear, plus sha256 hashes of inline scripts.
+ALLOWED_CSP_SOURCES = {"'self'", "'unsafe-inline'", "blob:"}
+CSP_HASH = re.compile(r"'sha256-[A-Za-z0-9+/]{43}='")
 
 
 @pytest.fixture(autouse=True)
@@ -992,11 +994,44 @@ def test_csp_header_on_armory_paths_only_and_names_no_third_party_origin(tmp_pat
         assert "content-security-policy" not in resp.headers, resp.request.url
     sources = _csp_sources(policy)
     assert sources["default-src"] == ["'self'"]
-    assert sources["connect-src"] == ["'self'"]
+    # Exactly what the run needed; connect, fonts, workers, media... fall back to 'self'.
+    assert set(sources) == {"default-src", "script-src", "style-src", "img-src"}
+    assert sources["style-src"] == ["'self'", "'unsafe-inline'"]
+    assert sources["img-src"] == ["'self'", "blob:"]
+    assert sources["script-src"][0] == "'self'" and len(sources["script-src"]) > 1
     for directive, values in sources.items():
         for value in values:
-            assert value in ALLOWED_CSP_SOURCES, (directive, value)  # no host, no https:, no *
+            # no host, no https:, no *
+            assert value in ALLOWED_CSP_SOURCES or CSP_HASH.fullmatch(value), (directive, value)
+    assert "'unsafe-inline'" not in sources["script-src"]
     assert "http" not in policy and "*" not in policy and "//" not in policy
+    assert "unsafe-eval" not in policy and "data:" not in policy
+
+
+def test_csp_script_hashes_are_exactly_the_pages_inline_scripts(tmp_path, monkeypatch):
+    """script-src's hashes are the rendered pages' inline <script>s (base.html's): editing that
+    script without a new hash would silently block it on the armory pages only."""
+    import base64
+    import hashlib
+
+    client = _client(tmp_path, monkeypatch)
+    _proxy(tmp_path, monkeypatch)
+    _collect(monkeypatch, _view())
+
+    policy = client.get("/armory").headers["content-security-policy"]
+    allowed = set(_csp_sources(policy)["script-src"][1:])
+    for url in ("/armory", f"/armory/{GUID}"):
+        html = client.get(url).text
+        inline = [
+            body for attrs, body in re.findall(r"<script\b([^>]*)>(.*?)</script>", html, re.S)
+            if "src=" not in attrs and 'type="application/json"' not in attrs
+        ]
+        assert inline, url
+        hashes = {
+            "'sha256-" + base64.b64encode(hashlib.sha256(body.encode()).digest()).decode() + "'"
+            for body in inline
+        }
+        assert hashes == allowed, (url, hashes)
 
 
 def test_csp_header_is_not_duplicated_and_gzip_still_applies(tmp_path, monkeypatch):

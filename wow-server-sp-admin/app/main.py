@@ -158,17 +158,29 @@ class _GZipExcludeSSE:
 
 
 # The Armory page and its assets (spec 7): no third-party origin may load anything, so the
-# browser never talks to Wowhead (the proxy does), and the viewer's protocol-relative
-# viewer.css link is refused. Initial value; Task 13 trims it from a real browser run and
-# records the final sources and the reason for each here.
+# browser never talks to Wowhead (the proxy does). Pinned empirically by Task 13's browser
+# run (tests/browser/armory_check.py: the real viewer through the real proxy, three
+# characters, zero violations; a report-only "default-src 'self'" listed what each source
+# below is for). Every source and why:
+#   default-src 'self'  everything else (the page, its scripts, the viewer's XHR/fetch and
+#                       the proxied assets) comes from the admin itself; no other origin.
+#   script-src 'sha256-…'  the one inline <script> on the page, base.html's toast / nav-pill
+#                       handlers (test_armory_routes recomputes the hash from the rendered
+#                       page). No 'unsafe-eval': the viewer evaluates code only to start its
+#                       cloth-physics WASM, which Wrath models never ask for (no physics
+#                       data); 'unsafe-inline' scripts are not needed either.
+#   style-src 'unsafe-inline'  the templates' style="color: …" attributes (quality, class
+#                       and faction colours) and htmx's indicator <style> element.
+#   img-src blob:       the viewer loads each texture by XHR and draws it from an object URL
+#                       it creates itself (a blob: URL is bound to the page's own origin).
+# Not needed (nothing used them in the run): data:, workers, fonts, connect-src beyond
+# 'self'. The viewer's protocol-relative viewer.css link is dropped by armory.js before the
+# browser tries it, and would be refused here anyway.
 ARMORY_CSP = (
     "default-src 'self'; "
-    "img-src 'self' data: blob:; "
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "script-src 'self' 'sha256-c7BagzEtDsxnPeh71/65neRkj6KiHaIPod5LFTcUOe4='; "
     "style-src 'self' 'unsafe-inline'; "
-    "worker-src 'self' blob:; "
-    "connect-src 'self'; "
-    "font-src 'self' data:"
+    "img-src 'self' blob:"
 )
 _CSP_HEADER = b"content-security-policy"
 

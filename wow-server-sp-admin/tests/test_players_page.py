@@ -140,11 +140,16 @@ def _declarations(css: str, selector: str) -> set[str]:
 
 
 def test_linked_name_cells_keep_the_cell_overflow_rule():
-    """A wrapped cell's grid item is now the <a>: it gets exactly the span cells' clipping."""
+    """A wrapped cell's grid item is now the <a>; the coloured span inside it keeps exactly the
+    span cells' clipping (as a block, so it clips), so a clipped name's "…" is drawn in the
+    class colour as before the link (an ellipsis takes the colour of the box that clips; the
+    browser check, tests/browser/armory_check.py, measured the anchor's row colour otherwise).
+    The <a> only clips."""
     css = STYLESHEET.read_text()
     span_cell = _declarations(css, ".player-row > span")
     assert span_cell == {"overflow: hidden", "text-overflow: ellipsis", "white-space: nowrap"}
-    assert _declarations(css, ".player-row > .char-link") == span_cell
+    assert _declarations(css, ".player-row > .char-link > span") == span_cell | {"display: block"}
+    assert _declarations(css, ".player-row > .char-link") == {"min-width: 0", "overflow: hidden"}
 
 
 def test_char_link_inherits_colour_and_underlines_only_on_hover():

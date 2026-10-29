@@ -14,7 +14,10 @@
   'use strict';
 
   const VIEWER_SCRIPT = '/armory/assets/live/viewer/viewer.min.js';
+  const JQUERY_SCRIPT = '/static/jquery.min.js'; // armory.html loads it before this script
   const CONTENT_PATH = '/armory/assets/wrath/';
+  // A <link> to another origin (absolute or protocol-relative href) in HTML that jQuery parses.
+  const FOREIGN_LINK = /<link\b[^>]*\bhref\s*=\s*["']?(?:[a-z][a-z0-9+.-]*:)?\/\/[^>]*>/gi;
   const WATCHDOG_MS = 30000; // spec 7.5: nothing drawn within 30 s -> "unavailable"
   const DRAWN_POLL_MS = 500;
   const MARGIN = 8; // tooltip gap to its trigger and to the viewport edge (px)
@@ -469,10 +472,24 @@
       }
     }
 
+    // The viewer appends a protocol-relative <link rel="stylesheet"> to Wowhead's viewer.css
+    // through jQuery for every renderer it builds. The page needs nothing from it (the spike
+    // saw no visible change) and the CSP refuses it, logging a violation each time; dropping
+    // any foreign <link> from the HTML jQuery parses means the browser never even tries.
+    function dropForeignLinks() {
+      const jq = window.jQuery;
+      if (jq.htmlPrefilter.armoryWrapped) return;
+      const original = jq.htmlPrefilter;
+      const filtered = (html) => original.call(jq, String(html).replace(FOREIGN_LINK, ''));
+      filtered.armoryWrapped = true;
+      jq.htmlPrefilter = filtered;
+    }
+
     function installShim() {
       // The globals the viewer expects (spike page.html; constants from the npm package's
       // setup.js). contentPath = the Wrath data through our proxy, as the spike proved.
       window.CONTENT_PATH = window.location.origin + CONTENT_PATH;
+      dropForeignLinks();
       if (window.WH) return;
       window.WH = {
         debug: (...args) => capture.debug(args),
@@ -515,8 +532,11 @@
       };
     }
 
-    // The pinned viewer script, through the proxy; a failed load can be retried later.
+    // The pinned viewer script, through the proxy; a failed load can be retried later. The
+    // viewer needs jQuery: without it the script throws while it loads ("jQuery is not
+    // defined") and its constructor calls container.width() (Task 13's browser run).
     function viewerScript() {
+      if (!window.jQuery) return Promise.reject(new Error(JQUERY_SCRIPT + ' did not load'));
       if (window.ZamModelViewer) return Promise.resolve();
       if (!scriptPromise) {
         installShim();
@@ -525,7 +545,7 @@
         tag.async = true;
         scriptPromise = new Promise((resolve, reject) => {
           tag.addEventListener('load', () => (window.ZamModelViewer ? resolve() : reject(new Error('no ZamModelViewer'))));
-          tag.addEventListener('error', () => reject(new Error('the script did not load')));
+          tag.addEventListener('error', () => reject(new Error(VIEWER_SCRIPT + ' did not load')));
           document.head.append(tag);
         }).catch((err) => {
           scriptPromise = null;
@@ -539,8 +559,8 @@
     // The spike's proven configuration (spec 2, 7): type 2 = character, models.type 16,
     // hd: true, items [[inventoryType, displayId], ...], options already mapped by the server
     // (R12). Sheathed weapons = sheathMain/sheathOff 1; unsheathed leaves them out, exactly
-    // as the spike page did. Whether the viewer needs a jQuery-wrapped container is settled
-    // in Task 13's browser run: jQuery is used only if the page already has it.
+    // as the spike page did. The container is a jQuery object (the viewer calls its width(),
+    // css() and append()).
     function viewerOptions() {
       const charCustomization = { options: data.options };
       if (sheath && sheath.checked) {
@@ -552,7 +572,7 @@
       return {
         type: 2,
         contentPath: window.location.origin + CONTENT_PATH,
-        container: window.jQuery ? window.jQuery(box) : box,
+        container: window.jQuery(box),
         aspect: w > 0 && h > 0 ? w / h : 0.75,
         hd: true,
         models: { id: data.modelId, type: 16 },
@@ -632,7 +652,7 @@
       } catch (e) {
         if (my !== gen) return;
         capture.stop();
-        unavailable("couldn't load the viewer script (" + VIEWER_SCRIPT + ').');
+        unavailable("couldn't load the viewer (" + describe(e) + ').');
         return;
       }
       if (my !== gen) return;

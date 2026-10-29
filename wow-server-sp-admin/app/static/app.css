@@ -1888,8 +1888,11 @@ button.slot:focus-visible { background: var(--yellow-bg); outline: none; }
 /* Character names elsewhere (Players page) that link here: no visible change but on hover. */
 .char-link { color: inherit; text-decoration: none; }
 .char-link:hover { text-decoration: underline; cursor: pointer; }
-/* A linked Players-page name cell is the <a> grid item: clip it like the .player-row > span cells. */
-.player-row > .char-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A linked Players-page name cell is the <a> grid item. The coloured span inside it gets the
+   .player-row > span clipping, so the "…" of a clipped name keeps the class colour as before
+   the link (an ellipsis takes the colour of the box that clips); the <a> only clips. */
+.player-row > .char-link { min-width: 0; overflow: hidden; }
+.player-row > .char-link > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .armory-spinner { animation-duration: 3s; }

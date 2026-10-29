@@ -2,7 +2,8 @@
 {# Armory (spec 5): the search box, then either nothing (/armory), the character view
    (/armory/<guid>, partials/armory_character.html), a 404 note or the DB error banner, and the
    footer strip in both views. armory.js is referenced only here, and only with a character
-   loaded: it drives the tabs, the tooltips and the 3D model panel. No inline script. #}
+   loaded: it drives the tabs, the tooltips and the 3D model panel. jQuery comes first because
+   Wowhead's viewer needs it (Task 13's browser run). No inline script. #}
 {% block main %}
 <div class="dashboard-content armory-page">
 
@@ -32,5 +33,6 @@
   </div>
 
 </div>
-{% if view %}<script src="/static/armory.js?v={{ armory_js_ver }}" defer></script>{% endif %}
+{% if view %}<script src="/static/jquery.min.js" defer></script>
+<script src="/static/armory.js?v={{ armory_js_ver }}" defer></script>{% endif %}
 {% endblock %}
