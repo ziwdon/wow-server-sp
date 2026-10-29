@@ -1548,8 +1548,8 @@ pre.logview {
 .armory-online { color: var(--green); }
 
 /* Paper-doll card: left slots | 3D model | right slots, then the weapon row and the foot
-   (sheath toggle, average item level) under all three. The model column grows with the
-   viewport up to 420px; the slot columns are capped at 340px and the three are centred, so a
+   (the two 3D-view toggles, average item level) under all three. The model column grows
+   with the viewport up to 420px; the slot columns are capped at 340px and the three are centred, so a
    wide screen gets margins at the card's edges instead of gaps between names and model. Each
    slot column spreads its eight slots over the model's height, like the game's character frame. */
 .paperdoll {
@@ -1619,7 +1619,9 @@ pre.logview {
   justify-content: center;
   gap: 0.4rem 2rem;
 }
-.armory-sheath {
+/* The 3D-view toggles (Sheathe weapons, Hide tabard); armory.js disables Hide tabard when
+   the model has no tabard. */
+.armory-toggle {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -1627,7 +1629,8 @@ pre.logview {
   color: var(--text-warm);
   cursor: pointer;
 }
-.armory-sheath input { accent-color: var(--gold); }
+.armory-toggle input { accent-color: var(--gold); }
+.armory-toggle:has(input:disabled) { opacity: 0.5; cursor: default; }
 
 .paperdoll-col {
   display: flex;

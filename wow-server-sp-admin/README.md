@@ -162,6 +162,11 @@ Until then the Stats tab says so and shows the current value.
   `/opt/stacks/azerothcore-admin/`) and reload the Armory page: the first view
   fetches and keeps a fresh copy.
 
+Under the model, **Sheathe weapons** redraws it with the weapons on the back,
+and **Hide tabard** redraws it without the tabard, so the chest armour under it
+shows (the paper-doll still lists the tabard; the box is greyed out when the
+character wears none).
+
 If a piece of gear shows a small "no 3D" mark, Wowhead has no model for it; the
 rest of the character still renders. The Armory's data is all re-fetchable, so
 it is not part of the backup archives.

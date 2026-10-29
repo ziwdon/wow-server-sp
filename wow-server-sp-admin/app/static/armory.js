@@ -23,6 +23,7 @@
   const MARGIN = 8; // tooltip gap to its trigger and to the viewport edge (px)
   const PROBE_W = 24; // canvas sample size for the "drawn" check
   const PROBE_H = 32;
+  const TABARD = 19; // INVTYPE_TABARD: what "Hide tabard" leaves out of the viewer
 
   const root = document.querySelector('.armory-character');
   if (!root) return;
@@ -422,9 +423,11 @@
     const text = panel.querySelector('.armory-model-text');
     const note = panel.querySelector('.armory-model-note');
     const sheath = document.getElementById('armory-sheath');
+    const hideTabard = document.getElementById('armory-hide-tabard');
     const capture = errorCapture();
     const probe = document.createElement('canvas');
     let gen = 0; // bumped by every load or re-create; stale callbacks compare it
+    let fetching = false; // a load() is waiting for the model API (the toggles wait for it)
     let data = null; // the last model API answer
     let enabled = null; // its viewer.enabled
     let viewer = null;
@@ -569,14 +572,17 @@
     // The spike's proven configuration (spec 2, 7): type 2 = character, models.type 16,
     // hd: true, items [[inventoryType, displayId], ...], options already mapped by the server
     // (R12). Sheathed weapons = sheathMain/sheathOff 1; unsheathed leaves them out, exactly
-    // as the spike page did. The container is a jQuery object (the viewer calls its width(),
-    // css() and append()).
+    // as the spike page did. "Hide tabard" leaves the tabard out of this list only (the
+    // answer and the paper-doll keep it). The container is a jQuery object (the viewer calls
+    // its width(), css() and append()).
     function viewerOptions() {
       const charCustomization = { options: data.options };
       if (sheath && sheath.checked) {
         charCustomization.sheathMain = 1;
         charCustomization.sheathOff = 1;
       }
+      const hide = Boolean(hideTabard && hideTabard.checked);
+      const items = list(data.items).filter((item) => !(hide && isTabard(item)));
       const w = box.clientWidth;
       const h = box.clientHeight;
       return {
@@ -586,9 +592,14 @@
         aspect: w > 0 && h > 0 ? w / h : 0.75,
         hd: true,
         models: { id: data.modelId, type: 16 },
-        items: list(data.items),
+        items,
         charCustomization,
       };
+    }
+
+    // One viewer item, [inventoryType, displayId].
+    function isTabard(item) {
+      return Array.isArray(item) && Number(item[0]) === TABARD;
     }
 
     // "Drawn" = the viewer's canvas holds a non-blank picture. A PROBE_W x PROBE_H copy is
@@ -708,6 +719,7 @@
 
     async function load() {
       const my = ++gen;
+      fetching = true;
       stop();
       setState('loading', 'Fetching model…');
       setNote('');
@@ -718,10 +730,12 @@
         answer = await resp.json().catch(() => null);
       } catch (e) {
         if (my !== gen) return;
+        fetching = false;
         unavailable("couldn't load the model data from the admin.");
         return;
       }
-      if (my !== gen) return;
+      if (my !== gen) return; // a newer load() owns `fetching` now
+      fetching = false;
       if (!resp.ok || !answer || typeof answer !== 'object') {
         const detail = answer && answer.detail ? String(answer.detail) : 'HTTP ' + resp.status;
         unavailable(detail + '.');
@@ -729,6 +743,9 @@
       }
       data = answer;
       enabled = Boolean(answer.viewer && answer.viewer.enabled);
+      // Nothing to hide without a tabard in the answer (none worn, its model not found, or
+      // the viewer switched off); the box keeps its tick for the next answer.
+      if (hideTabard) hideTabard.disabled = !list(answer.items).some(isTabard);
       markSlots(enabled ? answer.unresolved : []);
       if (!enabled) {
         setState('off', '3D viewer is switched off');
@@ -751,15 +768,17 @@
       start(my);
     }
 
-    // "Sheathe weapons" re-creates the viewer with the other sheath flags.
-    if (sheath) {
-      sheath.addEventListener('change', () => {
-        if (!data || !enabled || !Array.isArray(data.options) || panel.dataset.state === 'nowebgl') return;
-        const my = ++gen;
-        stop();
-        start(my);
-      });
+    // "Sheathe weapons" and "Hide tabard" re-create the viewer; viewerOptions() reads both
+    // boxes, so they combine. While load() waits for the model API a change only sets the box:
+    // the start() after the answer reads it (re-creating now would orphan that answer).
+    function recreate() {
+      if (fetching || !data || !enabled || !Array.isArray(data.options) || panel.dataset.state === 'nowebgl') return;
+      const my = ++gen;
+      stop();
+      start(my);
     }
+    if (sheath) sheath.addEventListener('change', recreate);
+    if (hideTabard) hideTabard.addEventListener('change', recreate);
 
     // The footer's On/Off switch re-renders the strip; follow it without a page reload.
     document.addEventListener('htmx:afterSwap', (event) => {

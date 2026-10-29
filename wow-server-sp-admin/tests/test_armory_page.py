@@ -212,6 +212,10 @@ def test_character_page_has_model_panel_paperdoll_tabs_and_blob(tmp_path, monkey
     sheath = doc.by_id("armory-sheath")
     assert sheath.tag == "input" and sheath.attrs["type"] == "checkbox"
     assert "Sheathe weapons" in sheath.parent.norm()
+    hide = doc.by_id("armory-hide-tabard")
+    assert hide.tag == "input" and hide.attrs["type"] == "checkbox"
+    assert hide.parent.tag == "label" and hide.parent.norm() == "Hide tabard"
+    assert "checked" not in hide.attrs  # the tabard shows by default
 
     doll = doc.find(cls="paperdoll")
     assert doll is not None
@@ -299,6 +303,12 @@ def test_model_panel_sits_in_the_paperdoll_between_the_slot_columns(tmp_path, mo
     assert sheath.parent.parent is foot and ilvl is not None
     assert foot.children.index(sheath.parent) < foot.children.index(ilvl)
     assert ilvl.norm() == "Average item level: 60"
+    # "Hide tabard" sits right after "Sheathe weapons", in the same kind of label.
+    hide = doc.by_id("armory-hide-tabard")
+    assert hide.parent.parent is foot
+    row = _element_children(foot)
+    assert row.index(hide.parent) == row.index(sheath.parent) + 1 < row.index(ilvl)
+    assert hide.parent.classes() == sheath.parent.classes()
 
     # The tab strip still follows the card.
     section = doc.find(tag="section", cls="armory-character")
@@ -594,6 +604,74 @@ def test_armory_js_watchdog_counts_only_visible_time():
     assert "document.hidden" in handler and ".hidden = true" in handler
     assert "gen" in handler  # a stale start()'s watchdog is left alone
     assert "watchdog = null" in script[script.index("function stop()"):]
+
+
+def _js_function(script: str, signature: str) -> str:
+    """The source of one top-level-in-its-closure function: from its signature to the next one."""
+    start = script.index(signature)
+    nxt = re.search(r"\n    (?:async )?function \w+\(", script[start + len(signature):])
+    return script[start:start + len(signature) + nxt.start()] if nxt else script[start:]
+
+
+def test_armory_js_hide_tabard_leaves_only_the_tabard_out_of_the_viewer():
+    # Owner request: "Hide tabard" next to "Sheathe weapons" re-creates the 3D viewer without
+    # the tabard (InventoryType 19) to show the gear under it; the shirt (4) and the
+    # paper-doll's slot 18 stay as they are. Filtered client-side from the last model answer.
+    script = SCRIPT.read_text()
+
+    assert "document.getElementById('armory-hide-tabard')" in script
+    assert re.search(r"const TABARD = 19;", script)  # INVTYPE_TABARD
+    assert "INVENTORY_TYPE_SHIRT: 4" in script  # the WH shim is unchanged
+    options = _js_function(script, "function viewerOptions()")
+    assert "hideTabard.checked" in options and "isTabard" in options
+    assert re.search(r"(?m)^\s*items,$", options), "viewerOptions must pass the filtered items"
+    is_tabard = _js_function(script, "function isTabard(")
+    assert "=== TABARD" in is_tabard and "item[0]" in is_tabard  # [inventoryType, displayId]
+    # The last answer itself is never edited (a re-create with the box unticked gets it back).
+    assert not re.search(r"data\.items\s*=[^=]", script)
+    assert ".splice(" not in script
+
+    # No tabard in the model answer = nothing to hide: the box is disabled when it arrives.
+    load = _js_function(script, "async function load()")
+    assert re.search(r"hideTabard\.disabled = !list\(answer\.items\)\.some\(isTabard\)", load)
+    assert load.index("hideTabard.disabled") > load.index("data = answer")
+
+
+def test_armory_js_both_toggles_re_create_the_viewer_through_one_guard():
+    # Sheathe weapons and Hide tabard share one re-create: a no-op while the model answer is
+    # being fetched (load() then starts with both boxes' current state), with no usable answer,
+    # with the viewer switched off, without Wowhead's options, or without WebGL; a new gen so a
+    # stale start() stops. viewerOptions() reads both boxes, so they combine.
+    script = SCRIPT.read_text()
+
+    recreate = _js_function(script, "function recreate()")
+    guard = recreate[:recreate.index("return;")]
+    for needle in ("fetching", "!data", "!enabled", "!Array.isArray(data.options)", "'nowebgl'"):
+        assert needle in guard, needle
+    assert re.search(r"const my = \+\+gen;\s*stop\(\);\s*start\(my\);", recreate)
+    for toggle in ("sheath", "hideTabard"):
+        assert re.search(rf"{toggle}\.addEventListener\('change', recreate\)", script), toggle
+    assert script.count("addEventListener('change'") == 2
+
+    load = _js_function(script, "async function load()")
+    assert load.index("fetching = true") < load.index("await fetch(")
+    # Cleared only by the load that still owns gen (a newer load keeps it set).
+    after = load[load.index("await fetch("):]
+    for cleared in re.finditer(r"fetching = false", after):
+        assert "if (my !== gen) return;" in after[:cleared.start()]
+    assert after.count("fetching = false") == 2  # fetch failed / answer arrived
+    options = _js_function(script, "function viewerOptions()")
+    assert "sheath.checked" in options and "hideTabard.checked" in options
+
+
+def test_armory_toggles_share_one_style_and_dim_when_disabled():
+    css = _armory_css()
+    desktop = css.split("@media", 1)[0]
+    rule = _rule(desktop, ".armory-toggle")
+    assert "cursor: pointer" in rule
+    assert "accent-color" in _rule(desktop, ".armory-toggle input")
+    assert re.search(r"\.armory-toggle:has\(input:disabled\)\s*\{[^}]*opacity:", desktop)
+    assert ".armory-sheath" not in css  # one class for both toggles
 
 
 def _foreign_link_rule() -> re.Pattern[str]:

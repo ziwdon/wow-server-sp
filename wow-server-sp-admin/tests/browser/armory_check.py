@@ -17,8 +17,8 @@ What it does:
 * runs the real app (uvicorn on 127.0.0.1) with the real ``AssetProxy`` and the real
   ``fetch_upstream``, wrapped only to record each upstream URL, status and size;
 * drives Chromium (SwiftShader WebGL, every non-loopback request sent to a dead proxy) through the three character pages at 1400 px and
-  390 px, a sheath toggle, the glyph tab, a touch drag, a warm repeat load and the Players
-  page, and checks what spec 13 and the Task 13 brief ask (printed as PASS/FAIL lines and
+  390 px, the sheath and hide-tabard toggles, the glyph tab, a touch drag, a warm repeat load and
+  the Players page, and checks what spec 13 and the Task 13 brief ask (printed as PASS/FAIL lines and
   written to ``<out>/armory-check.json`` with the screenshots).
 
 The only outbound traffic is the admin's own proxy fetching allow-listed paths from
@@ -74,7 +74,7 @@ UPSTREAM_SHAPES = [re.compile(p) for p in (
 # listener on document fires before the script tag's own load listener in armory.js).
 INIT_JS = r"""
 (() => {
-  const check = window.__check = { csp: [], states: [], viewers: [], t0: performance.now() };
+  const check = window.__check = { csp: [], states: [], viewers: [], given: [], t0: performance.now() };
   document.addEventListener('securitypolicyviolation', (e) => {
     check.csp.push({ directive: e.effectiveDirective || e.violatedDirective, blocked: e.blockedURI,
                      disposition: e.disposition, sample: e.sample, source: e.sourceFile, line: e.lineNumber });
@@ -90,6 +90,10 @@ INIT_JS = r"""
     const Orig = window.ZamModelViewer;
     if (!Orig || Orig.__checkWrapped) return;
     const Wrapped = function (opts) {
+      // What armory.js handed this viewer (copied before the viewer can touch it).
+      const cc = (opts && opts.charCustomization) || {};
+      check.given.push({ items: JSON.parse(JSON.stringify((opts && opts.items) || [])),
+                         sheathMain: cc.sheathMain || 0 });
       const v = new Orig(opts);
       check.viewers.push(v);
       return v;
@@ -122,6 +126,9 @@ PANEL_JS = r"""
     panelRect: rect(panel),
     jquery: Boolean(window.jQuery),
     viewers: c.viewers.length,
+    given: c.given.length ? c.given[c.given.length - 1] : null,
+    hideTabard: (() => { const t = document.getElementById('armory-hide-tabard');
+                         return t ? { disabled: t.disabled, checked: t.checked } : null; })(),
     hasDestroy: Boolean(v && typeof v.destroy === 'function'),
     azimuth: v && v.renderer ? v.renderer.azimuth : null,
     zenith: v && v.renderer ? v.renderer.zenith : null,
@@ -226,6 +233,52 @@ def picture_stats(png: bytes) -> dict:
 
 def not_blank(stats: dict) -> bool:
     return stats["colours"] >= 40 and stats["drawn_share"] >= 0.03
+
+
+# Where the tabard sits on a front-facing model in the panel (fractions of the panel shot:
+# x0, y0, x1, y1): the upper torso, measured on Vegivaca's renders.
+TORSO = (0.38, 0.22, 0.62, 0.45)
+
+
+def region_stats(png: bytes, box=TORSO) -> dict:
+    """Mean colour of a region and the share of its pixels that are plain mid grey (the
+    undyed Guild Tabard)."""
+    width, height, bpp, px = png_pixels(png)
+    x0, y0, x1, y1 = int(box[0] * width), int(box[1] * height), int(box[2] * width), int(box[3] * height)
+    n = grey = 0
+    sums = [0, 0, 0]
+    for y in range(y0, y1):
+        row = y * width * bpp
+        for x in range(x0, x1):
+            i = row + x * bpp
+            r, g, b = px[i], px[i + 1], px[i + 2]
+            sums[0] += r
+            sums[1] += g
+            sums[2] += b
+            n += 1
+            if max(r, g, b) - min(r, g, b) < 18 and 90 <= (r + g + b) / 3 <= 215:
+                grey += 1
+    return {"mean": [round(v / n, 1) for v in sums], "grey_share": round(grey / n, 3)}
+
+
+def region_diff(a: bytes, b: bytes, box=TORSO) -> float:
+    """Mean absolute channel difference of two same-size shots inside ``box``."""
+    wa, ha, bpp_a, pa = png_pixels(a)
+    wb, hb, bpp_b, pb = png_pixels(b)
+    if (wa, ha) != (wb, hb):
+        return float("inf")
+    x0, y0, x1, y1 = int(box[0] * wa), int(box[1] * ha), int(box[2] * wa), int(box[3] * ha)
+    total = n = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            i, j = (y * wa + x) * bpp_a, (y * wb + x) * bpp_b
+            total += abs(pa[i] - pb[j]) + abs(pa[i + 1] - pb[j + 1]) + abs(pa[i + 2] - pb[j + 2])
+            n += 3
+    return round(total / n, 2)
+
+
+def has_tabard(items) -> bool:
+    return any(isinstance(i, list) and i and i[0] == 19 for i in items or [])
 
 
 # --- fixtures ---
@@ -697,6 +750,11 @@ def run_character(browser, base, guid, recorder, proxy, res: Results, out: Path,
               model.get("unresolved") == [] and model.get("pending") == [],
               f"unresolved {model.get('unresolved')}, pending {model.get('pending')}, reason {model.get('reason')}")
     res.check(f"{name}: no 'no 3D' mark on the paper-doll", panel["no3d"] == 0, f"{panel['no3d']}")
+    tabard = has_tabard(model.get("items"))
+    toggle = panel["hideTabard"] or {}
+    res.check(f"{name}: 'Hide tabard' is {'enabled' if tabard else 'disabled'} "
+              f"({'a' if tabard else 'no'} tabard in the model answer)",
+              toggle.get("disabled") is (not tabard) and toggle.get("checked") is False, json.dumps(toggle))
     upstream = recorder.since(up_before)
     bad = [c["url"] for c in upstream if not any(s.fullmatch(c["url"]) for s in UPSTREAM_SHAPES)]
     res.check(f"{name}: every upstream URL has an allow-listed shape", not bad, f"{bad[:5]}")
@@ -801,10 +859,72 @@ def run_extras(browser, base, recorder, proxy, res: Results, out: Path) -> dict:
     res.check("sheath toggle: no request outside the admin", not watch.outside, f"{watch.outside[:3]}")
     data["sheath"] = {"before": before, "after": after}
 
-    # Mouse drag rotates (desktop).
     page.click("#armory-sheath")  # back to the default
     wait_rendered(page)
     wait_quiet(watch, recorder)
+
+    # Hide tabard: a new viewer given the same items minus the tabard (19), drawn without the
+    # grey Guild Tabard; the paper-doll keeps its tabard slot. Then together with the sheath.
+    shown = page.evaluate(PANEL_JS)
+    with_tabard = model_shot(page)
+    time.sleep(1)
+    with_tabard2 = model_shot(page)  # the idle animation's own change: the noise floor
+    page.click("#armory-hide-tabard")
+    time.sleep(0.3)
+    state3, waited3 = wait_rendered(page)
+    wait_quiet(watch, recorder)
+    hidden = page.evaluate(PANEL_JS)
+    no_tabard = model_shot(page)
+    (out / "impl-vegivaca-hide-tabard-model.png").write_bytes(no_tabard)
+    page.screenshot(path=str(out / "impl-vegivaca-hide-tabard-1400.png"), full_page=True)
+    given0, given1 = (shown["given"] or {}).get("items", []), (hidden["given"] or {}).get("items", [])
+    res.check("hide tabard: Vegivaca's viewer had the tabard before", has_tabard(given0), json.dumps(given0))
+    res.check("hide tabard: a new viewer, given the same items minus the tabard only",
+              hidden["viewers"] == shown["viewers"] + 1 and not has_tabard(given1)
+              and given1 == [i for i in given0 if i[0] != 19],
+              f"viewers {shown['viewers']} -> {hidden['viewers']}; {json.dumps(given1)}")
+    res.check("hide tabard: exactly one canvas and rendered again, not blank",
+              hidden["canvases"] == 1 and state3 == "rendered" and not_blank(picture_stats(no_tabard)),
+              f"canvases {hidden['canvases']}, state {state3} after {waited3} s, "
+              f"{json.dumps(picture_stats(no_tabard))}")
+    noise, change = region_diff(with_tabard, with_tabard2), region_diff(with_tabard, no_tabard)
+    torso0, torso1 = region_stats(with_tabard), region_stats(no_tabard)
+    res.check("hide tabard: the torso changed well beyond the idle animation's own change",
+              change > max(3 * noise, 8.0), f"diff {change} vs noise {noise}; torso {torso0} -> {torso1}")
+    res.check("hide tabard: less plain grey on the torso (the Guild Tabard is gone)",
+              torso1["grey_share"] < torso0["grey_share"] * 0.6,
+              f"{torso0['grey_share']} -> {torso1['grey_share']}")
+    slot = page.evaluate("() => { const s = document.getElementById('slot-18');"
+                         " return s ? [s.tagName, s.getAttribute('aria-label')] : null; }")
+    res.check("hide tabard: the paper-doll still shows the tabard slot",
+              bool(slot) and slot[0] == "BUTTON" and "Guild Tabard" in (slot[1] or ""), json.dumps(slot))
+    page.click("#armory-sheath")  # both toggles together
+    time.sleep(0.3)
+    state4, _ = wait_rendered(page)
+    both = page.evaluate(PANEL_JS)
+    given2 = both["given"] or {}
+    res.check("hide tabard + sheathe: both apply to the new viewer",
+              state4 == "rendered" and given2.get("sheathMain") == 1 and not has_tabard(given2.get("items")),
+              f"state {state4}, sheathMain {given2.get('sheathMain')}, items {json.dumps(given2.get('items'))}")
+    enforced = [v for v in both["csp"] if v["disposition"] == "enforce"]
+    res.check("hide tabard: still zero CSP violations, no request outside the admin",
+              not enforced and not watch.outside, f"{json.dumps(enforced)[:300]} {watch.outside[:3]}")
+    page.click("#armory-sheath")
+    time.sleep(0.3)
+    wait_rendered(page)
+    page.click("#armory-hide-tabard")  # back to the defaults
+    time.sleep(0.3)
+    wait_rendered(page)
+    back = page.evaluate(PANEL_JS)
+    given3 = back["given"] or {}
+    res.check("hide tabard unticked: the tabard is back in the viewer's items",
+              has_tabard(given3.get("items")) and given3.get("sheathMain") == 0, json.dumps(given3))
+    data["hide_tabard"] = {"shown": shown["given"], "hidden": hidden["given"], "both": given2,
+                           "back": given3, "noise": noise, "change": change,
+                           "torso": [torso0, torso1], "slot18": slot}
+    wait_quiet(watch, recorder)
+
+    # Mouse drag rotates (desktop).
     box = page.locator("#armory-model .armory-model-canvas").bounding_box()
     az0 = page.evaluate(PANEL_JS)["azimuth"]
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
