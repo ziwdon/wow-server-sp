@@ -1,31 +1,45 @@
-"""Armory: reference tables and the pure character-data helpers (no DB, no network).
+"""Armory: reference tables, the pure character-data helpers and the read-only DB layer.
 
 The DBC-backed helpers take any object with the ``DbcStore`` accessors; these tests use a
 small in-memory fake built from the real ``dbc`` record types, never real DBC files.
 The viewer-mapping tests use the three real characters of the 2026-10-29 spike
-(``tests/data/armory/spike_characters.json``).
+(``tests/data/armory/spike_characters.json``). The DB-layer tests replace
+``mysql.connector.connect`` with ``FakeConn`` (no socket is ever opened).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
+from decimal import Decimal
 from pathlib import Path
 
+import mysql.connector
+import pytest
+
+from app.services import armory, players
 from app.services import wow_reference as wr
 from app.services.armory import (
     ENCHANT_BONUS,
     ENCHANT_PERM,
     ENCHANT_PRISMATIC,
     ENCHANT_SOCKETS,
+    EQUIPMENT_COLUMNS,
     OPTION_NAME_MAP,
     Appearance,
+    CharacterView,
     EquippedItem,
     GlyphRow,
+    Header,
+    SearchHit,
     ViewerItem,
+    collect_character,
+    equipped_item,
     glyph_rows,
     map_customization,
     model_id,
     normalize_search,
     parse_enchantments,
+    search_characters,
     split_specs,
     stats_rows,
     talent_trees,
@@ -610,3 +624,305 @@ def test_viewer_items_sorted_by_slot_and_robe_sent_as_is():
     assert omitted == [1, 10, 11, 12, 13, 17]
     assert ViewerItem(4, 20, 8888) in items
     assert viewer_items([]) == ([], [])
+
+
+# --- DB layer: search and character collection (spec §6) ---
+
+
+class FakeCursor:
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows: list = []
+        self.description = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql, params))
+        if self._conn.fail_at == len(self._conn.executed):
+            raise mysql.connector.Error("boom")
+        assert self._conn.results, f"unexpected extra query: {sql}"
+        rows, columns = self._conn.results.pop(0)
+        self._rows = list(rows)
+        self.description = [(name, 3, None, None, None, None, 1, 0, 45) for name in columns]
+
+    def fetchall(self):
+        rows, self._rows = self._rows, []
+        return rows
+
+    def fetchone(self):
+        return self._rows.pop(0) if self._rows else None
+
+
+class FakeConn:
+    """Answers each ``execute`` with the next queued ``(rows, column names)``."""
+
+    def __init__(self, results, *, fail_at=None):
+        self.results = [r if isinstance(r, tuple) else (r, ()) for r in results]
+        self.executed: list[tuple[str, tuple | None]] = []
+        self.fail_at = fail_at  # 1-based execute call that raises
+        self.closed = False
+
+    def cursor(self, *args, **kwargs):
+        return FakeCursor(self)
+
+    def close(self):
+        self.closed = True
+
+
+DB = dict(host="db", port=3306, user="u", password="p")
+
+
+def _install_db(monkeypatch, results, **kw):
+    conn = FakeConn(results, **kw)
+    calls = []
+
+    def connect(**kwargs):
+        calls.append(kwargs)
+        return conn
+
+    monkeypatch.setattr(armory.mysql.connector, "connect", connect)
+    return conn, calls
+
+
+def _expected_connect():
+    return [dict(DB, connection_timeout=2, autocommit=True)]
+
+
+def test_search_normalises_and_escapes_prefix_and_orders_humans_first(monkeypatch):
+    conn, calls = _install_db(monkeypatch, [[
+        (2506, "Vegivaca", 60, 6, 1, 0),
+        (9001, "Vegibot", 70, 2, 3, 1),
+    ]])
+
+    hits = search_characters("  vEGI% ", **DB)
+
+    assert calls == _expected_connect()
+    [(sql, params)] = conn.executed
+    assert params == ("Vegi\\%%",)
+    assert sql.startswith("SELECT ")
+    # MySQL text ESCAPE '\\' = one backslash ('\' alone would swallow the quote)
+    assert "c.name LIKE %s ESCAPE '\\\\'" in sql
+    assert "a.username <> 'ahbot'" in sql
+    assert "ORDER BY (a.username LIKE 'RNDBOT%%'), c.level DESC, c.name LIMIT 20" in sql
+    assert "LOWER(" not in sql.upper()
+    assert conn.closed
+    # humans first is the SQL's order; the rows keep it
+    assert hits == [
+        SearchHit(guid=2506, name="Vegivaca", level=60, race=6, class_id=1,
+                  class_name="Warrior", class_color=wr.CLASS_COLORS["Warrior"],
+                  race_name="Tauren", is_bot=False),
+        SearchHit(guid=9001, name="Vegibot", level=70, race=2, class_id=3,
+                  class_name="Hunter", class_color=wr.CLASS_COLORS["Hunter"],
+                  race_name="Orc", is_bot=True),
+    ]
+
+
+def test_search_short_query_runs_no_sql(monkeypatch):
+    def connect(**kwargs):
+        raise AssertionError("no connection for a short query")
+
+    monkeypatch.setattr(armory.mysql.connector, "connect", connect)
+    assert search_characters(" v ", **DB) == []
+    assert search_characters("", **DB) == []
+
+
+def test_search_db_error_propagates_and_closes(monkeypatch):
+    conn, _ = _install_db(monkeypatch, [], fail_at=1)
+    with pytest.raises(mysql.connector.Error):
+        search_characters("Vegi", **DB)
+    assert conn.closed
+
+
+# One complete query-2 row: every column non-default, keyed by column name.
+_ITEM_VALUES = {
+    "slot": 4, "entry": 19374, "name": "Bracers of Arcane Accuracy", "displayid": 33100,
+    "InventoryType": 9, "class": 4, "subclass": 1, "Quality": 4, "ItemLevel": 75,
+    "RequiredLevel": 60, "bonding": 1, "armor": 61, "delay": 2600, "dmg_min1": 101.5,
+    "dmg_max1": 188.25, "dmg_type1": 2,
+    **{f"stat_type{i}": 2 + i for i in range(1, 11)},
+    **{f"stat_value{i}": 10 * i for i in range(1, 11)},
+    "holy_res": 1, "fire_res": 2, "nature_res": 3, "frost_res": 4, "shadow_res": 5,
+    "arcane_res": 6, "socketColor_1": 1, "socketColor_2": 2, "socketColor_3": 8,
+    "socketBonus": 3312, "itemset": 213,
+    **{f"spellid_{i}": 18000 + i for i in range(1, 6)},
+    **{f"spelltrigger_{i}": i % 3 for i in range(1, 6)},
+    "MaxDurability": 35, "AllowableClass": 400, "description": "Crackles with power.",
+    "enchantments": "2564 0 0 0 0 0 3375 0 0 " + "0 0 0 " * 9, "randomPropertyId": -14,
+}
+
+
+def _item_row(**overrides):
+    values = {**_ITEM_VALUES, **overrides}
+    return tuple(values[column.split(".", 1)[1]] for column in EQUIPMENT_COLUMNS)
+
+
+def test_equipment_columns_are_the_spec_query_2_columns():
+    names = [column.split(".", 1)[1] for column in EQUIPMENT_COLUMNS]
+    assert len(names) == len(set(names))
+    assert set(names) == set(_ITEM_VALUES)
+
+
+def test_equipped_item_maps_every_column_of_a_full_row():
+    item = equipped_item(_item_row())
+    assert item == EquippedItem(
+        slot=4, entry=19374, name="Bracers of Arcane Accuracy", display_id=33100,
+        inventory_type=9, item_class=4, subclass=1, quality=4, item_level=75,
+        required_level=60, bonding=1, armor=61, delay=2600, dmg_min=101.5,
+        dmg_max=188.25, dmg_type=2,
+        stat_types=(3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        stat_values=(10, 20, 30, 40, 50, 60, 70, 80, 90, 100),
+        holy_res=1, fire_res=2, nature_res=3, frost_res=4, shadow_res=5, arcane_res=6,
+        socket_colors=(1, 2, 8), socket_bonus=3312, item_set=213,
+        spell_ids=(18001, 18002, 18003, 18004, 18005), spell_triggers=(1, 2, 0, 1, 2),
+        max_durability=35, allowable_class=400, description="Crackles with power.",
+        enchantments={0: 2564, 2: 3375}, random_property_id=-14,
+    )
+    # every field came from the row: none is still at its default
+    bare = EquippedItem(slot=0, entry=0, name="", display_id=0, inventory_type=0)
+    for f in dataclasses.fields(EquippedItem):
+        assert getattr(item, f.name) != getattr(bare, f.name), f.name
+
+
+def test_equipped_item_null_resistances_are_zero():
+    nulls = {f"{school}_res": None for school in
+             ("holy", "fire", "nature", "frost", "shadow", "arcane")}
+    item = equipped_item(_item_row(**nulls))
+    assert (item.holy_res, item.fire_res, item.nature_res,
+            item.frost_res, item.shadow_res, item.arcane_res) == (0, 0, 0, 0, 0, 0)
+
+
+def test_equipped_item_is_hashable_and_compares_enchantments():
+    a = EquippedItem(slot=0, entry=1, name="x", display_id=2, inventory_type=1,
+                     enchantments={0: 2564})
+    assert hash(a) == hash(dataclasses.replace(a, enchantments={}))
+    assert a != dataclasses.replace(a, enchantments={})
+
+
+# Query 1 (header) in SELECT order: guid, name, username, is_bot, race, gender, class,
+# level, online, logout_time, skin, face, hairStyle, hairColor, facialStyle,
+# talentGroupsCount, activeTalentGroup. Vegivaca = the spike's Tauren warrior.
+_VEGIVACA = (2506, "Vegivaca", "EDUARDO", 0, 6, 1, 1, 60, 0, 1716000000,
+             1, 1, 2, 1, 2, 2, 1)
+_STATS_SELECT = STATS_COLUMNS[1:]  # every character_stats column but guid
+
+
+def _vegivaca_results(*, stats=(), glyphs=None, items=None, avg=Decimal("37")):
+    return [
+        [_VEGIVACA],
+        items if items is not None else [
+            _item_row(slot=0, entry=19372, name="Helm of Endless Rage", displayid=32493,
+                      InventoryType=1, enchantments="2583 0 0 0 0 0 " + "0 0 0 " * 10),
+            _item_row(slot=15, entry=19364, name="Ashkandi", displayid=32000,
+                      InventoryType=17, enchantments=""),
+        ],
+        [(avg,)],
+        [(12294, 1), (12296, 3), (12345, 2)],
+        glyphs if glyphs is not None else [(0, 762, 0, None, 0, 0, 0)],
+        (list(stats), _STATS_SELECT),
+    ]
+
+
+def test_collect_character_returns_none_for_unknown_guid(monkeypatch):
+    conn, calls = _install_db(monkeypatch, [[]])
+    assert collect_character(999, **DB, store=None) is None
+    assert calls == _expected_connect()
+    assert len(conn.executed) == 1 and conn.executed[0][1] == (999,)
+    assert conn.closed
+
+
+def test_collect_character_assembles_view(monkeypatch):
+    conn, calls = _install_db(monkeypatch, _vegivaca_results())
+
+    view = collect_character(2506, **DB, store=None)
+
+    assert isinstance(view, CharacterView)
+    assert calls == _expected_connect() and conn.closed
+    assert all(params == (2506,) for _, params in conn.executed)
+    assert view.header == Header(
+        guid=2506, name="Vegivaca", account="EDUARDO", is_bot=False, race=6,
+        race_name="Tauren", gender=1, class_id=1, class_name="Warrior",
+        class_color=wr.CLASS_COLORS["Warrior"], faction="Horde",
+        faction_color=wr.FACTION_COLORS["Horde"], level=60, online=False,
+        logout_time=1716000000,
+        appearance=Appearance(skin=1, face=1, hair_style=2, hair_color=1, facial_style=2),
+    )
+    assert [(i.slot, i.entry, i.name, i.display_id, i.inventory_type) for i in view.items] == [
+        (0, 19372, "Helm of Endless Rage", 32493, 1),
+        (15, 19364, "Ashkandi", 32000, 17),
+    ]
+    assert view.items[0] == equipped_item(_vegivaca_results()[1][0])
+    assert view.items[0].enchantments == {0: 2583}
+    assert view.items[1].enchantments == {}
+    assert view.avg_ilvl == 37 and type(view.avg_ilvl) is int
+    assert view.specs == ({12294, 12296}, {12296, 12345})
+    assert (view.spec_count, view.active_spec) == (2, 1)
+    # talent group 0 from its row (NULL column -> 0); group 1 has no row
+    assert view.glyphs == ((762, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 0))
+    assert view.stats_row is None
+    assert view.stats_columns == _STATS_SELECT
+    hash(view)  # frozen view: hashable despite its list/set fields
+
+
+def test_collect_character_stats_row_and_bot_header(monkeypatch):
+    stats = tuple(v for k, v in _stats_row().items() if k != "guid")
+    bot = (7001, "Rndhero", "RNDBOT42", 1, 10, 0, 8, 80, 1, 0, 0, 0, 0, 0, 0, 1, 0)
+    results = _vegivaca_results(stats=[stats], items=[], avg=None,
+                                glyphs=[(1, 1, 2, 3, 4, 5, 6), (0, 7, 8, 9, 10, 11, 12)])
+    results[0] = [bot]
+    _install_db(monkeypatch, results)
+
+    view = collect_character(7001, **DB, store=None)
+
+    h = view.header
+    assert (h.account, h.is_bot, h.online, h.faction, h.class_name) == (
+        "RNDBOT42", True, True, "Horde", "Mage")
+    assert view.items == [] and view.avg_ilvl is None
+    assert view.glyphs == ((7, 8, 9, 10, 11, 12), (1, 2, 3, 4, 5, 6))
+    assert (view.spec_count, view.active_spec) == (1, 0)
+    assert view.stats_row == stats and view.stats_columns == _STATS_SELECT
+    # what Task 10 does with it: the saved stats by column name, mana for a mage
+    shown = dict(stats_rows(view.stats_row, view.stats_columns, class_id=h.class_id))
+    assert shown["Health"] == "12345" and shown["Mana"] == "6789"
+
+
+def test_collect_character_runs_only_selects(monkeypatch):
+    conn, calls = _install_db(monkeypatch, _vegivaca_results())
+    collect_character(2506, **DB, store=None)
+    assert len(calls) == 1  # one connection
+    assert 1 <= len(conn.executed) <= 8
+    for sql, _ in conn.executed:
+        assert sql.lstrip().upper().startswith("SELECT "), sql
+        assert ";" not in sql
+    sqls = [sql for sql, _ in conn.executed]
+    equipment = next(s for s in sqls if "it.InventoryType" in s)
+    assert "ci.bag = 0 AND ci.slot < 19" in equipment
+    stats_sql = next(s for s in sqls if "character_stats" in s)
+    assert all(column in stats_sql for column in _STATS_SELECT)
+
+
+def test_collect_character_db_error_propagates_and_closes(monkeypatch):
+    conn, _ = _install_db(monkeypatch, _vegivaca_results(), fail_at=2)
+    with pytest.raises(mysql.connector.Error):
+        collect_character(2506, **DB, store=None)
+    assert conn.closed
+
+
+def test_avg_ilvl_uses_the_players_ranking_expression(monkeypatch):
+    """The paper-doll average and the Players ranking come from one SQL expression."""
+    conn, _ = _install_db(monkeypatch, [[], [(0, 0, 0, 0)], [], []])
+    players.collect_players(**DB)
+    ranking = next(sql for sql, _ in conn.executed if "AVG(" in sql)
+
+    conn, _ = _install_db(monkeypatch, _vegivaca_results())
+    collect_character(2506, **DB, store=None)
+    avg_sql = next(sql for sql, _ in conn.executed if "AVG(" in sql)
+
+    assert "ROUND(AVG(it.ItemLevel))" in ranking and "ROUND(AVG(it.ItemLevel))" in avg_sql
+    joins = avg_sql[avg_sql.index("LEFT JOIN"):avg_sql.index("WHERE")]
+    assert "ci.slot < 19" in joins and joins in ranking
+    assert "WHERE c.guid = %s" in avg_sql

@@ -1,10 +1,14 @@
 """Armory: one character's saved gear, talents, glyphs and stats.
 
-This part is pure: it turns rows of the characters DB (read elsewhere) and DBC records
+Most of this module is pure: it turns rows of the characters DB and DBC records
 (``DbcStore``, or any object with the same accessors) into what the page shows, and the
 character's rows into what Wowhead's model viewer needs (model id, customisation
 options, items). It never raises on odd data: a missing DBC record degrades to an id,
 not an error.
+
+The DB layer at the end (``search_characters``, ``collect_character``) reads those rows:
+``SELECT`` only, one short-lived connection per call (the ``players.collect_players``
+pattern). A DB error propagates to the caller, which shows it.
 
 Enum values come from the pinned core (rev 3f2969dd), never from memory.
 """
@@ -13,8 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
 
+import mysql.connector
+
 from app.services import wow_reference as wr
-from app.services.dbc import Glyph, Spell, Talent, TalentTab
+from app.services.dbc import DbcStore, Glyph, Spell, Talent, TalentTab
 
 
 class ArmoryStore(Protocol):
@@ -104,7 +110,8 @@ class EquippedItem:
     allowable_class: int = -1  # AllowableClass (class bit mask, -1 = every class)
     description: str = ""  # description
     # item_instance.enchantments through parse_enchantments: {EnchantmentSlot: enchant id}
-    enchantments: dict[int, int] = field(default_factory=dict)
+    # (left out of the hash, a dict cannot be hashed; equality still compares it)
+    enchantments: dict[int, int] = field(default_factory=dict, hash=False)
     # item_instance.randomPropertyId: < 0 = ItemRandomSuffix id, > 0 = ItemRandomProperties
     random_property_id: int = 0
 
@@ -485,3 +492,348 @@ def normalize_search(q: str | None) -> str | None:
         return None
     text = _upper(text[0]) + "".join(_lower(c) for c in text[1:])
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# --- DB layer (spec §6): SELECT only, one connection per call ---
+#
+# Bots are accounts named RNDBOT*; the AH bot account is 'ahbot'. account.username is
+# utf8mb4_unicode_ci (case-insensitive), so the lowercase 'ahbot' literal also excludes
+# the uppercase-stored 'AHBOT' account and 'RNDBOT%' matches whatever the case — do NOT
+# wrap username in LOWER() (redundant + non-sargable), same rule as players._REAL.
+# '%%' as in players._REAL: mysql-connector substitutes only '%s' and sends '%%'
+# unchanged, and in a LIKE pattern '%%' matches exactly what '%' does.
+_IS_BOT = "a.username LIKE 'RNDBOT%%'"
+
+# characters.name is utf8mb4_bin (pinned characters.sql), hence normalize_search's
+# capitalised prefix instead of LOWER(c.name), which would bypass idx_name. The MySQL
+# text ESCAPE '\\' is one backslash, the escape normalize_search uses.
+_SEARCH_SQL = (
+    f"SELECT c.guid, c.name, c.level, c.race, c.class, {_IS_BOT} "
+    "FROM acore_characters.characters c "
+    "JOIN acore_auth.account a ON a.id = c.account "
+    "WHERE c.name LIKE %s ESCAPE '\\\\' AND a.username <> 'ahbot' "
+    f"ORDER BY ({_IS_BOT}), c.level DESC, c.name LIMIT 20"
+)
+
+# Query numbers below are spec §6's; collect_character runs them in this order.
+
+# Query 1, header. A deleted character has account 0, so the JOIN leaves it out.
+_HEADER_SQL = (
+    f"SELECT c.guid, c.name, a.username, {_IS_BOT}, c.race, c.gender, c.class, "
+    "c.level, c.online, c.logout_time, "
+    "c.skin, c.face, c.hairStyle, c.hairColor, c.facialStyle, "
+    "c.talentGroupsCount, c.activeTalentGroup "
+    "FROM acore_characters.characters c "
+    "JOIN acore_auth.account a ON a.id = c.account "
+    "WHERE c.guid = %s"
+)
+
+# Query 2, equipment: the columns spec §6 lists, in SELECT order (``equipped_item``
+# reads a row by these names, the part after the dot).
+EQUIPMENT_COLUMNS: tuple[str, ...] = (
+    "ci.slot",
+    "it.entry", "it.name", "it.displayid", "it.InventoryType", "it.class", "it.subclass",
+    "it.Quality", "it.ItemLevel", "it.RequiredLevel", "it.bonding", "it.armor",
+    "it.delay", "it.dmg_min1", "it.dmg_max1", "it.dmg_type1",
+    *(f"it.stat_type{i}" for i in range(1, 11)),
+    *(f"it.stat_value{i}" for i in range(1, 11)),
+    "it.holy_res", "it.fire_res", "it.nature_res", "it.frost_res", "it.shadow_res",
+    "it.arcane_res",
+    *(f"it.socketColor_{i}" for i in range(1, 4)),
+    "it.socketBonus", "it.itemset",
+    *(f"it.spellid_{i}" for i in range(1, 6)),
+    *(f"it.spelltrigger_{i}" for i in range(1, 6)),
+    "it.MaxDurability", "it.AllowableClass", "it.description",
+    "ii.enchantments", "ii.randomPropertyId",
+)
+_EQUIPMENT_KEYS = tuple(column.split(".", 1)[1] for column in EQUIPMENT_COLUMNS)
+_EQUIPMENT_SQL = (
+    f"SELECT {', '.join(EQUIPMENT_COLUMNS)} "
+    "FROM acore_characters.character_inventory ci "
+    "JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
+    "JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
+    "WHERE ci.guid = %s AND ci.bag = 0 AND ci.slot < 19 "
+    "ORDER BY ci.slot"
+)
+
+# Average item level (spec §5/§6, no query number): the expression and joins of the
+# Players ranking (players.py query 3, shirt and tabard included), so both pages show
+# the same number.
+_AVG_ILVL_SQL = (
+    "SELECT ROUND(AVG(it.ItemLevel)) AS avg_ilvl "
+    "FROM acore_characters.characters c "
+    "LEFT JOIN acore_characters.character_inventory ci "
+    "  ON ci.guid = c.guid AND ci.bag = 0 AND ci.slot < 19 "
+    "LEFT JOIN acore_characters.item_instance ii ON ii.guid = ci.item "
+    "LEFT JOIN acore_world.item_template it ON it.entry = ii.itemEntry "
+    "WHERE c.guid = %s"
+)
+
+# Query 3, talents: spell + specMask (bit 0 = talent group 0, bit 1 = group 1).
+_TALENTS_SQL = (
+    "SELECT spell, specMask FROM acore_characters.character_talent WHERE guid = %s"
+)
+
+# Query 4, glyphs: one row per talentGroup (0, 1), six sockets each.
+_GLYPHS_SQL = (
+    "SELECT talentGroup, glyph1, glyph2, glyph3, glyph4, glyph5, glyph6 "
+    "FROM acore_characters.character_glyphs WHERE guid = %s"
+)
+
+# Query 5, saved stats: every character_stats column but guid (no row = never saved).
+_STATS_SQL = (
+    "SELECT maxhealth, maxpower1, maxpower2, maxpower3, maxpower4, maxpower5, maxpower6, "
+    "maxpower7, strength, agility, stamina, intellect, spirit, armor, resHoly, resFire, "
+    "resNature, resFrost, resShadow, resArcane, blockPct, dodgePct, parryPct, critPct, "
+    "rangedCritPct, spellCritPct, attackPower, rangedAttackPower, spellPower, resilience "
+    "FROM acore_characters.character_stats WHERE guid = %s"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchHit:
+    guid: int
+    name: str
+    level: int
+    race: int
+    class_id: int
+    class_name: str
+    class_color: str
+    race_name: str
+    is_bot: bool  # account RNDBOT*
+
+
+@dataclass(frozen=True, slots=True)
+class Header:
+    """The page's header line: the ``characters`` row and its account."""
+
+    guid: int
+    name: str
+    account: str  # account.username
+    is_bot: bool  # account RNDBOT*
+    race: int
+    race_name: str
+    gender: int  # DB value: 0 male, 1 female
+    class_id: int
+    class_name: str
+    class_color: str
+    faction: str
+    faction_color: str
+    level: int
+    online: bool  # characters.online (bots stay online without a player)
+    logout_time: int  # unix time of the last logout, 0 = never
+    appearance: Appearance
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterView:
+    """Everything the page reads from the DB for one character (spec §6 queries 1-5)."""
+
+    header: Header
+    items: list[EquippedItem] = field(hash=False)  # by slot
+    avg_ilvl: int | None  # None = nothing equipped
+    specs: tuple[set[int], set[int]] = field(hash=False)  # split_specs
+    spec_count: int  # characters.talentGroupsCount
+    active_spec: int  # characters.activeTalentGroup (0 or 1)
+    glyphs: tuple[tuple[int, ...], tuple[int, ...]]  # per talent group, 6 glyph ids
+    stats_row: tuple | None  # character_stats row, None = never saved
+    stats_columns: tuple[str, ...]  # its column names (cursor.description)
+
+
+def _int(value: Any, default: int = 0) -> int:
+    return default if value is None else int(value)
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def equipped_item(row: tuple) -> EquippedItem:
+    """One query-2 row (``EQUIPMENT_COLUMNS`` order) -> ``EquippedItem``, every field
+    set from its column; NULL numbers (the resistances are nullable) become 0."""
+    v = dict(zip(_EQUIPMENT_KEYS, row))
+    return EquippedItem(
+        slot=_int(v["slot"]),
+        entry=_int(v["entry"]),
+        name=_text(v["name"]),
+        display_id=_int(v["displayid"]),
+        inventory_type=_int(v["InventoryType"]),
+        item_class=_int(v["class"]),
+        subclass=_int(v["subclass"]),
+        quality=_int(v["Quality"]),
+        item_level=_int(v["ItemLevel"]),
+        required_level=_int(v["RequiredLevel"]),
+        bonding=_int(v["bonding"]),
+        armor=_int(v["armor"]),
+        delay=_int(v["delay"]),
+        dmg_min=float(v["dmg_min1"] or 0),
+        dmg_max=float(v["dmg_max1"] or 0),
+        dmg_type=_int(v["dmg_type1"]),
+        stat_types=tuple(_int(v[f"stat_type{i}"]) for i in range(1, 11)),
+        stat_values=tuple(_int(v[f"stat_value{i}"]) for i in range(1, 11)),
+        holy_res=_int(v["holy_res"]),
+        fire_res=_int(v["fire_res"]),
+        nature_res=_int(v["nature_res"]),
+        frost_res=_int(v["frost_res"]),
+        shadow_res=_int(v["shadow_res"]),
+        arcane_res=_int(v["arcane_res"]),
+        socket_colors=tuple(_int(v[f"socketColor_{i}"]) for i in range(1, 4)),
+        socket_bonus=_int(v["socketBonus"]),
+        item_set=_int(v["itemset"]),
+        spell_ids=tuple(_int(v[f"spellid_{i}"]) for i in range(1, 6)),
+        spell_triggers=tuple(_int(v[f"spelltrigger_{i}"]) for i in range(1, 6)),
+        max_durability=_int(v["MaxDurability"]),
+        allowable_class=_int(v["AllowableClass"], -1),
+        description=_text(v["description"]),
+        enchantments=parse_enchantments(v["enchantments"]),
+        random_property_id=_int(v["randomPropertyId"]),
+    )
+
+
+def _connect(*, host: str, port: int, user: str, password: str):
+    return mysql.connector.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        connection_timeout=2,
+        autocommit=True,
+    )
+
+
+def _close(conn) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def search_characters(
+    q: str, *, host: str, port: int, user: str, password: str
+) -> list[SearchHit]:
+    """Up to 20 characters whose name starts with ``q``: humans first, then bots, each
+    by level (high first) and name. The AH bot is left out. Under 2 characters -> ``[]``
+    without touching the DB."""
+    prefix = normalize_search(q)
+    if prefix is None:
+        return []
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SEARCH_SQL, (prefix + "%",))
+            rows = cur.fetchall()
+    finally:
+        _close(conn)
+    hits: list[SearchHit] = []
+    for guid, name, level, race, class_id, is_bot in rows:
+        cls = wr.class_name(_int(class_id))
+        hits.append(SearchHit(
+            guid=_int(guid),
+            name=_text(name),
+            level=_int(level),
+            race=_int(race),
+            class_id=_int(class_id),
+            class_name=cls,
+            class_color=wr.class_color(cls),
+            race_name=wr.race_name(_int(race)),
+            is_bot=bool(is_bot),
+        ))
+    return hits
+
+
+def _header(row: tuple) -> Header:
+    (guid, name, username, is_bot, race, gender, class_id, level, online, logout_time,
+     skin, face, hair_style, hair_color, facial_style) = row[:15]
+    cls = wr.class_name(_int(class_id))
+    fac = wr.faction(_int(race))
+    return Header(
+        guid=_int(guid),
+        name=_text(name),
+        account=_text(username),
+        is_bot=bool(is_bot),
+        race=_int(race),
+        race_name=wr.race_name(_int(race)),
+        gender=_int(gender),
+        class_id=_int(class_id),
+        class_name=cls,
+        class_color=wr.class_color(cls),
+        faction=fac,
+        faction_color=wr.faction_color(fac),
+        level=_int(level),
+        online=bool(online),
+        logout_time=_int(logout_time),
+        appearance=Appearance(
+            skin=_int(skin),
+            face=_int(face),
+            hair_style=_int(hair_style),
+            hair_color=_int(hair_color),
+            facial_style=_int(facial_style),
+        ),
+    )
+
+
+def _glyph_groups(rows) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    groups = [(0,) * GLYPH_SLOTS, (0,) * GLYPH_SLOTS]
+    for talent_group, *glyphs in rows:
+        group = _int(talent_group)
+        if group in (0, 1):
+            groups[group] = (tuple(_int(g) for g in glyphs) + (0,) * GLYPH_SLOTS)[:GLYPH_SLOTS]
+    return groups[0], groups[1]
+
+
+def collect_character(
+    guid: int,
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    store: DbcStore | None = None,
+) -> CharacterView | None:
+    """One character's rows (spec §6 queries 1-5 + the average item level), ``None``
+    for a guid with no (undeleted) character. Six ``SELECT``s on one connection.
+
+    ``store`` is accepted for the caller's convenience; nothing here reads DBC data
+    (names and icons are looked up when the page is built).
+    """
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            params = (guid,)
+            cur.execute(_HEADER_SQL, params)
+            rows = cur.fetchall()
+            if not rows:
+                return None
+            row = rows[0]
+            header = _header(row)
+            spec_count, active_spec = _int(row[15], 1), _int(row[16])
+
+            cur.execute(_EQUIPMENT_SQL, params)
+            items = [equipped_item(r) for r in cur.fetchall()]
+
+            cur.execute(_AVG_ILVL_SQL, params)
+            avg_rows = cur.fetchall()
+            avg = avg_rows[0][0] if avg_rows else None
+
+            cur.execute(_TALENTS_SQL, params)
+            specs = split_specs((_int(s), _int(m)) for s, m in cur.fetchall())
+
+            cur.execute(_GLYPHS_SQL, params)
+            glyphs = _glyph_groups(cur.fetchall())
+
+            cur.execute(_STATS_SQL, params)
+            stats = cur.fetchall()
+            stats_columns = tuple(d[0] for d in cur.description or ())
+    finally:
+        _close(conn)
+    return CharacterView(
+        header=header,
+        items=items,
+        avg_ilvl=None if avg is None else int(avg),
+        specs=specs,
+        spec_count=spec_count,
+        active_spec=active_spec,
+        glyphs=glyphs,
+        stats_row=tuple(stats[0]) if stats else None,
+        stats_columns=stats_columns,
+    )
