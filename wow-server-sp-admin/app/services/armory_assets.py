@@ -28,7 +28,9 @@ discipline (allow-list first, everything built from scratch, fail closed):
   once with a bounded wait for a slot, single-flight per path, never a retry). It
   pins the viewer script (fetched once, then only by ``update_viewer``, with
   ``revert_viewer`` to the previous copy) and falls back to pass-through when the
-  cache cannot be written. ``get_proxy()`` is the one long-lived instance.
+  cache cannot be written. ``fetch_item_xml`` is the display-ID resolver's one Wowhead
+  item lookup (``armory_resolver``), under the same guard and never cached.
+  ``get_proxy()`` is the one long-lived instance.
 """
 
 from __future__ import annotations
@@ -1006,7 +1008,7 @@ class AssetProxy:
         host cooling down, no free slot within the wait budget (R17: that starts no
         cool-down), or an upstream failure (``UpstreamError`` or any other status),
         which starts the host's cool-down (R16: per host). The display-ID resolver's
-        item lookup (Task 8) is meant to come through here as well.
+        item lookup comes through here as well (``fetch_item_xml``).
         """
         host = urlsplit(url).netloc
         self._check_may_fetch(host)
@@ -1029,6 +1031,22 @@ class AssetProxy:
             raise _Unavailable("upstream", f"HTTP {result.status}")
         self._host_answered(host)
         return result
+
+    def fetch_item_xml(self, entry: int) -> FetchResult | None:
+        """Wowhead's item XML for ``entry`` (the display-ID resolver's fallback, spec 8.1), or None.
+
+        One GET of ``item_xml_url(entry)`` under the same guard as an asset miss (the
+        On/Off switch, www.wowhead.com's cool-down, the shared slots). The answer is
+        returned, never cached, and no ``serve`` path reaches it. Returns the 200 or the
+        404; None when nothing was asked (switched off, cooling down, no free slot) or
+        upstream failed (network error, 429, 5xx …, which starts the host's cool-down).
+        ``ValueError`` for an entry that is not a positive int, before anything is asked.
+        """
+        url = item_xml_url(entry)
+        try:
+            return self._guarded_fetch(url)
+        except _Unavailable:
+            return None
 
     def _host_failed(self, host: str) -> None:
         """(Re)start the host's cool-down.

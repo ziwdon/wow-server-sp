@@ -34,12 +34,14 @@ def _reset_cloud_service():
 
 @pytest.fixture(autouse=True)
 def _reset_armory_proxy():
-    """Drop the process-wide armory AssetProxy between tests.
+    """Drop the process-wide armory AssetProxy and DisplayIdResolver between tests.
 
-    ``armory_assets.get_proxy()`` builds one instance from ``ADMIN_DATA_DIR`` at its first call;
+    ``armory_assets.get_proxy()`` builds one instance from ``ADMIN_DATA_DIR`` at its first call,
+    and ``armory_resolver.get_resolver()`` one on top of it (with its in-memory display-ID map);
     like the cloud service above, a cached one must not carry one test's paths into the next.
     """
     yield
-    from app.services import armory_assets
+    from app.services import armory_assets, armory_resolver
 
+    armory_resolver.reset_resolver()
     armory_assets.reset_proxy()

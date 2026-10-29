@@ -1118,11 +1118,10 @@ def test_cooldown_is_per_host_and_status_reports_the_earliest_active_one(tmp_pat
     assert rig.proxy.serve(M2).status == 503  # wow.zamimg.com cools down for 60 s
     rig.mono.now += 30
     rig.wall.now += 30
-    # The resolver's XML lookup (Task 8) goes through the same guard; another host is not cooling.
-    assert rig.proxy._guarded_fetch(xml_url).status == 200
+    # The resolver's XML lookup goes through the same guard; another host is not cooling.
+    assert rig.proxy.fetch_item_xml(6125).status == 200
     rig.fetch.answers[xml_url] = UpstreamError("connection failed")
-    with pytest.raises(armory_assets._Unavailable):
-        rig.proxy._guarded_fetch(xml_url)  # www.wowhead.com cools down until 30 s after zamimg
+    assert rig.proxy.fetch_item_xml(6125) is None  # www.wowhead.com cools down until 30 s after zamimg
     assert rig.proxy.status().unreachable_since == _iso(start)  # both active: the earliest
     rig.mono.now += 31  # zamimg's cool-down is over, wowhead's is not
     assert rig.proxy.status().unreachable_since == _iso(start + 30)
@@ -1131,6 +1130,62 @@ def test_cooldown_is_per_host_and_status_reports_the_earliest_active_one(tmp_pat
     assert rig.proxy.status().unreachable_since == _iso(start + 30)
     rig.mono.now += 30  # wowhead's is over too: nothing is reported (R16b)
     assert rig.proxy.status().unreachable_since is None
+
+
+def test_fetch_item_xml_goes_through_the_guard_and_is_never_cached(tmp_path):
+    xml_url = "https://www.wowhead.com/wotlk/item=6125&xml"
+    body = b'<wowhead><item id="6125"><icon displayId="9182">inv_shirt_06</icon></item></wowhead>'
+    rig = Rig(tmp_path, FakeFetch({xml_url: _ok(body)}))
+
+    found = rig.proxy.fetch_item_xml(6125)
+    assert found == FetchResult(200, body, None, None)
+    assert rig.proxy.fetch_item_xml(6125).status == 200  # never cached: asked again
+    assert rig.fetch.calls == [(xml_url, None), (xml_url, None)]
+    assert not rig.data_dir.exists()  # nothing stored, not even a negative entry
+    rig.fetch.answers[xml_url] = _status(404)
+    assert rig.proxy.fetch_item_xml(6125) == FetchResult(404, b"", None, None)  # an answer, not an outage
+    assert not rig.data_dir.exists()
+    assert rig.proxy.serve("item-displayid/6125").status == 404  # no asset path reaches it
+    assert len(rig.fetch.calls) == 3
+
+    with pytest.raises(ValueError):
+        rig.proxy.fetch_item_xml(0)
+    with pytest.raises(ValueError):
+        rig.proxy.fetch_item_xml("6125")  # type: ignore[arg-type]
+    assert len(rig.fetch.calls) == 3
+
+    # Switched off: not attempted.
+    rig.proxy.settings.set_enabled(False)
+    assert rig.proxy.fetch_item_xml(6125) is None
+    rig.proxy.settings.set_enabled(True)
+    assert len(rig.fetch.calls) == 3
+
+    # 429/5xx and network errors: None, and www.wowhead.com cools down (zamimg does not).
+    for failure in (_status(429), _status(503), UpstreamError("timeout")):
+        rig.fetch.answers[xml_url] = failure
+        assert rig.proxy.fetch_item_xml(6125) is None
+        assert rig.proxy.status().unreachable_since is not None
+        calls = len(rig.fetch.calls)
+        assert rig.proxy.fetch_item_xml(6125) is None  # cooling down: not attempted
+        assert len(rig.fetch.calls) == calls
+        assert rig.proxy.serve(M2).status == 200  # the model CDN is another host
+        rig.mono.now += 61
+        rig.proxy.cache.remove(M2)
+    rig.fetch.answers[xml_url] = _ok(body)
+    assert rig.proxy.fetch_item_xml(6125).status == 200
+    assert rig.proxy.status().unreachable_since is None
+
+
+def test_fetch_item_xml_shares_the_slots_and_gives_up_without_a_cooldown(tmp_path):
+    rig = Rig(tmp_path, GateFetch(), max_parallel=1, slot_timeout_s=0.2)
+    holder = _in_thread(rig.proxy.serve, M2)
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    assert rig.proxy.fetch_item_xml(6125) is None  # no free slot within the wait budget
+    assert rig.fetch.urls() == [M2_URL]
+    assert rig.proxy.status().unreachable_since is None
+    rig.fetch.release.set()
+    assert _joined(*holder).status == 200
+    assert rig.proxy.fetch_item_xml(6125).status == 200
 
 
 def test_serve_disabled_returns_503_for_misses_only(tmp_path):
