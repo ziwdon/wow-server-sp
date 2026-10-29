@@ -163,9 +163,9 @@ Until then the Stats tab says so and shows the current value.
   fetches and keeps a fresh copy.
 
 Under the model, **Sheathe weapons** redraws it with the weapons on the back,
-and **Hide tabard** redraws it without the tabard, so the chest armour under it
-shows (the paper-doll still lists the tabard; the box is greyed out when the
-character wears none).
+and **Hide tabard** (ticked by default) draws it without the tabard, so the chest
+armour under it shows; untick it to see the tabard (the paper-doll still lists
+the tabard; the box is greyed out and unticked when the character wears none).
 
 If a piece of gear shows a small "no 3D" mark, Wowhead has no model for it; the
 rest of the character still renders. The Armory's data is all re-fetchable, so

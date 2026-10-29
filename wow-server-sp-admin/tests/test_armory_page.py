@@ -215,7 +215,10 @@ def test_character_page_has_model_panel_paperdoll_tabs_and_blob(tmp_path, monkey
     hide = doc.by_id("armory-hide-tabard")
     assert hide.tag == "input" and hide.attrs["type"] == "checkbox"
     assert hide.parent.tag == "label" and hide.parent.norm() == "Hide tabard"
-    assert "checked" not in hide.attrs  # the tabard shows by default
+    # Owner request: the box is ticked by default, so the first render already hides the
+    # tabard (unticking shows it); armory.js disables and unticks it when there is none.
+    assert "checked" in hide.attrs
+    assert "disabled" not in hide.attrs
 
     doll = doc.find(cls="paperdoll")
     assert doll is not None
@@ -635,6 +638,25 @@ def test_armory_js_hide_tabard_leaves_only_the_tabard_out_of_the_viewer():
     load = _js_function(script, "async function load()")
     assert re.search(r"hideTabard\.disabled = !list\(answer\.items\)\.some\(isTabard\)", load)
     assert load.index("hideTabard.disabled") > load.index("data = answer")
+
+
+def test_armory_js_hide_tabard_is_unticked_while_disabled_and_keeps_the_owners_tick():
+    # The template ticks the box (the tabard is hidden by default). A greyed-out tick would
+    # suggest something is hidden, so a disabled box is also unticked; the tick it had while
+    # usable is remembered and comes back with the next answer that has a tabard (e.g. after
+    # the footer switches the 3D viewer back on), so the default is not lost on the way.
+    script = SCRIPT.read_text()
+
+    assert re.search(r"let hideWanted = Boolean\(hideTabard && hideTabard\.checked\);", script)
+    load = _js_function(script, "async function load()")
+    remember = load.index("if (!hideTabard.disabled) hideWanted = hideTabard.checked;")
+    disable = load.index("hideTabard.disabled = !list(answer.items).some(isTabard);")
+    tick = load.index("hideTabard.checked = !hideTabard.disabled && hideWanted;")
+    assert remember < disable < tick
+    # Set before the first start(): the first render reads the box through the same
+    # viewerOptions() as every re-create.
+    assert tick < load.index("start(my)")
+    assert script.count("hideWanted =") == 2  # initialised once, remembered only in load()
 
 
 def test_armory_js_both_toggles_re_create_the_viewer_through_one_guard():
