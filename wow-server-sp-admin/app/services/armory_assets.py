@@ -22,14 +22,22 @@ discipline (allow-list first, everything built from scratch, fail closed):
   (``live/viewer/``). Content types come from our own extension table, never from
   upstream.
 
-Task 7 builds the ``AssetProxy`` (single-flight, concurrency limit, cool-down,
-viewer pinning, on/off switch) on top of these.
+* ``AssetProxy`` — what the ``/armory/assets/…`` route calls (``serve``): allow-list,
+  cache hit, negative cache, then one guarded upstream GET (the On/Off switch in
+  ``ArmorySettings``, a 60 s per-host cool-down after a failure, at most 4 fetches at
+  once with a bounded wait for a slot, single-flight per path, never a retry). It
+  pins the viewer script (fetched once, then only by ``update_viewer``, with
+  ``revert_viewer`` to the previous copy) and falls back to pass-through when the
+  cache cannot be written. ``get_proxy()`` is the one long-lived instance.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
+import json
+import logging
 import os
 import re
 import ssl
@@ -41,9 +49,12 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+
+log = logging.getLogger(__name__)
 
 USER_AGENT = "wow-server-sp-admin/1.0"
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -423,6 +434,18 @@ class AssetCache:
         with self._lock:
             self._write_file(marker, b"")
 
+    def remove(self, local_path: str) -> bool:
+        """Delete one cached file (the running total follows). False when there was none."""
+        target = self.path_for(local_path)
+        with self._lock:
+            size = self._regular_size(target)
+            try:
+                os.unlink(target)
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+            self._adjust_total(-size)
+            return True
+
     # reads
 
     def get(self, local_path: str) -> Path | None:
@@ -555,3 +578,728 @@ class AssetCache:
                 with contextlib.suppress(OSError):
                     os.rmdir(here)  # only empty directories go
             return removed
+
+
+# --- proxy ---
+
+IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+VIEWER_CACHE_CONTROL = "no-cache"  # pinned, yet Update/Revert can replace it: browsers revalidate
+ERROR_CACHE_CONTROL = "no-store"
+ERROR_CONTENT_TYPE = "text/plain; charset=utf-8"
+MAX_PARALLEL_FETCHES = 4
+COOLDOWN_SECONDS = 60.0
+SLOT_WAIT_MARGIN_SECONDS = 5.0  # R17: waiting for a slot gives up after the fetch timeout plus this
+SETTINGS_FILE = "armory.json"
+VIEWER_META_PATH = VIEWER_DIR + "/viewer.meta.json"
+VIEWER_PREV_PATH = VIEWER_DIR + "/viewer.min.js.prev"
+VIEWER_PREV_META_PATH = VIEWER_DIR + "/viewer.meta.json.prev"
+
+_VIEWER_UPSTREAM = resolve_upstream(VIEWER_PATH)
+if _VIEWER_UPSTREAM is None or _VIEWER_UPSTREAM.kind != "viewer":  # pragma: no cover - fixed by the allow-list
+    raise RuntimeError("the viewer script must be allow-listed")
+_MAX_META_TEXT = 256
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _json_bytes(data: dict) -> bytes:
+    return (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` with mode 0700 when it is missing (its parents get default modes); an existing one is left."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        return
+    os.chmod(path, 0o700)  # mkdir's mode is filtered by the umask
+
+
+def _write_private_file(path: Path, data: bytes) -> None:
+    """``data`` into ``path`` (0600) through a temp file and a rename, so a reader never sees half of it."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), 0o600)
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+class ArmorySettings:
+    """``armory.json``: the 3D viewer's On/Off switch (spec 9). A missing or unreadable file means On."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.dir = Path(data_dir)
+        self.path = self.dir / SETTINGS_FILE
+        self._warned = False
+
+    def enabled(self) -> bool:
+        """Read on every call (the file is tiny), so a switch takes effect at once."""
+        try:
+            raw = json.loads(self.path.read_bytes())
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError):  # ValueError: bad JSON or bad UTF-8
+            raw = None
+        value = raw.get("enabled") if isinstance(raw, dict) else None
+        if isinstance(value, bool):
+            return value
+        if not self._warned:
+            self._warned = True
+            log.warning("armory settings %s unreadable; the 3D viewer stays on", self.path)
+        return True
+
+    def set_enabled(self, enabled: bool) -> None:
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        _make_private_dir(self.dir)
+        _write_private_file(self.path, _json_bytes({"enabled": enabled}))
+
+
+@dataclass(frozen=True)
+class Served:
+    """One answer of ``AssetProxy.serve``.
+
+    A 200 has exactly one of ``path`` (the cached file) and ``body`` (pass-through
+    bytes, when the cache cannot be written); the route sends whichever is set with
+    ``content_type``, ``cache_control`` and ``etag``. A 404/503 has neither, and
+    ``reason`` is a short plain-text line for its body.
+    """
+
+    status: int
+    path: Path | None = None
+    content_type: str = ERROR_CONTENT_TYPE
+    cache_control: str = ERROR_CACHE_CONTROL
+    etag: str | None = None
+    body: bytes | None = field(default=None, repr=False)
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ViewerStatus:
+    fetched_at: str | None  # ISO-8601 UTC from viewer.meta.json; None when nothing is pinned (or no meta)
+    etag: str | None  # upstream's ETag of the pinned copy, sent back as If-None-Match by Update
+    size: int  # bytes of the pinned script; 0 = not pinned
+    has_prev: bool  # a previous copy is kept: Revert is possible
+
+
+@dataclass(frozen=True)
+class ProxyStatus:
+    enabled: bool
+    cache_bytes: int
+    viewer: ViewerStatus
+    unreachable_since: str | None  # ISO-8601 UTC: the earliest first failure among the unreachable hosts
+    cache_writable: bool  # the last cache write worked (True before the first one)
+    pass_through: bool  # fetched bytes are served without being stored (the same fact as not cache_writable)
+    cache_error: str | None = None  # why, for the footer strip
+
+
+class ViewerError(Exception):
+    """An Update or Revert of the viewer script that did not happen; ``message`` is for the footer strip."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class _Unavailable(Exception):
+    """No upstream answer for this call: switched off, host cooling down, no free slot, or upstream failed."""
+
+    def __init__(self, kind: Literal["disabled", "cool-down", "busy", "upstream"], detail: str = "") -> None:
+        super().__init__(kind)
+        self.kind = kind
+        self.detail = detail
+
+
+_SERVE_REASONS = {
+    "disabled": "3D viewer is switched off",
+    "cool-down": "Wowhead unreachable; waiting a minute before asking again",
+    "busy": "too many Wowhead requests at once; try again",
+}
+_VIEWER_REASONS = {
+    "disabled": "The 3D viewer is switched off; switch it on to update the viewer script.",
+    "cool-down": "Wowhead is unreachable right now; try the update again in a minute. The pinned copy is kept.",
+    "busy": "Too many Wowhead requests at once; try the update again. The pinned copy is kept.",
+}
+_VIEWER_BUSY = "Another viewer script update is running."
+_NOT_FOUND = Served(404, reason="not found")
+_INTERNAL_ERROR = Served(503, reason="internal error")
+
+
+def _unavailable(err: _Unavailable) -> Served:
+    return Served(503, reason=_SERVE_REASONS.get(err.kind) or f"Wowhead unreachable ({err.detail})")
+
+
+def _viewer_unavailable(err: _Unavailable) -> str:
+    return _VIEWER_REASONS.get(err.kind) or (
+        f"Could not fetch the viewer script from Wowhead ({err.detail}); the pinned copy is kept."
+    )
+
+
+def _cache_write_error(err: OSError) -> str:
+    return f"Could not write to the model cache ({err.strerror or type(err).__name__})"
+
+
+def _asset_etag(local_path: str, size: int) -> str:
+    """Stable across hits: the path and the size, never the mtime (every hit touches it).
+
+    The ids are content-stable (spec 8) and browsers hold these responses as immutable,
+    so this only has to tell different files apart.
+    """
+    return f'"{size:x}-{_sha256(local_path.encode("ascii"))[:16]}"'
+
+
+def _viewer_meta_json(body: bytes, *, etag: str | None, last_modified: str | None, fetched_at: str | None) -> bytes:
+    return _json_bytes(
+        {
+            "etag": etag,
+            "last_modified": last_modified,
+            "fetched_at": fetched_at,
+            "sha256": _sha256(body),
+            "size": len(body),
+        }
+    )
+
+
+def _meta_text(value: object) -> str | None:
+    """A meta string fit to show and to send back as If-None-Match (visible ASCII and spaces), else None."""
+    if isinstance(value, str) and 0 < len(value) <= _MAX_META_TEXT and _printable_ascii(value.replace(" ", "")):
+        return value
+    return None
+
+
+@dataclass(frozen=True)
+class _ViewerMeta:
+    etag: str | None
+    fetched_at: str | None
+
+
+def _parse_viewer_meta(data: bytes) -> _ViewerMeta | None:
+    try:
+        raw = json.loads(data)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return _ViewerMeta(etag=_meta_text(raw.get("etag")), fetched_at=_meta_text(raw.get("fetched_at")))
+
+
+@dataclass
+class _Flight:
+    """One upstream fetch in progress for a path; requests for the same path wait on ``done``."""
+
+    done: threading.Event = field(default_factory=threading.Event)
+    outcome: Served | None = None
+    followers: int = 0
+
+
+@dataclass(frozen=True)
+class _HostState:
+    until: float  # monotonic: no request goes to this host before then
+    since: float  # wall clock: its first failure since it last answered
+
+
+class AssetProxy:
+    """The one door to Wowhead's CDN: allow-list, cache, then one guarded upstream GET (spec 8).
+
+    Meant as one long-lived instance (``get_proxy()``): the cache's running byte total
+    and the cool-down state live in it. Every method blocks; call them from a worker
+    thread (``status()`` too, it takes the cache lock).
+
+    Locks, in the only order they nest: ``_viewer_op`` (one Update/Revert at a time,
+    never waited for) -> ``_viewer_lock`` (every write of the viewer files) -> the
+    cache's own lock. ``_inflight_lock`` and ``_state_mu`` are leaves. Nothing is held
+    while waiting for a slot or for upstream except ``_viewer_op`` during an Update.
+    """
+
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        fetch: Callable[..., FetchResult] = fetch_upstream,
+        clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], float] = time.time,
+        max_parallel: int = MAX_PARALLEL_FETCHES,
+        cooldown_s: float = COOLDOWN_SECONDS,
+        slot_timeout_s: float | None = None,
+    ) -> None:
+        if max_parallel < 1:
+            raise ValueError("max_parallel must be at least 1")
+        self.data_dir = Path(data_dir)
+        self.cache = AssetCache(self.data_dir / "cache", clock=now)
+        self.settings = ArmorySettings(self.data_dir)
+        self._fetch = fetch
+        self._clock = clock  # monotonic: cool-downs
+        self._now = now  # wall clock: the times people see, and the negative cache's age
+        self._cooldown_s = float(cooldown_s)
+        if slot_timeout_s is None:
+            slot_timeout_s = DEFAULT_TIMEOUT_SECONDS + SLOT_WAIT_MARGIN_SECONDS
+        self._slot_timeout = float(slot_timeout_s)
+        # A follower waits at most as long as its leader can take: the slot wait plus one fetch
+        # (fetch_upstream's worst case is about its timeout plus one socket timeout).
+        self._flight_timeout = self._slot_timeout + 2 * DEFAULT_TIMEOUT_SECONDS + SLOT_WAIT_MARGIN_SECONDS
+        self._slots = threading.BoundedSemaphore(max_parallel)
+        self._inflight: dict[str, _Flight] = {}
+        self._inflight_lock = threading.Lock()
+        self._state_mu = threading.Lock()  # _hosts, _cache_error, _viewer_digest_memo
+        self._hosts: dict[str, _HostState] = {}
+        self._cache_error: str | None = None
+        self._viewer_digest_memo: tuple[tuple[int, int, int, int], str] | None = None
+        self._viewer_lock = threading.Lock()
+        self._viewer_op = threading.Lock()
+
+    # serving
+
+    def serve(self, local_path: str) -> Served:
+        """Answer one ``/armory/assets/<local_path>`` request.
+
+        Not allow-listed: 404. Cached: 200 (hits are served even while switched off or
+        while Wowhead is down). Remembered 404: 404. Otherwise, unless switched off or
+        the host is cooling down (503 at once), one fetch shared by every concurrent
+        request for the path: 200 is stored and served, 404 remembered for an hour,
+        anything else is a 503. The viewer script is fetched here only while nothing is
+        pinned; afterwards only ``update_viewer`` fetches it.
+        """
+        upstream = resolve_upstream(local_path)
+        if upstream is None:
+            return _NOT_FOUND
+        try:
+            answer = self._cached_answer(local_path, upstream)
+        except ValueError:  # a cache path that is a symlink or leaves the cache: never served, never fetched
+            return _NOT_FOUND
+        if answer is not None:
+            return answer
+        try:
+            self._check_may_fetch(urlsplit(upstream.url).netloc)
+        except _Unavailable as err:
+            return _unavailable(err)
+        with self._inflight_lock:
+            flight = self._inflight.get(local_path)
+            leading = flight is None
+            if flight is None:
+                # A fetch that finished a moment ago stored its answer before leaving the table.
+                try:
+                    answer = self._cached_answer(local_path, upstream)
+                except ValueError:
+                    return _NOT_FOUND
+                if answer is not None:
+                    return answer
+                flight = self._inflight[local_path] = _Flight()
+            else:
+                flight.followers += 1
+        if leading:
+            return self._lead(local_path, upstream, flight)
+        return self._follow(local_path, upstream, flight)
+
+    def _cached_answer(self, local_path: str, upstream: Upstream) -> Served | None:
+        """A hit, a remembered 404, or None for a miss. ``ValueError`` for an unusable cache path."""
+        hit = self._viewer_hit() if upstream.kind == "viewer" else self._asset_hit(local_path, upstream)
+        if hit is not None:
+            return hit
+        if self.cache.negative(local_path):
+            return _NOT_FOUND
+        return None
+
+    def _asset_hit(self, local_path: str, upstream: Upstream) -> Served | None:
+        path = self.cache.get(local_path)
+        if path is None:
+            return None
+        try:
+            size = os.lstat(path).st_size
+        except OSError:
+            return None  # evicted a moment ago
+        return Served(200, path, upstream.content_type, IMMUTABLE_CACHE_CONTROL, _asset_etag(local_path, size))
+
+    def _viewer_hit(self) -> Served | None:
+        """The pinned viewer script, or None when nothing is pinned. Not touched: it is never evicted."""
+        path = self.cache.path_for(VIEWER_PATH)
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            digest = self._viewer_digest(path, st)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError:
+            # Pinned but unreadable: never silently replaced by whatever upstream serves today.
+            return Served(503, reason="pinned viewer script unreadable")
+        return Served(200, path, _VIEWER_UPSTREAM.content_type, VIEWER_CACHE_CONTROL, f'"{digest}"')
+
+    def _viewer_digest(self, path: Path, st: os.stat_result) -> str:
+        """sha256 of the pinned file (the value viewer.meta.json records), hashed once per file version.
+
+        Taken from the file rather than from the meta, so a crash between writing the two
+        can never pair one script with another's ETag.
+        """
+        key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        with self._state_mu:
+            memo = self._viewer_digest_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(_READ_CHUNK), b""):
+                digest.update(chunk)
+        value = digest.hexdigest()
+        with self._state_mu:
+            self._viewer_digest_memo = (key, value)
+        return value
+
+    def _forget_viewer_digest(self) -> None:
+        with self._state_mu:
+            self._viewer_digest_memo = None
+
+    def _lead(self, local_path: str, upstream: Upstream, flight: _Flight) -> Served:
+        try:
+            try:
+                result = self._guarded_fetch(upstream.url)
+            except _Unavailable as err:
+                served = _unavailable(err)
+            else:
+                if result.status != 200:  # 404: the guard lets only 200 and 404 through here
+                    served = self._remember_missing(local_path)
+                elif upstream.kind == "viewer":
+                    served = self._pin_first_use(result)
+                else:
+                    served = self._store(local_path, upstream, result.body)
+            flight.outcome = served
+            return served
+        finally:
+            if flight.outcome is None:  # an unexpected exception: followers must not wait for nothing
+                flight.outcome = _INTERNAL_ERROR
+            with self._inflight_lock:
+                self._inflight.pop(local_path, None)
+            flight.done.set()
+
+    def _follow(self, local_path: str, upstream: Upstream, flight: _Flight) -> Served:
+        """Take the leader's outcome without a second fetch; after a stored 200 re-read the cache."""
+        if not flight.done.wait(self._flight_timeout):
+            return _unavailable(_Unavailable("busy"))
+        outcome = flight.outcome or _INTERNAL_ERROR
+        if outcome.status != 200 or outcome.body is not None:  # a failure, or pass-through bytes
+            return outcome
+        try:
+            again = self._cached_answer(local_path, upstream)
+        except ValueError:
+            again = None
+        return again if again is not None else _unavailable(_Unavailable("busy"))
+
+    # upstream
+
+    def _check_may_fetch(self, host: str) -> None:
+        if not self.settings.enabled():
+            raise _Unavailable("disabled")
+        with self._state_mu:
+            state = self._hosts.get(host)
+            cooling = state is not None and self._clock() < state.until
+        if cooling:
+            raise _Unavailable("cool-down")
+
+    def _guarded_fetch(self, url: str, *, if_none_match: str | None = None) -> FetchResult:
+        """One upstream GET under the On/Off switch, the host's cool-down and the shared slots.
+
+        Returns a 200 or a 404 (and a 304 to a conditional request) and marks the host
+        reachable. Otherwise raises ``_Unavailable`` and never retries: switched off,
+        host cooling down, no free slot within the wait budget (R17: that starts no
+        cool-down), or an upstream failure (``UpstreamError`` or any other status),
+        which starts the host's cool-down (R16: per host). The display-ID resolver's
+        item lookup (Task 8) is meant to come through here as well.
+        """
+        host = urlsplit(url).netloc
+        self._check_may_fetch(host)
+        if not self._slots.acquire(timeout=self._slot_timeout):
+            raise _Unavailable("busy")
+        try:
+            self._check_may_fetch(host)  # the switch or a cool-down may have changed while waiting
+            try:
+                if if_none_match:
+                    result = self._fetch(url, if_none_match=if_none_match)
+                else:
+                    result = self._fetch(url)
+            except UpstreamError as err:
+                self._host_failed(host)
+                raise _Unavailable("upstream", err.reason) from None
+        finally:
+            self._slots.release()
+        if result.status not in ((200, 304, 404) if if_none_match else (200, 404)):
+            self._host_failed(host)
+            raise _Unavailable("upstream", f"HTTP {result.status}")
+        self._host_answered(host)
+        return result
+
+    def _host_failed(self, host: str) -> None:
+        """(Re)start the host's cool-down; ``since`` keeps its first failure until it answers again."""
+        with self._state_mu:
+            previous = self._hosts.get(host)
+            since = previous.since if previous is not None else self._now()
+            self._hosts[host] = _HostState(until=self._clock() + self._cooldown_s, since=since)
+        if previous is None:
+            log.warning("armory: %s unreachable; misses answer 503 for %.0f s", host, self._cooldown_s)
+
+    def _host_answered(self, host: str) -> None:
+        with self._state_mu:
+            previous = self._hosts.pop(host, None)
+        if previous is not None:
+            log.info("armory: %s answers again", host)
+
+    # cache writes
+
+    def _put(self, local_path: str, body: bytes) -> Path:
+        _make_private_dir(self.data_dir)  # before the cache would create it with default modes
+        return self.cache.put(local_path, body)
+
+    def _store(self, local_path: str, upstream: Upstream, body: bytes) -> Served:
+        etag = _asset_etag(local_path, len(body))
+        try:
+            path = self._put(local_path, body)
+        except OSError as err:
+            self._cache_failed(err)
+            return Served(200, None, upstream.content_type, IMMUTABLE_CACHE_CONTROL, etag, body)
+        self._cache_ok()
+        return Served(200, path, upstream.content_type, IMMUTABLE_CACHE_CONTROL, etag)
+
+    def _remember_missing(self, local_path: str) -> Served:
+        try:
+            _make_private_dir(self.data_dir)
+            self.cache.mark_negative(local_path)
+        except OSError as err:
+            self._cache_failed(err)
+        else:
+            self._cache_ok()
+        return _NOT_FOUND
+
+    def _cache_failed(self, err: OSError) -> None:
+        """Pass-through mode until a write works again; the reason goes to the footer strip."""
+        message = f"{_cache_write_error(err)}; serving without storing. Check that the admin data folder is writable."
+        with self._state_mu:
+            first = self._cache_error is None
+            self._cache_error = message
+        if first:
+            log.warning("armory: %s; pass-through mode", _cache_write_error(err))
+
+    def _cache_ok(self) -> None:
+        with self._state_mu:
+            was_failing = self._cache_error is not None
+            self._cache_error = None
+        if was_failing:
+            log.info("armory: the model cache is writable again")
+
+    def _read_cache_file(self, local_path: str) -> bytes | None:
+        """The bytes of a regular cache file, or None when there is none; other errors raise ``OSError``."""
+        path = self.cache.path_for(local_path)
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            return path.read_bytes()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+
+    def _cache_file_size(self, local_path: str) -> int | None:
+        try:
+            st = os.lstat(self.cache.path_for(local_path))
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return st.st_size if stat.S_ISREG(st.st_mode) else None
+
+    # viewer script pinning
+
+    def _pin_first_use(self, result: FetchResult) -> Served:
+        with self._viewer_lock:
+            pinned = self._viewer_hit()
+            if pinned is not None:  # an Update pinned one meanwhile: the pinned copy wins
+                return pinned
+            try:
+                self._write_viewer(result)
+            except OSError as err:
+                self._cache_failed(err)
+                return self._viewer_pass_through(result.body)
+            self._cache_ok()
+            pinned = self._viewer_hit()
+        return pinned if pinned is not None else self._viewer_pass_through(result.body)
+
+    @staticmethod
+    def _viewer_pass_through(body: bytes) -> Served:
+        return Served(200, None, _VIEWER_UPSTREAM.content_type, VIEWER_CACHE_CONTROL, f'"{_sha256(body)}"', body)
+
+    def _write_viewer(self, result: FetchResult) -> None:
+        """Caller holds ``_viewer_lock``. The script first, then its meta."""
+        body = result.body
+        meta = _viewer_meta_json(
+            body, etag=result.etag, last_modified=result.last_modified, fetched_at=_iso(self._now())
+        )
+        self._put(VIEWER_PATH, body)
+        self._put(VIEWER_META_PATH, meta)
+        self._forget_viewer_digest()
+
+    def _swap_in_viewer(self, result: FetchResult) -> None:
+        """Caller holds ``_viewer_lock``. Copies rather than renames, so a pinned script always exists."""
+        current = self._read_cache_file(VIEWER_PATH)
+        if current is not None and _sha256(current) == _sha256(result.body):
+            # The same script under new validators: refresh the meta, keep .prev (still the real previous one).
+            self._put(
+                VIEWER_META_PATH,
+                _viewer_meta_json(
+                    current, etag=result.etag, last_modified=result.last_modified, fetched_at=_iso(self._now())
+                ),
+            )
+            return
+        if current is not None:
+            current_meta = self._read_cache_file(VIEWER_META_PATH)
+            if current_meta is None:
+                current_meta = _viewer_meta_json(current, etag=None, last_modified=None, fetched_at=None)
+            self._put(VIEWER_PREV_PATH, current)
+            self._put(VIEWER_PREV_META_PATH, current_meta)  # the exact bytes, for an exact Revert
+        self._write_viewer(result)
+
+    def _pinned_etag(self) -> str | None:
+        """The pinned copy's upstream ETag when one is pinned (and it is safe to send back), else None."""
+        try:
+            if self._cache_file_size(VIEWER_PATH) is None:
+                return None
+            meta = self._read_cache_file(VIEWER_META_PATH)
+        except (OSError, ValueError):
+            return None
+        parsed = _parse_viewer_meta(meta) if meta is not None else None
+        return parsed.etag if parsed is not None else None
+
+    def update_viewer(self) -> ViewerStatus:
+        """Fetch the viewer script again (conditional GET) and pin the new copy, keeping the current one as ``.prev``.
+
+        A 304 changes nothing; the same bytes under new validators refresh only the meta.
+        Refused while switched off (R18), while the host cools down and while another
+        Update/Revert runs; every failure keeps the pinned copy. Raises ``ViewerError``.
+        """
+        if not self._viewer_op.acquire(blocking=False):
+            raise ViewerError(_VIEWER_BUSY)
+        try:
+            if not self.settings.enabled():
+                raise ViewerError(_VIEWER_REASONS["disabled"])
+            try:
+                result = self._guarded_fetch(_VIEWER_UPSTREAM.url, if_none_match=self._pinned_etag())
+            except _Unavailable as err:
+                raise ViewerError(_viewer_unavailable(err)) from None
+            if result.status == 304:
+                return self.viewer_status()
+            if result.status == 404:
+                raise ViewerError("Wowhead no longer serves the viewer script (HTTP 404); the pinned copy is kept.")
+            with self._viewer_lock:
+                try:
+                    self._swap_in_viewer(result)
+                except OSError as err:
+                    self._cache_failed(err)
+                    raise ViewerError(
+                        f"{_cache_write_error(err)}; check that the admin data folder is writable."
+                    ) from None
+                self._cache_ok()
+            return self.viewer_status()
+        finally:
+            self._viewer_op.release()
+
+    def revert_viewer(self) -> ViewerStatus:
+        """Pin the previous copy again, bytes and meta exactly as they were; ``.prev`` is used up.
+
+        Local only, so it also works while switched off or while Wowhead is down.
+        Raises ``ViewerError`` when there is no previous copy or it cannot be written.
+        """
+        if not self._viewer_op.acquire(blocking=False):
+            raise ViewerError(_VIEWER_BUSY)
+        try:
+            with self._viewer_lock:
+                try:
+                    previous = self._read_cache_file(VIEWER_PREV_PATH)
+                    if previous is None:
+                        raise ViewerError("There is no previous viewer script to revert to.")
+                    previous_meta = self._read_cache_file(VIEWER_PREV_META_PATH)
+                    if previous_meta is None:
+                        previous_meta = _viewer_meta_json(previous, etag=None, last_modified=None, fetched_at=None)
+                    self._put(VIEWER_PATH, previous)
+                    self._put(VIEWER_META_PATH, previous_meta)
+                except OSError as err:
+                    self._cache_failed(err)
+                    raise ViewerError(
+                        f"{_cache_write_error(err)}; check that the admin data folder is writable."
+                    ) from None
+                self._forget_viewer_digest()
+                self._cache_ok()
+                for leftover in (VIEWER_PREV_PATH, VIEWER_PREV_META_PATH):
+                    try:
+                        self.cache.remove(leftover)
+                    except OSError as err:  # reverted already; a leftover only keeps Revert on offer
+                        log.warning("armory: could not remove %s (%s)", leftover, err.strerror)
+            return self.viewer_status()
+        finally:
+            self._viewer_op.release()
+
+    def viewer_status(self) -> ViewerStatus:
+        try:
+            size = self._cache_file_size(VIEWER_PATH)
+            has_prev = self._cache_file_size(VIEWER_PREV_PATH) is not None
+            meta = self._read_cache_file(VIEWER_META_PATH) if size is not None else None
+        except (OSError, ValueError):
+            return ViewerStatus(fetched_at=None, etag=None, size=0, has_prev=False)
+        if size is None:
+            return ViewerStatus(fetched_at=None, etag=None, size=0, has_prev=has_prev)
+        parsed = _parse_viewer_meta(meta) if meta is not None else None
+        return ViewerStatus(
+            fetched_at=parsed.fetched_at if parsed is not None else None,
+            etag=parsed.etag if parsed is not None else None,
+            size=size,
+            has_prev=has_prev,
+        )
+
+    # footer strip
+
+    def status(self) -> ProxyStatus:
+        """For the footer strip. Blocking (the cache lock, at most one walk): call it off the event loop."""
+        with self._state_mu:
+            since = min((state.since for state in self._hosts.values()), default=None)
+            cache_error = self._cache_error
+        return ProxyStatus(
+            enabled=self.settings.enabled(),
+            cache_bytes=self.cache.size_bytes(),
+            viewer=self.viewer_status(),
+            unreachable_since=_iso(since) if since is not None else None,
+            cache_writable=cache_error is None,
+            pass_through=cache_error is not None,
+            cache_error=cache_error,
+        )
+
+    def clear_cache(self) -> int:
+        """Delete every cached asset and remembered 404; the pinned script, its ``.prev`` and both metas stay."""
+        return self.cache.clear()
+
+
+# --- the process-wide instance ---
+
+_proxy: AssetProxy | None = None
+_proxy_lock = threading.Lock()
+
+
+def get_proxy() -> AssetProxy:
+    """The one ``AssetProxy`` of this process, under ``ADMIN_DATA_DIR/armory``; building it touches nothing."""
+    global _proxy
+    with _proxy_lock:
+        if _proxy is None:
+            _proxy = AssetProxy(Path(os.environ.get("ADMIN_DATA_DIR", "/admin-data")) / "armory")
+        return _proxy
+
+
+def reset_proxy() -> None:
+    """Forget the instance (tests)."""
+    global _proxy
+    with _proxy_lock:
+        _proxy = None

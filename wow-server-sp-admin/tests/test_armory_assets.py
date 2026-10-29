@@ -1,32 +1,47 @@
-"""Armory assets: the upstream allow-list, the locked-down fetcher and the disk cache.
+"""Armory assets: the upstream allow-list, the locked-down fetcher, the disk cache and the proxy.
 
 No test here opens a network socket: ``urllib.request.build_opener`` is replaced by a
-fake opener that records the request and answers from canned data, and an autouse
-fixture makes any real connection attempt fail the test.
+fake opener that records the request and answers from canned data, the proxy gets a
+fake ``fetch``, and an autouse fixture makes any real connection attempt fail the test.
+Thread tests wait on events with a timeout, so a bug fails the test instead of hanging it.
 """
 
 from __future__ import annotations
 
 import email.message
+import errno
+import hashlib
 import http.client
 import io
+import json
 import os
 import socket
 import stat
+import threading
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from app.services import armory_assets
 from app.services.armory_assets import (
+    ArmorySettings,
     AssetCache,
+    AssetProxy,
     FetchResult,
+    ProxyStatus,
+    Served,
     Upstream,
     UpstreamError,
+    ViewerError,
+    ViewerStatus,
     fetch_upstream,
+    get_proxy,
     item_xml_url,
+    reset_proxy,
     resolve_upstream,
 )
 
@@ -774,3 +789,604 @@ def test_cache_defaults():
     cache = AssetCache(Path("/nonexistent-armory-cache"))
     assert cache.cap_bytes == 300 * 1024 * 1024
     assert armory_assets.NEGATIVE_TTL_SECONDS == 3600
+
+
+def test_cache_remove_keeps_the_running_total(tmp_path):
+    root = tmp_path / "cache"
+    cache = AssetCache(root, clock=Clock())
+    cache.put("live/viewer/viewer.min.js.prev", b"x" * 40)
+    cache.put("wrath/m2/1.m2", b"x" * 2)
+    assert cache.size_bytes() == 42
+    assert cache.remove("live/viewer/viewer.min.js.prev") is True
+    assert cache.remove("live/viewer/viewer.min.js.prev") is False
+    assert not (root / "live" / "viewer" / "viewer.min.js.prev").exists()
+    assert cache.size_bytes() == 2
+    with pytest.raises(ValueError):
+        cache.remove("../x")
+
+
+# --- asset proxy ---
+
+M2 = "wrath/m2/123.m2"
+M2_URL = MV + M2
+SKIN = "wrath/skin/5.skin"
+VIEWER = "live/viewer/viewer.min.js"
+VIEWER_URL = MV + VIEWER
+ICON = "icons/inv_chest_leather_04.jpg"
+ICON_URL = "https://wow.zamimg.com/images/wow/icons/large/inv_chest_leather_04.jpg"
+IMMUTABLE = "public, max-age=31536000, immutable"
+WAIT = 5.0  # every wait in the thread tests is bounded
+
+
+def _ok(body: bytes, etag: str | None = None, last_modified: str | None = None) -> FetchResult:
+    return FetchResult(200, body, etag, last_modified)
+
+
+def _status(code: int) -> FetchResult:
+    return FetchResult(code, b"", None, None)
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+class FakeFetch:
+    """Records every call; answers from ``answers`` (url -> FetchResult or exception), else a 200."""
+
+    def __init__(self, answers: dict | None = None):
+        self.answers = dict(answers or {})
+        self.calls: list[tuple[str, str | None]] = []
+        self.lock = threading.Lock()
+
+    def answer(self, url: str) -> FetchResult:
+        answer = self.answers.get(url)
+        if answer is None:
+            return _ok(b"body of " + url.encode())
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def __call__(self, url: str, *, if_none_match: str | None = None) -> FetchResult:
+        with self.lock:
+            self.calls.append((url, if_none_match))
+        return self.answer(url)
+
+    def urls(self) -> list[str]:
+        with self.lock:
+            return [url for url, _etag in self.calls]
+
+
+class GateFetch(FakeFetch):
+    """Every call blocks until ``release`` is set; ``entered`` is released once per call that got in."""
+
+    def __init__(self, answers: dict | None = None):
+        super().__init__(answers)
+        self.release = threading.Event()
+        self.entered = threading.Semaphore(0)
+        self.inside = 0
+        self.max_inside = 0
+
+    def __call__(self, url: str, *, if_none_match: str | None = None) -> FetchResult:
+        with self.lock:
+            self.calls.append((url, if_none_match))
+            self.inside += 1
+            self.max_inside = max(self.max_inside, self.inside)
+        self.entered.release()
+        try:
+            if not self.release.wait(WAIT):
+                raise AssertionError("the test never opened the gate")
+            return self.answer(url)
+        finally:
+            with self.lock:
+                self.inside -= 1
+
+
+class Rig:
+    def __init__(self, tmp_path: Path, fetch: FakeFetch | None = None, **kwargs):
+        self.fetch = fetch if fetch is not None else FakeFetch()
+        self.mono = Clock(1000.0)
+        self.wall = Clock()
+        self.data_dir = tmp_path / "armory"
+        self.root = self.data_dir / "cache"
+        self.proxy = AssetProxy(self.data_dir, fetch=self.fetch, clock=self.mono, now=self.wall, **kwargs)
+
+    def file(self, local_path: str) -> Path:
+        return self.root.resolve().joinpath(*local_path.split("/"))
+
+
+def _in_thread(fn, *args):
+    box: dict = {}
+
+    def target():
+        try:
+            box["result"] = fn(*args)
+        except BaseException as err:  # re-raised in the test thread by _joined
+            box["error"] = err
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def _joined(thread: threading.Thread, box: dict):
+    thread.join(WAIT)
+    assert not thread.is_alive(), "worker thread hung"
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def _wait_until(predicate, what: str) -> None:
+    deadline = time.monotonic() + WAIT
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        time.sleep(0.005)
+
+
+def _followers(proxy: AssetProxy, local_path: str) -> int:
+    with proxy._inflight_lock:
+        flight = proxy._inflight.get(local_path)
+        return flight.followers if flight is not None else 0
+
+
+def _tree_bytes(root: Path) -> int:
+    return sum(p.stat().st_size for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def test_settings_default_on_persist_private_and_corrupt_means_on(tmp_path):
+    data_dir = tmp_path / "admin-data" / "armory"
+    settings = ArmorySettings(data_dir)
+    assert settings.enabled() is True  # no file: spec default On
+    assert not data_dir.exists()  # reading never creates anything
+
+    settings.set_enabled(False)
+    path = data_dir / "armory.json"
+    assert json.loads(path.read_text()) == {"enabled": False}
+    assert _mode(path) == 0o600 and _mode(data_dir) == 0o700
+    assert ArmorySettings(data_dir).enabled() is False
+    assert sorted(p.name for p in data_dir.iterdir()) == ["armory.json"]  # no temp file left
+    settings.set_enabled(True)
+    assert settings.enabled() is True
+
+    for corrupt in ("{not json", "[]", '{"enabled": "no"}', '{"enabled": 0}', "{}", ""):
+        path.write_text(corrupt)
+        assert settings.enabled() is True, corrupt
+    path.write_bytes(b"\xff\xfe")
+    assert settings.enabled() is True
+    with pytest.raises(TypeError):
+        settings.set_enabled("off")  # type: ignore[arg-type]
+
+
+def test_serve_miss_fetches_once_then_hits_without_fetch(tmp_path):
+    rig = Rig(tmp_path, FakeFetch({M2_URL: _ok(b"m2 bytes")}))
+    first = rig.proxy.serve(M2)
+    assert first.status == 200
+    assert first.path == rig.file(M2) and first.body is None
+    assert first.path.read_bytes() == b"m2 bytes"
+    assert first.content_type == "application/octet-stream"
+    assert first.cache_control == IMMUTABLE
+    assert first.etag and first.etag.startswith('"') and first.etag.endswith('"')
+    assert _mode(rig.data_dir) == 0o700  # created private by the proxy, before the cache dir
+
+    # Hits never contact upstream; the ETag stays the same although every hit touches the mtime.
+    rig.wall.now += 1000
+    again = rig.proxy.serve(M2)
+    assert again == first
+    rig.wall.now += 1000
+    assert rig.proxy.serve(M2).etag == first.etag
+    assert rig.fetch.calls == [(M2_URL, None)]
+
+    # The ETag is the file's identity: another path gives another one.
+    rig.fetch.answers[MV + "wrath/m2/124.m2"] = _ok(b"m2 bytes")
+    assert rig.proxy.serve("wrath/m2/124.m2").etag != first.etag
+    icon = rig.proxy.serve(ICON)
+    assert (icon.status, icon.path, icon.content_type, icon.cache_control) == (
+        200,
+        rig.file(ICON),
+        "image/jpeg",
+        IMMUTABLE,
+    )
+    assert rig.fetch.urls() == [M2_URL, MV + "wrath/m2/124.m2", ICON_URL]
+
+    # Anything outside the allow-list is a 404 that never reaches upstream or the disk.
+    for bad in (
+        "../x",
+        "wrath/m2/abc.m2",
+        "live/viewer/viewer.min.js.prev",
+        "live/viewer/viewer.meta.json",
+        "item-displayid/6125",
+        ".neg/wrath/m2/123.m2",
+        "wrath/m2/123.m2?x=1",
+        "",
+        None,
+    ):
+        served = rig.proxy.serve(bad)  # type: ignore[arg-type]
+        assert served.status == 404 and served.path is None and served.body is None, bad
+        assert served.cache_control == "no-store"
+    assert len(rig.fetch.calls) == 3
+
+
+def test_serve_single_flight_concurrent_same_path_fetches_once(tmp_path):
+    rig = Rig(tmp_path, GateFetch({M2_URL: _ok(b"one copy")}))
+    leader = _in_thread(rig.proxy.serve, M2)
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    follower = _in_thread(rig.proxy.serve, M2)
+    _wait_until(lambda: _followers(rig.proxy, M2) == 1, "the second request to join the fetch")
+    rig.fetch.release.set()
+    first, second = _joined(*leader), _joined(*follower)
+    assert first.status == second.status == 200
+    assert first.path == second.path == rig.file(M2)
+    assert second.etag == first.etag
+    assert rig.fetch.urls() == [M2_URL]
+    assert rig.proxy._inflight == {}
+
+
+def test_serve_single_flight_shares_a_failure_without_a_second_fetch(tmp_path):
+    rig = Rig(tmp_path, GateFetch({M2_URL: _status(502)}))
+    leader = _in_thread(rig.proxy.serve, M2)
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    follower = _in_thread(rig.proxy.serve, M2)
+    _wait_until(lambda: _followers(rig.proxy, M2) == 1, "the second request to join the fetch")
+    rig.fetch.release.set()
+    first, second = _joined(*leader), _joined(*follower)
+    assert first.status == second.status == 503
+    assert second == first
+    assert rig.fetch.urls() == [M2_URL]
+
+
+def test_serve_caps_parallel_upstream_fetches_at_four(tmp_path):
+    rig = Rig(tmp_path, GateFetch())
+    workers = [_in_thread(rig.proxy.serve, f"wrath/m2/{n}.m2") for n in range(8)]
+    for _ in range(4):
+        assert rig.fetch.entered.acquire(timeout=WAIT)
+    assert not rig.fetch.entered.acquire(timeout=0.3)  # a fifth fetch would have started by now
+    assert rig.fetch.inside == 4
+    rig.fetch.release.set()
+    results = [_joined(*worker) for worker in workers]
+    assert [r.status for r in results] == [200] * 8
+    assert rig.fetch.max_inside == 4
+    assert sorted(rig.fetch.urls()) == sorted(MV + f"wrath/m2/{n}.m2" for n in range(8))
+
+
+def test_serve_slot_wait_is_bounded_and_does_not_start_a_cooldown(tmp_path):
+    rig = Rig(tmp_path, GateFetch(), max_parallel=1, slot_timeout_s=0.2)
+    holder = _in_thread(rig.proxy.serve, "wrath/m2/1.m2")
+    assert rig.fetch.entered.acquire(timeout=WAIT)
+    started = time.monotonic()
+    waited = rig.proxy.serve("wrath/m2/2.m2")
+    assert waited.status == 503
+    assert time.monotonic() - started < WAIT
+    assert rig.fetch.urls() == [MV + "wrath/m2/1.m2"]  # it never got a slot
+    assert rig.proxy.status().unreachable_since is None  # nobody failed upstream
+    rig.fetch.release.set()
+    assert _joined(*holder).status == 200
+    assert rig.proxy.serve("wrath/m2/2.m2").status == 200  # no cool-down to wait out
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [_status(429), _status(500), _status(503), _status(403), _status(304), UpstreamError("timeout")],
+    ids=["429", "500", "503", "403", "unasked-304", "upstream-error"],
+)
+def test_serve_upstream_error_starts_cooldown_and_misses_return_503_until_it_ends(tmp_path, failure):
+    rig = Rig(tmp_path, FakeFetch({M2_URL: failure}))
+    rig.proxy.cache.put("wrath/m2/7.m2", b"cached")
+
+    failed = rig.proxy.serve(M2)
+    assert failed.status == 503 and failed.path is None and failed.body is None
+    assert failed.cache_control == "no-store"
+    assert failed.reason
+    assert not rig.file(M2).exists()  # nothing but a 200 is ever stored
+    assert rig.proxy.cache.negative(M2) is False
+    assert rig.fetch.urls() == [M2_URL]  # never retried inside the request
+
+    # During the cool-down every miss to that host answers 503 at once; hits still serve.
+    for _ in range(3):
+        assert rig.proxy.serve(SKIN).status == 503
+        assert rig.proxy.serve(ICON).status == 503
+        assert rig.proxy.serve("wrath/m2/7.m2").status == 200
+    rig.mono.now += 59.9
+    assert rig.proxy.serve(SKIN).status == 503
+    assert len(rig.fetch.calls) == 1
+
+    rig.mono.now += 0.1  # 60 s after the failure
+    assert rig.proxy.serve(SKIN).status == 200
+    assert rig.fetch.urls() == [M2_URL, MV + SKIN]
+    assert rig.proxy.status().unreachable_since is None  # the success cleared the host
+
+
+def test_cooldown_is_per_host_and_status_reports_the_earliest(tmp_path):
+    xml_url = item_xml_url(6125)
+    rig = Rig(tmp_path, FakeFetch({M2_URL: _status(500), xml_url: _ok(b"<wowhead/>")}))
+    start = rig.wall.now
+    assert rig.proxy.serve(M2).status == 503
+    # The resolver's XML lookup (Task 8) goes through the same guard; another host is not cooling.
+    assert rig.proxy._guarded_fetch(xml_url).status == 200
+    rig.wall.now += 30
+    rig.fetch.answers[xml_url] = UpstreamError("connection failed")
+    with pytest.raises(armory_assets._Unavailable):
+        rig.proxy._guarded_fetch(xml_url)
+    assert rig.proxy.status().unreachable_since == _iso(start)
+    rig.mono.now += 61
+    rig.fetch.answers[M2_URL] = _ok(b"back")
+    assert rig.proxy.serve(M2).status == 200
+    assert rig.proxy.status().unreachable_since == _iso(start + 30)
+
+
+def test_serve_disabled_returns_503_for_misses_only(tmp_path):
+    rig = Rig(tmp_path)
+    rig.proxy.cache.put("wrath/m2/7.m2", b"cached")
+    rig.proxy.cache.mark_negative("wrath/m2/9.m2")
+    rig.proxy.settings.set_enabled(False)
+
+    assert rig.proxy.serve("wrath/m2/7.m2").status == 200
+    assert rig.proxy.serve("wrath/m2/9.m2").status == 404  # a cached answer, no upstream needed
+    off = rig.proxy.serve(M2)
+    assert off.status == 503 and "switched off" in off.reason
+    assert rig.proxy.serve(VIEWER).status == 503  # not pinned yet, so it is a miss too
+    assert rig.fetch.calls == []
+    assert rig.proxy.status().unreachable_since is None  # switched off is not an outage
+
+    rig.proxy.settings.set_enabled(True)
+    assert rig.proxy.serve(M2).status == 200
+    assert rig.fetch.urls() == [M2_URL]
+
+
+def test_serve_404_negative_cached_for_an_hour(tmp_path):
+    rig = Rig(tmp_path, FakeFetch({M2_URL: _status(404)}))
+    missing = rig.proxy.serve(M2)
+    assert missing.status == 404 and missing.path is None and missing.body is None
+    assert rig.proxy.cache.negative(M2) is True
+    rig.wall.now += 3599
+    assert rig.proxy.serve(M2).status == 404
+    assert len(rig.fetch.calls) == 1
+    rig.wall.now += 1  # the hour is over: asked again once
+    assert rig.proxy.serve(M2).status == 404
+    assert len(rig.fetch.calls) == 2
+    # A 404 is an answer, not an outage: no cool-down, other misses still fetch.
+    assert rig.proxy.status().unreachable_since is None
+    assert rig.proxy.serve(SKIN).status == 200
+
+
+def test_viewer_first_use_fetches_and_pins_then_never_refetches_in_serve(tmp_path):
+    v1 = b"/* viewer v1 */"
+    lm = "Wed, 29 Oct 2026 10:00:00 GMT"
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(v1, etag='"v1"', last_modified=lm)}))
+    pinned = rig.proxy.serve(VIEWER)
+    assert pinned == Served(200, rig.file(VIEWER), "application/javascript", "no-cache", f'"{_sha(v1)}"')
+    assert rig.file(VIEWER).read_bytes() == v1
+    meta_path = rig.file("live/viewer/viewer.meta.json")
+    assert json.loads(meta_path.read_text()) == {
+        "etag": '"v1"',
+        "last_modified": lm,
+        "fetched_at": _iso(rig.wall.now),
+        "sha256": _sha(v1),
+        "size": len(v1),
+    }
+    assert _mode(rig.file(VIEWER)) == 0o600 and _mode(meta_path) == 0o600
+
+    # Upstream changes; serve keeps the pinned copy whatever happens.
+    rig.fetch.answers[VIEWER_URL] = _ok(b"/* viewer v2 */", etag='"v2"')
+    for _ in range(3):
+        rig.wall.now += 10 * 86400
+        assert rig.proxy.serve(VIEWER) == pinned
+    rig.proxy.clear_cache()
+    assert rig.proxy.serve(VIEWER) == pinned
+    rig.proxy.settings.set_enabled(False)
+    assert rig.proxy.serve(VIEWER) == pinned  # a hit: still served while switched off
+    assert rig.fetch.calls == [(VIEWER_URL, None)]
+
+
+def test_update_viewer_keeps_prev_and_revert_restores_exact_bytes(tmp_path):
+    v1, v2 = b"/* viewer v1 */", b"/* viewer v2, a little longer */"
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(v1, etag='"v1"', last_modified="Mon, 1 Jan 2026 00:00:00 GMT")}))
+    first_fetch = rig.wall.now
+    rig.proxy.serve(VIEWER)
+    meta_path = rig.file("live/viewer/viewer.meta.json")
+    meta_v1 = meta_path.read_bytes()
+
+    rig.fetch.answers[VIEWER_URL] = _ok(v2, etag='"v2"', last_modified="Thu, 29 Oct 2026 00:00:00 GMT")
+    rig.wall.now += 86400
+    status = rig.proxy.update_viewer()
+    assert rig.fetch.calls[-1] == (VIEWER_URL, '"v1"')  # conditional GET with the pinned etag
+    assert status == ViewerStatus(fetched_at=_iso(rig.wall.now), etag='"v2"', size=len(v2), has_prev=True)
+    assert rig.proxy.viewer_status() == status
+    assert rig.file(VIEWER).read_bytes() == v2
+    assert rig.file("live/viewer/viewer.min.js.prev").read_bytes() == v1
+    assert rig.file("live/viewer/viewer.meta.json.prev").read_bytes() == meta_v1
+    assert json.loads(meta_path.read_text())["sha256"] == _sha(v2)
+    assert rig.proxy.serve(VIEWER).etag == f'"{_sha(v2)}"'
+
+    reverted = rig.proxy.revert_viewer()
+    assert reverted == ViewerStatus(fetched_at=_iso(first_fetch), etag='"v1"', size=len(v1), has_prev=False)
+    assert rig.file(VIEWER).read_bytes() == v1
+    assert meta_path.read_bytes() == meta_v1  # the exact previous metadata too
+    assert not rig.file("live/viewer/viewer.min.js.prev").exists()
+    assert not rig.file("live/viewer/viewer.meta.json.prev").exists()
+    assert rig.proxy.serve(VIEWER).etag == f'"{_sha(v1)}"'
+    assert rig.proxy.status().cache_bytes == _tree_bytes(rig.root)  # the running total followed
+    with pytest.raises(ViewerError, match="no previous"):
+        rig.proxy.revert_viewer()
+    assert len(rig.fetch.calls) == 2  # revert never fetches
+
+
+def test_update_viewer_304_changes_nothing(tmp_path):
+    v1 = b"/* viewer v1 */"
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(v1, etag='"v1"')}))
+    # Nothing pinned yet: Update is an unconditional GET that pins without a .prev.
+    first = rig.proxy.update_viewer()
+    assert rig.fetch.calls == [(VIEWER_URL, None)]
+    assert first == ViewerStatus(fetched_at=_iso(rig.wall.now), etag='"v1"', size=len(v1), has_prev=False)
+
+    def snapshot():
+        return {
+            p.name: (p.read_bytes(), os.lstat(p).st_mtime_ns, os.lstat(p).st_ino)
+            for p in rig.file("live/viewer").iterdir()
+        }
+
+    before = snapshot()
+    rig.fetch.answers[VIEWER_URL] = _status(304)
+    rig.wall.now += 3600
+    assert rig.proxy.update_viewer() == first
+    assert rig.fetch.calls[-1] == (VIEWER_URL, '"v1"')
+    assert snapshot() == before
+
+    # Upstream answers 200 with the very same bytes: only the validators are refreshed, .prev is not
+    # overwritten with an identical copy.
+    rig.fetch.answers[VIEWER_URL] = _ok(v1, etag='"v1-gz"')
+    same = rig.proxy.update_viewer()
+    assert same == ViewerStatus(fetched_at=_iso(rig.wall.now), etag='"v1-gz"', size=len(v1), has_prev=False)
+    assert rig.file(VIEWER).read_bytes() == v1
+
+    # A failed update keeps the pinned copy and starts the host's cool-down.
+    before = snapshot()
+    rig.fetch.answers[VIEWER_URL] = _status(500)
+    with pytest.raises(ViewerError, match="pinned copy is kept"):
+        rig.proxy.update_viewer()
+    assert snapshot() == before
+    assert rig.proxy.status().unreachable_since is not None
+    calls = len(rig.fetch.calls)
+    with pytest.raises(ViewerError, match="unreachable"):
+        rig.proxy.update_viewer()  # in the cool-down: refused without a fetch
+    assert len(rig.fetch.calls) == calls
+
+    # R18: switched off, Update refuses and nothing goes upstream.
+    rig.mono.now += 61
+    rig.proxy.settings.set_enabled(False)
+    with pytest.raises(ViewerError, match="switched off"):
+        rig.proxy.update_viewer()
+    assert len(rig.fetch.calls) == calls
+    assert snapshot() == before
+
+
+def test_clear_cache_keeps_pinned_viewer(tmp_path):
+    v1, v2 = b"/* v1 */", b"/* v2 */"
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(v1, etag='"v1"'), MV + "wrath/m2/9.m2": _status(404)}))
+    rig.proxy.serve(VIEWER)
+    rig.fetch.answers[VIEWER_URL] = _ok(v2, etag='"v2"')
+    rig.proxy.update_viewer()
+    rig.proxy.serve(M2)
+    rig.proxy.serve(ICON)
+    rig.proxy.serve("wrath/m2/9.m2")
+    viewer_files = {
+        name: rig.file(f"live/viewer/{name}").read_bytes()
+        for name in ("viewer.min.js", "viewer.min.js.prev", "viewer.meta.json", "viewer.meta.json.prev")
+    }
+
+    assert rig.proxy.clear_cache() == 3  # the model, the icon and the negative marker
+    assert {p.name: p.read_bytes() for p in rig.file("live/viewer").iterdir()} == viewer_files
+    assert not rig.file(M2).exists() and not rig.file(ICON).exists()
+    assert rig.proxy.cache.negative("wrath/m2/9.m2") is False
+    assert rig.proxy.status().cache_bytes == sum(len(b) for b in viewer_files.values())
+    assert rig.proxy.viewer_status().has_prev is True  # Revert still offered
+    calls = len(rig.fetch.calls)
+    assert rig.proxy.serve(VIEWER).etag == f'"{_sha(v2)}"'
+    assert len(rig.fetch.calls) == calls
+
+
+def test_status_reports_cache_size_viewer_and_unreachable_since(tmp_path):
+    rig = Rig(tmp_path, FakeFetch({VIEWER_URL: _ok(b"/* v1 */", etag='"v1"'), MV + SKIN: _status(502)}))
+    assert rig.proxy.status() == ProxyStatus(
+        enabled=True,
+        cache_bytes=0,
+        viewer=ViewerStatus(fetched_at=None, etag=None, size=0, has_prev=False),
+        unreachable_since=None,
+        cache_writable=True,
+        pass_through=False,
+        cache_error=None,
+    )
+    assert not rig.data_dir.exists()  # status never creates anything
+
+    pinned_at = rig.wall.now
+    rig.proxy.serve(VIEWER)
+    rig.proxy.serve(M2)
+    status = rig.proxy.status()
+    assert status.cache_bytes == _tree_bytes(rig.root) > 0
+    assert status.viewer == ViewerStatus(fetched_at=_iso(pinned_at), etag='"v1"', size=8, has_prev=False)
+
+    rig.wall.now += 100
+    failed_at = rig.wall.now
+    assert rig.proxy.serve(SKIN).status == 503
+    assert rig.proxy.status().unreachable_since == _iso(failed_at)
+    # Still failing after the cool-down: "unreachable since" keeps the first failure.
+    rig.mono.now += 61
+    rig.wall.now += 61
+    assert rig.proxy.serve(SKIN).status == 503
+    assert rig.proxy.status().unreachable_since == _iso(failed_at)
+    rig.mono.now += 61
+    rig.fetch.answers[MV + SKIN] = _ok(b"skin")
+    assert rig.proxy.serve(SKIN).status == 200
+    assert rig.proxy.status().unreachable_since is None
+
+    rig.proxy.settings.set_enabled(False)
+    assert rig.proxy.status().enabled is False
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_unwritable_cache_dir_serves_pass_through_and_flags_it(tmp_path):
+    rig = Rig(tmp_path, FakeFetch({M2_URL: _ok(b"m2 bytes"), MV + "wrath/m2/9.m2": _status(404)}))
+    rig.root.mkdir(parents=True)
+    os.chmod(rig.root, 0o500)
+    try:
+        served = rig.proxy.serve(M2)
+        assert served.status == 200 and served.path is None and served.body == b"m2 bytes"
+        assert served.cache_control == IMMUTABLE and served.content_type == "application/octet-stream"
+        status = rig.proxy.status()
+        assert status.pass_through is True and status.cache_writable is False
+        assert "writable" in status.cache_error
+        assert rig.proxy.serve(M2).body == b"m2 bytes"
+        assert len(rig.fetch.calls) == 2  # nothing stored, so fetched again
+
+        assert rig.proxy.serve("wrath/m2/9.m2").status == 404  # the 404 still answers
+        viewer = rig.proxy.serve(VIEWER)
+        assert viewer.status == 200 and viewer.body is not None and viewer.cache_control == "no-cache"
+        assert viewer.etag == f'"{_sha(viewer.body)}"'
+        with pytest.raises(ViewerError, match="writable"):
+            rig.proxy.update_viewer()
+    finally:
+        os.chmod(rig.root, 0o700)
+    # Writable again: the next miss is stored and the flags clear.
+    assert rig.proxy.serve(SKIN).path == rig.file(SKIN)
+    status = rig.proxy.status()
+    assert status.pass_through is False and status.cache_writable is True and status.cache_error is None
+
+
+def test_cache_write_failure_switches_to_pass_through_and_recovers(tmp_path, monkeypatch):
+    """The same pass-through path driven by a failing write, so it also runs where the suite runs as root."""
+    rig = Rig(tmp_path, FakeFetch({M2_URL: _ok(b"m2 bytes")}))
+
+    def full_disk(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(rig.proxy.cache, "put", full_disk)
+    monkeypatch.setattr(rig.proxy.cache, "mark_negative", full_disk)
+    served = rig.proxy.serve(M2)
+    assert served == Served(200, None, "application/octet-stream", IMMUTABLE, served.etag, b"m2 bytes")
+    assert served.etag == rig.proxy.serve(M2).etag  # same identity as a stored copy would have
+    status = rig.proxy.status()
+    assert (status.pass_through, status.cache_writable) == (True, False)
+    assert os.strerror(errno.ENOSPC) in status.cache_error
+    rig.fetch.answers[MV + SKIN] = _status(404)
+    assert rig.proxy.serve(SKIN).status == 404
+
+    monkeypatch.undo()
+    assert rig.proxy.serve(M2).path == rig.file(M2)
+    assert rig.proxy.status().pass_through is False
+
+
+def test_get_proxy_is_a_lazy_singleton_under_admin_data_dir(tmp_path, monkeypatch):
+    admin_data = tmp_path / "admin-data"
+    monkeypatch.setenv("ADMIN_DATA_DIR", str(admin_data))
+    proxy = get_proxy()
+    assert get_proxy() is proxy
+    assert proxy.data_dir == admin_data / "armory"
+    assert proxy.cache.root == admin_data / "armory" / "cache"
+    assert proxy.settings.path == admin_data / "armory" / "armory.json"
+    assert not admin_data.exists()  # building it touches neither the disk nor the network
+    reset_proxy()
+    assert get_proxy() is not proxy

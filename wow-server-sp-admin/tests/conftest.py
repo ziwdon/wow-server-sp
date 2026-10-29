@@ -30,3 +30,16 @@ def _reset_cloud_service():
     from app.services import cloud_backup
 
     cloud_backup._service = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_armory_proxy():
+    """Drop the process-wide armory AssetProxy between tests.
+
+    ``armory_assets.get_proxy()`` builds one instance from ``ADMIN_DATA_DIR`` at its first call;
+    like the cloud service above, a cached one must not carry one test's paths into the next.
+    """
+    yield
+    from app.services import armory_assets
+
+    armory_assets.reset_proxy()
