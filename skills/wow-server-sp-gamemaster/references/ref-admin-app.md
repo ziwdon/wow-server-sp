@@ -127,7 +127,7 @@ The Armory tab (`/armory`, one character at `/armory/<guid>`) is a read-only cha
 - Talent/spell/item-set names come from the game's DBC files in AzerothCore's client-data volume (`azerothcore_ac-client-data`, mounted read-only). Because the admin uses that volume, uninstall the admin **before** AzerothCore when removing everything.
 - `data/armory/` holds only re-fetchable data and is not in backup archives.
 - `verify-azerothcore-admin.sh` prints one advisory line, e.g. `[INFO] armory: dbc ok, cache 12 MB, viewer fetched <time>, 3d on`; it never fails the verify.
-- On an install older than the Armory, the first redeploy stops and prints a `curl` command that fetches `jquery.min.js` (the viewer needs jQuery); run it once and redeploy again.
+- On an install older than the Armory, the first redeploy downloads `jquery.min.js` once by itself (the viewer needs jQuery) and keeps it for later redeploys. If that download fails, it stops before building and prints the `curl` command to run by hand; run it and redeploy again.
 
 ## Maintenance Page
 

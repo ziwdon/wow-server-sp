@@ -163,10 +163,11 @@ If a piece of gear shows a small "no 3D" mark, Wowhead has no model for it; the
 rest of the character still renders. The Armory's data is all re-fetchable, so
 it is not part of the backup archives.
 
-**Deploying it on an older install:** the Armory needs jQuery next to HTMX. The
-redeploy stops with the exact `curl` command to fetch it once (into
-`/opt/stacks/azerothcore-admin/build/app/static/jquery.min.js`); run it, then
-redeploy again.
+**Deploying it on an older install:** the Armory needs jQuery next to HTMX.
+The first `redeploy-azerothcore-admin.sh` fetches it once by itself (from the
+same pinned address the installer uses) and keeps it for later redeploys. If
+that download fails, the redeploy stops before building anything and prints
+the `curl` command to run by hand; run it, then redeploy again.
 
 ## Uninstalling
 

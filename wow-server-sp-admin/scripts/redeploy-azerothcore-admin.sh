@@ -139,8 +139,8 @@ rsync -a --delete \
 # the pre-created candidate directory, so recreate it before staging configs.
 mkdir -p "$STAGE_DIR/build/dist"
 
-# Where install-azerothcore-admin.sh fetches each vendor file from (keep in sync).
-# An install older than the Armory has no jquery.min.js yet: this names the fetch.
+# Where install-azerothcore-admin.sh fetches each vendor file from (keep in sync;
+# tests/test_armory_deploy.py compares the two).
 vendor_url() {
     case "$1" in
         htmx.min.js) echo "https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js" ;;
@@ -148,6 +148,39 @@ vendor_url() {
         jquery.min.js) echo "https://unpkg.com/jquery@3.7.1/dist/jquery.min.js" ;;
     esac
 }
+
+# One-time backfill, like backfill_tpm_env below (the other thing redeploy adds to
+# an older install): an install from before the Armory has no jquery.min.js to
+# carry over. Fetch it once from the installer's pinned URL into the candidate and
+# keep a copy in $STACK_DIR/build, which later redeploys carry like the HTMX files.
+# HTMX is never fetched here. A failed fetch falls through to the guard below.
+jquery_path="$STAGE_DIR/build/app/static/jquery.min.js"
+jquery_size=0
+if [ -f "$jquery_path" ]; then
+    jquery_size="$(wc -c < "$jquery_path")"
+fi
+if [ "$jquery_size" -le 200 ]; then
+    echo "==> jquery.min.js is not vendored yet; fetching it once from $(vendor_url jquery.min.js)..."
+    jquery_tmp="$(mktemp "$STAGE_DIR/jquery.min.js.XXXXXX")"
+    if curl -sSfL -o "$jquery_tmp" "$(vendor_url jquery.min.js)"; then
+        chmod 644 "$jquery_tmp"
+        mv -f "$jquery_tmp" "$jquery_path"
+        jquery_keep=""
+        if jquery_keep="$(mktemp "$STACK_DIR/build/app/static/.jquery.min.js.XXXXXX")" \
+            && cp "$jquery_path" "$jquery_keep" && chmod 644 "$jquery_keep" \
+            && mv -f "$jquery_keep" "$STACK_DIR/build/app/static/jquery.min.js"; then
+            echo "    kept a copy in $STACK_DIR/build/app/static/ for later redeploys."
+        else
+            if [ -n "$jquery_keep" ]; then
+                rm -f -- "$jquery_keep"
+            fi
+            echo "WARNING: could not keep jquery.min.js in $STACK_DIR/build/app/static/; the next redeploy fetches it again." >&2
+        fi
+    else
+        rm -f -- "$jquery_tmp"
+        echo "WARNING: could not fetch jquery.min.js." >&2
+    fi
+fi
 
 for vendor in htmx.min.js htmx-sse.js jquery.min.js; do
     vendor_path="$STAGE_DIR/build/app/static/$vendor"

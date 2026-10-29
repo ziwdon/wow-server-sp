@@ -164,6 +164,20 @@ def test_redeploy_names_the_fetch_for_a_placeholder_vendor_file():
     assert len(redeploy_urls) == len(VENDOR_FILES)
 
 
+def test_redeploy_backfills_only_jquery_between_the_sync_and_the_guard():
+    # R25: an install from before the Armory has no jquery.min.js; redeploy fetches it once
+    # (the root suite runs it with a stub curl). HTMX is never fetched by the redeploy.
+    lines = _logical_lines(REDEPLOY)
+    fetches = [i for i, line in enumerate(lines) if "curl " in line and not line.lstrip().startswith("echo")]
+    assert len(fetches) == 1, [lines[i] for i in fetches]
+    (fetch,) = fetches
+    assert 'curl -sSfL -o "$jquery_tmp" "$(vendor_url jquery.min.js)"' in lines[fetch]
+    sync = next(i for i, line in enumerate(lines) if line.lstrip().startswith("rsync -a --delete"))
+    guard = next(i for i, line in enumerate(lines) if '-le 200 ]' in line and "vendor_size" in line)
+    assert sync < fetch < guard
+    assert "backfill_tpm_env" in REDEPLOY.read_text()[: REDEPLOY.read_text().index('curl -sSfL -o "$jquery_tmp"')]
+
+
 def test_dockerfile_unchanged_by_armory():
     text = DOCKERFILE.read_text().lower()
     # jQuery reaches the image through app/static like HTMX (vendored into the build
