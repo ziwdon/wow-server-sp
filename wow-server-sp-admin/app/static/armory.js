@@ -431,11 +431,21 @@
     let timers = [];
     let scriptPromise = null;
     let sheathSet = false;
+    let watchdog = null; // the running start()'s { my, deadline, hidden }
 
     window.addEventListener('error', (event) => {
       if (event instanceof ErrorEvent && event.message) capture.runtime(event.message);
     });
     window.addEventListener('unhandledrejection', (event) => capture.runtime(describe(event.reason)));
+
+    // The watchdog counts only time the tab is visible: requestAnimationFrame does not run in a
+    // hidden tab (a character opened in a background tab from the Players page), and neither
+    // does the viewer's drawing. A hide is noted here, while the page still runs; the first
+    // frame after it gives the model the full 30 s again, whether that frame or the
+    // visibilitychange back to visible comes first.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && watchdog && watchdog.my === gen) watchdog.hidden = true;
+    });
 
     function setState(state, message) {
       panel.dataset.state = state;
@@ -634,6 +644,7 @@
     function stop() {
       timers.forEach(clearTimeout);
       timers = [];
+      watchdog = null;
       capture.stop();
       destroyViewer();
     }
@@ -643,7 +654,7 @@
     }
 
     // Create the viewer for `data` (the container is cleared first) and watch for its first
-    // drawn frame; after WATCHDOG_MS without one, the panel says what failed.
+    // drawn frame; after WATCHDOG_MS of a visible tab without one, the panel says what failed.
     async function start(my) {
       setState('loading', 'Fetching model…');
       capture.start();
@@ -665,17 +676,24 @@
         unavailable('the viewer failed to start (' + describe(e) + ').');
         return;
       }
-      const deadline = Date.now() + WATCHDOG_MS;
+      // The 30 s start in the first frame callback, not now (in a hidden tab none runs yet),
+      // and start again in the first frame after the tab was hidden.
+      const watch = { my, deadline: null, hidden: false };
+      watchdog = watch;
       const poll = () => {
         if (my !== gen) return;
         window.requestAnimationFrame(() => {
           if (my !== gen) return;
+          if (watch.deadline === null || watch.hidden) {
+            watch.deadline = Date.now() + WATCHDOG_MS;
+            watch.hidden = false;
+          }
           if (drawn()) {
             capture.stop();
             setState('rendered', '');
             return;
           }
-          if (Date.now() >= deadline) {
+          if (Date.now() >= watch.deadline) {
             const why = capture.message();
             capture.stop();
             destroyViewer();

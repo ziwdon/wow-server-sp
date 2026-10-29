@@ -509,6 +509,30 @@ def test_armory_js_bootstraps_the_viewer_like_the_spike():
     assert "innerHTML" not in script and "insertAdjacentHTML" not in script
 
 
+def test_armory_js_watchdog_counts_only_visible_time():
+    # requestAnimationFrame does not run in a hidden tab (a character opened in a background
+    # tab from the Players page), and the viewer draws only in frame callbacks: the 30 s must
+    # start in the first frame callback, never when the viewer is created, and start again in
+    # the first frame after the tab was hidden (noted while the page still runs, so it does not
+    # matter whether that frame or the visibilitychange back to visible comes first).
+    script = SCRIPT.read_text()
+    start = script[script.index("async function start(my)"):script.index("async function load()")]
+    created = start.index("new window.ZamModelViewer(")
+    frame = start.index("window.requestAnimationFrame(", created)
+    deadlines = [m.start() for m in re.finditer(r"Date\.now\(\) \+ WATCHDOG_MS", start)]
+    assert deadlines, "the watchdog deadline is no longer set in start()"
+    assert all(pos > frame for pos in deadlines), "the deadline is set before the first frame callback"
+    callback = start[frame:]
+    assert "watch.deadline === null || watch.hidden" in callback  # first frame, or first after a hide
+    assert "Date.now() >= watch.deadline" in callback  # still checked in the frame callback
+
+    hook = script.index("document.addEventListener('visibilitychange'")
+    handler = script[hook:script.index("});", hook)]
+    assert "document.hidden" in handler and ".hidden = true" in handler
+    assert "gen" in handler  # a stale start()'s watchdog is left alone
+    assert "watchdog = null" in script[script.index("function stop()"):]
+
+
 def _foreign_link_rule() -> re.Pattern[str]:
     """armory.js's FOREIGN_LINK regex literal, as a Python pattern (same syntax subset)."""
     match = re.search(r"const FOREIGN_LINK = /(.+)/([a-z]*);", SCRIPT.read_text())
