@@ -488,7 +488,7 @@ async def api_backups_summary(request: Request) -> HTMLResponse:
             "disk_gb": _humanize_gb(summary.disk_used_bytes),
             "last_human": last_human,
             "error": error,
-            "cloud_card": _cloud_card(await _cloud_status_or_none()),
+            "cloud_card": _safe_cloud_card(await _cloud_status_or_none()),
         },
     )
 
@@ -563,11 +563,11 @@ def _utc_stamp(value: object) -> str:
         return ""
     try:
         moment = dt.datetime.fromisoformat(value)
-    except ValueError:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=dt.timezone.utc)
+        return moment.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, OverflowError):  # e.g. 0001-01-01T00:00:00+14:00 does not fit in UTC
         return value
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=dt.timezone.utc)
-    return moment.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 templates.env.filters["utc_stamp"] = _utc_stamp
@@ -648,6 +648,15 @@ def _cloud_card(view) -> dict | None:
     return {"value": _utc_stamp(state.last_success), "tone": None, "sub": sub}
 
 
+def _safe_cloud_card(view) -> dict | None:
+    """``_cloud_card``, but a bug or odd state data there only drops the card, never the local summary."""
+    try:
+        return _cloud_card(view)
+    except Exception:  # noqa: BLE001
+        log.exception("could not build the Cloud copies card")
+        return None
+
+
 def _cloud_context(view, *, error, notice, form, preserve_form) -> dict:
     ctx = {"view": view, "error": error, "notice": notice, "preserve_form": preserve_form}
     if view is None:
@@ -666,7 +675,8 @@ def _cloud_context(view, *, error, notice, form, preserve_form) -> dict:
             folder_notice = "unset"
     ctx.update(
         primary=primary,
-        polling=view.signin_pending or view.busy,
+        # "Checking…" (no probe result yet) also polls, so the panel resolves without a reload.
+        polling=view.signin_pending or view.busy or view.available is None,
         form=form
         or {
             "enabled": cfg.enabled,

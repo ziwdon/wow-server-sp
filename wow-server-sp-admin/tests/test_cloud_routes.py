@@ -101,6 +101,19 @@ def test_backups_page_has_cloud_panel_container(client):
     assert "every 5s" not in page
 
 
+def test_activity_panel_sits_between_the_action_bar_and_the_cloud_panel(client):
+    page = client.get("/backups").text
+
+    assert page.index('class="action-bar"') < page.index('id="action-log"') < page.index('id="cloud-panel"')
+
+
+def test_wait_indicator_makes_no_promise_about_how_long(client, rig):
+    text = panel(client)
+
+    assert "Working… this can take a minute." in text
+    assert "30 seconds" not in text
+
+
 # --- panel states ---
 
 
@@ -304,16 +317,33 @@ def test_busy_panel_polls_and_disables_its_buttons(client, rig):
     assert "every 5s" not in client.get("/api/cloud/panel").text
 
 
+def test_checking_panel_polls_until_the_probe_has_an_answer(client, rig):
+    _checking(rig)
+
+    checking = client.get("/api/cloud/panel").text
+
+    root = checking[: checking.index(">", checking.index('id="cloud-panel"'))]
+    assert "Checking" in checking
+    assert 'hx-get="/api/cloud/panel"' in root and 'hx-trigger="every 5s"' in root
+    rig.svc.probe()
+    resolved = client.get("/api/cloud/panel").text
+    assert "Checking" not in resolved
+    assert "every 5s" not in resolved
+
+
 def test_recent_runs_are_listed_newest_first_and_capped_at_ten(client, rig):
-    _connected(rig)
-    for hour in range(12):
-        rig.store.append_log(log_entry(iso(NOW.replace(hour=hour))))
+    _connected(rig)  # last success 2026-10-28 11:00: a stamp that is not in any run below
+    for day in range(1, 13):
+        rig.store.append_log(log_entry(iso(NOW.replace(day=day))))
 
     text = panel(client)
 
     assert text.count("cloud-run-row") == 10
-    assert text.index("2026-10-28 11:00 UTC") < text.index("2026-10-28 02:00 UTC")
-    assert "2026-10-28 00:00 UTC" not in text
+    stamps = [f"2026-10-{day:02d} 12:00 UTC" for day in range(12, 2, -1)]  # the 10 newest, newest first
+    assert all(text.count(stamp) == 1 for stamp in stamps)
+    positions = [text.index(stamp) for stamp in stamps]
+    assert positions == sorted(positions)
+    assert "2026-10-02 12:00 UTC" not in text and "2026-10-01 12:00 UTC" not in text
 
 
 def test_recent_runs_show_result_counts_and_error(client, rig):
@@ -722,6 +752,53 @@ def test_disclaimer_folder_is_escaped(client, rig, tmp_path):
 
     assert "<b>x</b>" not in text
     assert "&lt;b&gt;x&lt;/b&gt; &amp; y" in text
+
+
+OUT_OF_RANGE = "0001-01-01T00:00:00+14:00"  # valid ISO text, but year 0 in UTC: astimezone() overflows
+
+
+def test_utc_stamp_returns_unconvertible_text_as_is():
+    from app.main import _utc_stamp
+
+    assert _utc_stamp(OUT_OF_RANGE) == OUT_OF_RANGE
+    assert _utc_stamp("not a time") == "not a time"
+    assert _utc_stamp(None) == ""
+    assert _utc_stamp("2026-10-28T12:00:00+02:00") == "2026-10-28 10:00 UTC"
+
+
+def test_out_of_range_timestamps_never_break_the_pages(client, rig, tmp_path):
+    local_archive(tmp_path, NEW)
+    rig.configure(enabled=True)
+    rig.set_state(
+        "connected", folder_status="ok", last_result="ok", last_success=OUT_OF_RANGE,
+        remote=[RemoteFile(NEW, 1, None)],
+    )
+    rig.store.append_log(log_entry(OUT_OF_RANGE))
+
+    summary = client.get("/api/backups/summary")
+    listing = client.get("/api/backups/list")
+    cloud = client.get("/api/cloud/panel")
+
+    assert summary.status_code == listing.status_code == cloud.status_code == 200
+    assert "Cloud copies" in summary.text and OUT_OF_RANGE in summary.text
+    assert "Available Backups" in summary.text
+    assert OUT_OF_RANGE in cloud.text  # shown as text, in the "last upload" line and the runs list
+
+
+def test_a_failing_cloud_card_never_breaks_the_local_summary(client, rig, monkeypatch):
+    import app.main as main
+
+    def boom(view):
+        raise RuntimeError("card exploded")
+
+    monkeypatch.setattr(main, "_cloud_card", boom)
+
+    summary = client.get("/api/backups/summary")
+
+    assert summary.status_code == 200
+    assert "Available Backups" in summary.text and "Disk Used" in summary.text
+    assert "Cloud copies" not in summary.text
+    assert "card exploded" not in summary.text
 
 
 def test_partials_survive_a_status_failure(client, rig, tmp_path, monkeypatch):

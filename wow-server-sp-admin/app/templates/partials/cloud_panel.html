@@ -4,7 +4,7 @@
 <div id="cloud-panel" class="panel cloud-panel"{% if polling %} hx-get="/api/cloud/panel" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %} role="region" aria-labelledby="cloud-panel-title">
   <div class="panel-header">
     <span class="panel-title" id="cloud-panel-title">Cloud backup · Proton Drive</span>
-    <span id="cloud-wait" class="cloud-wait htmx-indicator" role="status">Working… this can take up to 30 seconds.</span>
+    <span id="cloud-wait" class="cloud-wait htmx-indicator" role="status">Working… this can take a minute.</span>
   </div>
   <div class="panel-body cloud-body">
   {% if view is none %}
