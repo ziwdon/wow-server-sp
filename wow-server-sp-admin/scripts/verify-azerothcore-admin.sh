@@ -149,6 +149,82 @@ else
     info "azerothcore-admin.service not installed (skip)"
 fi
 
+# 8b. Cloud backup (Proton Drive) -- advisory only (spec 6.11). The feature is
+# optional and an outage at Proton must never fail a verify: redeploy rolls the
+# admin back when this script fails. Only `info` is used here, so the PASS/FAIL
+# counts cannot change. The two files are read with one bounded python3 call
+# (paths as argv, never interpolated into code) that prints exactly one short
+# line built from four fields -- enabled, connection, last_result, last_success --
+# each checked against a fixed shape; nothing else from the files (folder name,
+# error text, archive names) can reach the output.
+cloud_dir="$STACK_DIR/data/cloud"
+cloud_line=""
+cloud_why="python3 could not read the status files"
+if command -v python3 >/dev/null 2>&1; then
+    cloud_line="$(timeout 5 python3 - "$cloud_dir/config.json" "$cloud_dir/state.json" 2>/dev/null <<'PY'
+import json
+import re
+import sys
+
+CONNECTIONS = {"disconnected", "connected", "vault_error"}
+RESULTS = {"ok", "warning", "partial", "error"}
+STAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,16}(Z|[+-][0-9]{2}:[0-9]{2})?")
+
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (ValueError, RecursionError):
+        raise SystemExit("invalid JSON")
+    except OSError:
+        raise SystemExit("cannot read file")
+    if not isinstance(data, dict):
+        raise SystemExit("unexpected content")
+    return data
+
+
+try:
+    config, state = load(sys.argv[1]), load(sys.argv[2])
+except SystemExit as exc:
+    print("status unreadable (%s)" % exc.code)
+    raise SystemExit(0)
+
+if config.get("enabled") is not True:
+    print("off")
+    raise SystemExit(0)
+
+connection = state.get("connection", "disconnected")
+connection = connection if isinstance(connection, str) and connection in CONNECTIONS else "unknown"
+result = state.get("last_result")
+if result is None:
+    result = "none"
+elif not (isinstance(result, str) and result in RESULTS):
+    result = "unknown"
+if connection == "connected":
+    success = state.get("last_success")
+    if success is None:
+        success = "never"
+    elif not (isinstance(success, str) and len(success) <= 40 and STAMP.fullmatch(success)):
+        success = "unknown"
+    line = "connected, last success " + success
+    if result in ("partial", "error"):
+        line += ", last result " + result
+    print(line)
+else:
+    print("%s, last result %s" % (connection, result))
+PY
+)" || cloud_line=""
+else
+    cloud_why="python3 not found"
+fi
+case "$cloud_line" in
+    '' | *$'\n'*) info "cloud backup: status unreadable ($cloud_why)" ;;
+    *) info "cloud backup: $cloud_line" ;;
+esac
+
 # 9. AC stack still functional (delegate)
 # The admin install/redeploy never modifies the running AC server, so AC runtime
 # noise in Errors.log (e.g. graveyard fallback lines that accumulate over hours

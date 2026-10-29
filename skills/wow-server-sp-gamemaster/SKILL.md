@@ -44,7 +44,7 @@ admin web app.
 | Playerbot raid strategies, boss-by-boss guides | `references/ref-playerbots-raids.md` |
 | Auction House Bot setup and config | `references/ref-ahbot.md` |
 | Individual Progression tiers, config, GM commands | `references/ref-progression.md` |
-| Admin web app (install, features, usage, redeploy) | `references/ref-admin-app.md` |
+| Admin web app (install, features, usage, redeploy, cloud backup to Proton Drive) | `references/ref-admin-app.md` |
 | Errors, log analysis, troubleshooting | `references/ref-troubleshooting.md` |
 | SQL queries for DB management, bot reset (destructive) | `references/ref-useful-sql.md` |
 | All worldserver.conf keys with descriptions (complete reference) | `references/ref-conf-worldserver.md` |
