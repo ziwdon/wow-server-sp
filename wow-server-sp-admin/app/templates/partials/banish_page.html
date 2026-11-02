@@ -1,0 +1,7 @@
+<div id="banish-inner">
+  {% if error %}
+  <div class="banner error">Could not load Banish data: {{ error }}</div>
+  {% endif %}
+  <script type="application/json" id="banish-char-data">{{ rows_json | safe }}</script>
+  <script type="application/json" id="banish-status-data">{{ status_json | safe }}</script>
+</div>

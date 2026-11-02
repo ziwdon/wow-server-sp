@@ -3,8 +3,10 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 from mysql.connector.errors import DatabaseError, ProgrammingError
 
+from app.main import app
 from app.services import banish
 
 COLUMNS = (Path(__file__).parent / "data" / "spell_dbc_columns.txt").read_text().split()
@@ -331,3 +333,106 @@ def test_forget_deletes_row_or_noops(mock_connect):
     cur.fetchone.side_effect = [(1, "Sariel")]
     with pytest.raises(ValueError, match="log out"):
         banish.forget(guid=101, host="h", port=3306, user="u", password="p")
+
+
+# --- Task 3: routes --------------------------------------------------------
+
+CREDS = {"host": "h", "port": 3306, "user": "u", "password": "p"}
+
+
+def _status(**kw):
+    base = dict(support="ok", definition="installed", worldserver="active", installed_at=1793610000)
+    base.update(kw)
+    return banish.BanishStatus(**base)
+
+
+def test_panel_route_renders_card(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+    monkeypatch.setattr("app.main.banish_svc.collect_characters",
+                        lambda **kw: (banish.BanishCharacterRow(101, "CARLOS", "Sariel", 60, False, True),))
+    monkeypatch.setattr("app.main.banish_svc.collect_status", lambda **kw: _status())
+    r = TestClient(app).get("/api/banish/panel")
+    assert r.status_code == 200
+    assert 'id="banish-char-data"' in r.text and '"knows": true' in r.text
+    assert 'id="banish-status-data"' in r.text and '"definition": "installed"' in r.text
+
+
+def test_panel_route_reports_db_error_banner(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+
+    def boom(**kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("app.main.banish_svc.collect_characters", boom)
+    monkeypatch.setattr("app.main.banish_svc.collect_status", lambda **kw: _status(
+        support="db_error", definition="missing", worldserver="unknown", installed_at=None, message="db down"))
+    r = TestClient(app).get("/api/banish/panel")
+    assert r.status_code == 200 and "db down" in r.text
+
+
+def test_install_route_happy_path(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+    monkeypatch.setattr("app.main.banish_svc.install_definition", lambda **kw: banish.ActionResult(
+        "installed", "Banish definition v1 installed. Restart the worldserver."))
+    r = TestClient(app).post("/api/banish/install")
+    assert r.status_code == 200 and r.json()["status"] == "installed"
+
+
+def test_install_route_500_on_db_error(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+
+    def boom(**kw):
+        raise DatabaseError(msg="disk full", errno=1114)
+
+    monkeypatch.setattr("app.main.banish_svc.install_definition", boom)
+    r = TestClient(app).post("/api/banish/install")
+    assert r.status_code == 500 and "disk full" in r.json()["detail"]
+
+
+def test_teach_route_happy_path_and_400(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+    monkeypatch.setattr("app.main.banish_svc.teach", lambda **kw: banish.ActionResult(
+        "taught", "Taught Banish to Sariel.", "restart it"))
+    r = TestClient(app).post("/api/banish/teach", json={"guid": 101})
+    assert r.status_code == 200 and r.json() == {
+        "status": "taught", "message": "Taught Banish to Sariel.", "warning": "restart it"}
+
+    def boom(**kw):
+        raise ValueError("Character must log out before Banish can be taught.")
+
+    monkeypatch.setattr("app.main.banish_svc.teach", boom)
+    assert TestClient(app).post("/api/banish/teach", json={"guid": 101}).status_code == 400
+
+
+def test_forget_route_happy_path(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+    monkeypatch.setattr("app.main.banish_svc.forget", lambda **kw: banish.ActionResult(
+        "forgotten", "Removed Banish from Sariel."))
+    r = TestClient(app).post("/api/banish/forget", json={"guid": 101})
+    assert r.status_code == 200 and r.json()["status"] == "forgotten"
+
+
+def test_mutating_routes_409_when_locked(monkeypatch):
+    monkeypatch.setattr("app.main.runner.try_acquire_mutation", lambda: False)
+    c = TestClient(app)
+    assert c.post("/api/banish/install").status_code == 409
+    assert c.post("/api/banish/teach", json={"guid": 1}).status_code == 409
+    assert c.post("/api/banish/forget", json={"guid": 1}).status_code == 409
+
+
+def test_unsupported_core_is_a_400_and_the_lock_is_released(monkeypatch):
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+
+    def unsupported(**kw):
+        raise banish.SpellDbcUnsupported("this core cannot load DB-defined spells")
+
+    monkeypatch.setattr("app.main.banish_svc.install_definition", unsupported)
+    monkeypatch.setattr("app.main.banish_svc.teach", unsupported)
+    c = TestClient(app)
+    r = c.post("/api/banish/install")
+    assert r.status_code == 400 and "DB-defined spells" in r.json()["detail"]
+    assert c.post("/api/banish/teach", json={"guid": 1}).status_code == 400
+    # The failures above must not leave the mutation domain reserved.
+    from app.main import runner
+    assert runner.try_acquire_mutation() is True
+    runner.release_mutation()
