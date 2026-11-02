@@ -1,7 +1,9 @@
 from pathlib import Path
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
+from mysql.connector.errors import DatabaseError, ProgrammingError
 
 from app.services import banish
 
@@ -140,3 +142,192 @@ def test_state_store_rejects_non_integer_stamps_and_builds_without_touching_disk
     for bad in ('{"version": 1}', '{"installed_at": "7"}', '{"installed_at": true}', "[7]"):
         (tmp_path / "data" / "banish.json").write_text(bad)
         assert store.load() is None
+
+
+# --- database operations ---
+
+
+def _conn(mock_connect):
+    cur = MagicMock()
+    conn = mock_connect.return_value
+    conn.cursor.return_value.__enter__.return_value = cur
+    return conn, cur
+
+
+def _executed(cur):
+    return " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_collect_characters_includes_knows_and_excludes_bots(mock_connect):
+    conn, cur = _conn(mock_connect)
+    cur.fetchall.return_value = [(101, "CARLOS", "Sariel", 60, 0, 1), (102, "CARLOS", "Vegivaca", 70, 1, 0)]
+    rows = banish.collect_characters(host="h", port=3306, user="u", password="p")
+    assert rows[0].knows is True and rows[1].online is True and rows[1].knows is False
+    sql = _executed(cur)
+    assert "a.username NOT LIKE 'RNDBOT%%'" in sql and "a.username <> 'ahbot'" in sql
+    assert "character_spell" in sql and "35182" in sql
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_fetch_definition_raises_unsupported_when_table_missing(mock_connect):
+    conn, cur = _conn(mock_connect)
+    cur.execute.side_effect = ProgrammingError(msg="Table 'acore_world.spell_dbc' doesn't exist", errno=1146)
+    with pytest.raises(banish.SpellDbcUnsupported):
+        banish.fetch_definition(cur)
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_collect_status_installed_and_active(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [_spell_row(), _cond_row()]
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)   # 2026-11-02T09:00:00Z
+    info = MagicMock(status="running", started_at="2026-11-02T10:00:00.000000001Z")
+    st = banish.collect_status(store=store, inspect=lambda: info, host="h", port=3306, user="u", password="p")
+    assert (st.support, st.definition, st.worldserver, st.installed_at, st.version) == ("ok", "installed", "active", 1793610000, 1)
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_collect_status_reports_missing_table_and_db_errors(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.execute.side_effect = ProgrammingError(msg="no table", errno=1146)
+    st = banish.collect_status(store=banish.BanishStateStore(tmp_path), inspect=lambda: MagicMock(status="running", started_at=None), host="h", port=3306, user="u", password="p")
+    assert st.support == "no_spell_dbc_table" and st.definition == "missing"
+    mock_connect.side_effect = DatabaseError(msg="boom", errno=2003)
+    st = banish.collect_status(store=banish.BanishStateStore(tmp_path), inspect=lambda: MagicMock(status="running", started_at=None), host="h", port=3306, user="u", password="p")
+    assert st.support == "db_error" and "boom" in (st.message or "")
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_collect_status_survives_a_failing_docker_inspect(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [_spell_row(), _cond_row()]
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+
+    def no_socket():
+        raise RuntimeError("Error while fetching server API version")
+
+    st = banish.collect_status(store=store, inspect=no_socket, host="h", port=3306, user="u", password="p")
+    assert (st.support, st.definition, st.worldserver) == ("ok", "installed", "unknown")
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_writes_rows_and_stamps_state(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [None, None]
+    store = banish.BanishStateStore(tmp_path)
+    res = banish.install_definition(store=store, now=1793610000, host="h", port=3306, user="u", password="p")
+    sql = _executed(cur)
+    assert "REPLACE INTO acore_world.spell_dbc" in sql and "INSERT INTO acore_world.conditions" in sql
+    conn.commit.assert_called_once()
+    assert res.status == "installed" and "restart" in res.message.lower()
+    assert store.load() == 1793610000
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_unchanged_does_not_restamp(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [_spell_row(), _cond_row()]
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+    res = banish.install_definition(store=store, now=1793700000, host="h", port=3306, user="u", password="p")
+    assert "REPLACE INTO" not in _executed(cur) and res.status == "unchanged"
+    assert store.load() == 1793610000
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_unchanged_but_missing_state_restamps(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [_spell_row(), _cond_row()]
+    store = banish.BanishStateStore(tmp_path)
+    res = banish.install_definition(store=store, now=1793700000, host="h", port=3306, user="u", password="p")
+    assert res.status == "installed" and store.load() == 1793700000 and "REPLACE INTO" not in _executed(cur)
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_rolls_back_and_reraises_on_error(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [None, None]
+    def boom(sql, *a):
+        if sql.startswith("INSERT INTO acore_world.conditions"):
+            raise DatabaseError(msg="disk full", errno=1114)
+    cur.execute.side_effect = boom
+    store = banish.BanishStateStore(tmp_path)
+    with pytest.raises(DatabaseError):
+        banish.install_definition(store=store, now=1, host="h", port=3306, user="u", password="p")
+    conn.rollback.assert_called_once(); conn.commit.assert_not_called()
+    assert store.load() is None
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_reports_success_when_the_state_file_cannot_be_written(mock_connect):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [None, None]
+    store = MagicMock()
+    store.load.return_value = None
+    store.save.side_effect = OSError("read-only file system")
+    res = banish.install_definition(store=store, now=5, host="h", port=3306, user="u", password="p")
+    conn.commit.assert_called_once()
+    assert res.status == "installed" and "could not record the install time" in res.message
+
+
+def _teach(cur_rows, store, inspect=None):
+    with patch("app.services.banish.mysql.connector.connect") as mock_connect:
+        conn, cur = _conn(mock_connect)
+        cur.fetchone.side_effect = cur_rows
+        res = banish.teach(guid=101, store=store, inspect=inspect or (lambda: MagicMock(status="running", started_at="2026-11-02T10:00:00Z")),
+                           host="h", port=3306, user="u", password="p")
+        return res, conn, cur
+
+
+def test_teach_inserts_row_with_spec_mask_255(tmp_path):
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+    res, conn, cur = _teach([(0, "Sariel"), _spell_row(), _cond_row(), None], store)
+    assert res.status == "taught" and "Sariel" in res.message and "Blizzard" in res.message and res.warning is None
+    insert = [c for c in cur.execute.call_args_list if "INSERT" in str(c.args[0])][0]
+    assert "acore_characters.character_spell" in insert.args[0] and insert.args[1] == (101, 35182, 255)
+    conn.commit.assert_called_once()
+
+
+def test_teach_warns_when_restart_required(tmp_path):
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+    res, *_ = _teach([(0, "Sariel"), _spell_row(), _cond_row(), None], store,
+                     inspect=lambda: MagicMock(status="running", started_at="2026-11-02T08:00:00Z"))
+    assert res.status == "taught" and "restart" in res.warning.lower()
+
+
+def test_teach_still_succeeds_when_docker_inspect_fails_after_the_commit(tmp_path):
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+
+    def no_socket():
+        raise RuntimeError("Error while fetching server API version")
+
+    res, conn, cur = _teach([(0, "Sariel"), _spell_row(), _cond_row(), None], store, inspect=no_socket)
+    conn.commit.assert_called_once()
+    assert res.status == "taught" and "restart" in res.warning.lower()
+
+
+def test_teach_validations(tmp_path):
+    store = banish.BanishStateStore(tmp_path)
+    with pytest.raises(ValueError, match="not found"):
+        _teach([None], store)
+    with pytest.raises(ValueError, match="log out"):
+        _teach([(1, "Sariel")], store)
+    with pytest.raises(ValueError, match="Install"):
+        _teach([(0, "Sariel"), None, None], store)
+    res, conn, cur = _teach([(0, "Sariel"), _spell_row(), _cond_row(), (1,)], store)
+    assert res.status == "noop" and "already" in res.message and "INSERT" not in _executed(cur)
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_forget_deletes_row_or_noops(mock_connect):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [(0, "Sariel")]; cur.rowcount = 1
+    res = banish.forget(guid=101, host="h", port=3306, user="u", password="p")
+    assert res.status == "forgotten" and "Sariel" in res.message
+    delete = [c for c in cur.execute.call_args_list if "DELETE" in str(c.args[0])][0]
+    assert "acore_characters.character_spell" in delete.args[0] and delete.args[1] == (101, 35182)
+    cur.execute.reset_mock(); cur.fetchone.side_effect = [(0, "Sariel")]; cur.rowcount = 0
+    assert banish.forget(guid=101, host="h", port=3306, user="u", password="p").status == "noop"
+    cur.fetchone.side_effect = [(1, "Sariel")]
+    with pytest.raises(ValueError, match="log out"):
+        banish.forget(guid=101, host="h", port=3306, user="u", password="p")

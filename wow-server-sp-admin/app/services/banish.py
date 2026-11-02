@@ -29,7 +29,8 @@ forget the spell first (``character_spell``), then delete the two rows —
 otherwise a character that still knows 35182 falls back to the client's
 harmless original test spell on the next boot and the owner thinks it broke.
 
-The SQL builders return parameterised statements; running them is the caller's job.
+The SQL builders return parameterised statements; the functions after the state
+store run them (read-compare-write, one transaction, rolled back on any error).
 """
 
 from __future__ import annotations
@@ -38,9 +39,16 @@ import json
 import logging
 import math
 import os
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+import mysql.connector
+
+from app.services import docker_client
+from app.services.raid_unlock import REAL_ACCOUNT_SQL
 
 log = logging.getLogger(__name__)
 
@@ -302,3 +310,293 @@ class BanishStateStore:
 
 def store_from_env() -> BanishStateStore:
     return BanishStateStore(Path(os.environ.get("ADMIN_DATA_DIR", "/admin-data")))
+
+
+# --- database operations ---
+
+MYSQL_NO_SUCH_TABLE = 1146
+
+
+class SpellDbcUnsupported(RuntimeError):
+    """``acore_world.spell_dbc`` does not exist: this core cannot load DB-defined spells."""
+
+
+@dataclass(frozen=True)
+class BanishCharacterRow:
+    guid: int
+    account: str
+    name: str
+    level: int
+    online: bool
+    knows: bool
+
+
+@dataclass(frozen=True)
+class BanishStatus:
+    support: str  # "ok" | "no_spell_dbc_table" | "db_error"
+    definition: str  # "missing" | "installed" | "outdated"
+    worldserver: str  # "active" | "restart_required" | "unknown" | "not_running"
+    installed_at: int | None
+    version: int = DEFINITION_VERSION
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    status: str  # "installed" | "unchanged" | "taught" | "forgotten" | "noop"
+    message: str
+    warning: str | None = None
+
+
+def _connect(*, host: str, port: int, user: str, password: str):
+    return mysql.connector.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        connection_timeout=2,
+        autocommit=False,
+    )
+
+
+def _close(conn) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _rollback(conn) -> None:
+    """Best effort: a dead connection must not hide the error that caused the rollback."""
+    try:
+        conn.rollback()
+    except Exception:
+        log.warning("banish: rollback failed", exc_info=True)
+
+
+def _inspect(inspect: Callable[[], object]) -> tuple[str, str | None]:
+    """``(container status, StartedAt)``; any failure to ask Docker is ``("unknown", None)``.
+
+    ``inspect_worldserver`` maps Docker API and connection errors itself, but
+    ``docker.from_env()`` can still raise (no socket). Nothing here may fail
+    because of Docker: a status render must not 500, and a teach that already
+    committed must not turn into an error.
+    """
+    try:
+        info = inspect()
+        return info.status, info.started_at
+    except Exception:
+        log.warning("banish: could not inspect the worldserver container", exc_info=True)
+        return "unknown", None
+
+
+def collect_characters(*, host: str, port: int, user: str, password: str) -> tuple[BanishCharacterRow, ...]:
+    """Real-account characters (bots and the AH bot excluded) with whether they know Banish."""
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT c.guid, a.username, c.name, c.level, c.online, "
+                "EXISTS(SELECT 1 FROM acore_characters.character_spell s "
+                f"WHERE s.guid = c.guid AND s.spell = {SPELL_ID}) AS knows "
+                "FROM acore_characters.characters c "
+                "JOIN acore_auth.account a ON a.id = c.account "
+                f"WHERE {REAL_ACCOUNT_SQL} "
+                "ORDER BY a.username ASC, c.name ASC"
+            )
+            return tuple(
+                BanishCharacterRow(int(g), str(u), str(n), int(lv), bool(on), bool(kn))
+                for (g, u, n, lv, on, kn) in cur.fetchall()
+            )
+    finally:
+        _close(conn)
+
+
+def fetch_definition(cur) -> tuple[tuple | None, tuple | None]:
+    """The current ``spell_dbc`` and ``conditions`` rows (``None`` = absent), ready for ``definition_state``.
+
+    Raises ``SpellDbcUnsupported`` when ``spell_dbc`` does not exist.
+    """
+    try:
+        cur.execute(spell_dbc_select_sql(), (SPELL_ID,))
+        spell_row = cur.fetchone()
+        sql, params = conditions_select_sql()
+        cur.execute(sql, params)
+        cond_row = cur.fetchone()
+    except mysql.connector.Error as e:
+        if getattr(e, "errno", None) == MYSQL_NO_SUCH_TABLE:
+            raise SpellDbcUnsupported("acore_world.spell_dbc does not exist") from e
+        raise
+    return spell_row, cond_row
+
+
+def collect_status(
+    *,
+    store: BanishStateStore,
+    inspect: Callable[[], object] = docker_client.inspect_worldserver,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+) -> BanishStatus:
+    """The card's status; MySQL and Docker problems are part of the answer, never exceptions."""
+    installed_at = store.load()
+    support, definition, message = "ok", "missing", None
+    conn = None
+    try:
+        conn = _connect(host=host, port=port, user=user, password=password)
+        with conn.cursor() as cur:
+            spell_row, cond_row = fetch_definition(cur)
+        definition = definition_state(spell_row, cond_row)
+    except SpellDbcUnsupported:
+        support = "no_spell_dbc_table"
+    except mysql.connector.Error as e:
+        support, message = "db_error", str(e)
+    finally:
+        if conn is not None:
+            _close(conn)
+    container_status, started_at = _inspect(inspect)
+    return BanishStatus(
+        support=support,
+        definition=definition,
+        worldserver=worldserver_state(container_status, started_at, installed_at),
+        installed_at=installed_at,
+        message=message,
+    )
+
+
+def install_definition(
+    *,
+    store: BanishStateStore,
+    now: int | None = None,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+) -> ActionResult:
+    """Read-compare-write the two rows in one transaction, then stamp ``banish.json``.
+
+    Writes only when the rows differ from the definition; the stamp is renewed
+    only when something was written or the stamp is missing, so pressing Install
+    on an active definition never asks for a restart.
+    """
+    now = int(time.time()) if now is None else now
+    wrote = False
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            spell_row, cond_row = fetch_definition(cur)
+            if definition_state(spell_row, cond_row) != "installed":
+                cur.execute(*spell_dbc_insert_sql())
+                cur.execute(*conditions_insert_sql())
+                conn.commit()
+                wrote = True
+    except Exception:
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+    if not (wrote or store.load() is None):
+        return ActionResult("unchanged", f"Banish definition v{DEFINITION_VERSION} is already installed; nothing changed.")
+    message = (
+        f"Banish definition v{DEFINITION_VERSION} installed. "
+        "Restart the worldserver (Dashboard → Restart) to load it."
+    )
+    try:
+        store.save(now)
+    except Exception:
+        # The rows are committed; losing the stamp only leaves the worldserver state "unknown".
+        log.warning("banish: could not write %s", store.path, exc_info=True)
+        message += " (could not record the install time)"
+    return ActionResult("installed", message)
+
+
+def _lookup_character(cur, guid: int) -> tuple[int, str] | None:
+    """``(online, name)`` of a real-account character, ``None`` when there is none."""
+    cur.execute(
+        "SELECT c.online, c.name FROM acore_characters.characters c "
+        "JOIN acore_auth.account a ON a.id = c.account "
+        f"WHERE {REAL_ACCOUNT_SQL} AND c.guid = %s",
+        (guid,),
+    )
+    row = cur.fetchone()
+    return None if row is None else (int(row[0]), str(row[1]))
+
+
+def _offline_character(cur, guid: int, *, verb: str) -> str:
+    """The character's name; ``ValueError`` when it does not exist or is logged in."""
+    found = _lookup_character(cur, guid)
+    if found is None:
+        raise ValueError(f"character not found: {guid}")
+    online, name = found
+    if online:
+        raise ValueError(f"Character must log out before Banish can be {verb}.")
+    return name
+
+
+def teach(
+    *,
+    guid: int,
+    store: BanishStateStore,
+    inspect: Callable[[], object] = docker_client.inspect_worldserver,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+) -> ActionResult:
+    """Add the ``character_spell`` row for an offline real-account character; needs the installed definition.
+
+    The worldserver state is not a gate (see the spec, 3.3): it only adds a warning.
+    """
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            name = _offline_character(cur, guid, verb="taught")
+            spell_row, cond_row = fetch_definition(cur)
+            if definition_state(spell_row, cond_row) != "installed":
+                raise ValueError("Install the Banish definition first (status above).")
+            cur.execute(
+                "SELECT 1 FROM acore_characters.character_spell WHERE guid = %s AND spell = %s",
+                (guid, SPELL_ID),
+            )
+            if cur.fetchone() is not None:
+                return ActionResult("noop", f"{name} already knows Banish.")
+            cur.execute(
+                "INSERT IGNORE INTO acore_characters.character_spell (guid, spell, specMask) VALUES (%s, %s, %s)",
+                (guid, SPELL_ID, SPEC_MASK_ALL),
+            )
+            conn.commit()
+    except Exception:
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+    container_status, started_at = _inspect(inspect)
+    warning = teach_warning(worldserver_state(container_status, started_at, store.load()))
+    return ActionResult(
+        "taught",
+        f"Taught Banish to {name}. It appears in the spellbook's Blizzard tab at the next login.",
+        warning,
+    )
+
+
+def forget(*, guid: int, host: str, port: int, user: str, password: str) -> ActionResult:
+    """Remove the ``character_spell`` row of an offline real-account character."""
+    conn = _connect(host=host, port=port, user=user, password=password)
+    try:
+        with conn.cursor() as cur:
+            name = _offline_character(cur, guid, verb="removed")
+            cur.execute(
+                "DELETE FROM acore_characters.character_spell WHERE guid = %s AND spell = %s",
+                (guid, SPELL_ID),
+            )
+            if cur.rowcount == 0:
+                return ActionResult("noop", f"{name} does not know Banish.")
+            conn.commit()
+    except Exception:
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+    return ActionResult("forgotten", f"Removed Banish from {name} (takes effect at the next login).")
