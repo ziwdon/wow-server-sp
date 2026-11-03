@@ -17,6 +17,9 @@ COLUMNS = (Path(__file__).parent / "data" / "spell_dbc_columns.txt").read_text()
 def test_definition_matches_spec_values():
     r = banish.SPELL_DBC_ROW
     assert list(r)[0] == "ID" and r["ID"] == 35182
+    # The exact column set: a stray extra column (say a B target) would change who the spell can hit.
+    assert len(banish.SPELL_DBC_ROW) == 51
+    assert (r["ImplicitTargetB_1"], r["ImplicitTargetB_2"], r["ImplicitTargetB_3"]) == (0, 0, 0)
     assert r["Mechanic"] == 0 and r["DurationIndex"] == 0 and r["CumulativeAura"] == 0
     assert r["Attributes"] == 0x24000000 == 603979776
     assert r["AttributesEx"] == 0x80 and r["AttributesEx2"] == 0x04000004 == 67108868
@@ -126,7 +129,11 @@ def test_worldserver_state_maps_docker_statuses():
 def test_teach_warning():
     assert banish.teach_warning("active") is None
     for st in ("restart_required", "unknown", "not_running"):
-        assert "restart" in banish.teach_warning(st).lower()
+        warning = banish.teach_warning(st)
+        assert "restart" in warning.lower()
+        # Why: until the restart the client's original test spell is what a cast would use.
+        assert "do not cast" in warning.lower() and "original test spell" in warning
+        assert "unlimited banish" in warning
 
 
 def test_state_store_roundtrip_and_unreadable(tmp_path):
@@ -274,6 +281,38 @@ def test_install_reports_success_when_the_state_file_cannot_be_written(mock_conn
     assert res.status == "installed" and "could not record the install time" in res.message
 
 
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_drops_the_old_stamp_when_the_new_one_cannot_be_saved(mock_connect, tmp_path):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [_spell_row(AttributesEx7=8), _cond_row()]   # differs: Install writes
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+    assert store.load() == 1793610000
+
+    def no_space(installed_at):
+        raise OSError("no space left on device")
+
+    store.save = no_space
+    res = banish.install_definition(store=store, now=1793700000, host="h", port=3306, user="u", password="p")
+    assert "REPLACE INTO acore_world.spell_dbc" in _executed(cur) and conn.commit.call_count == 1
+    assert res.status == "installed" and "could not record the install time" in res.message
+    # The old stamp predates this write; left alone it would make the worldserver read "active".
+    assert store.load() is None and not (tmp_path / "banish.json").exists()
+
+
+@patch("app.services.banish.mysql.connector.connect")
+def test_install_still_succeeds_when_the_old_stamp_cannot_be_deleted_either(mock_connect):
+    conn, cur = _conn(mock_connect)
+    cur.fetchone.side_effect = [None, None]
+    store = MagicMock()
+    store.load.return_value = 1793610000
+    store.save.side_effect = OSError("read-only file system")
+    store.clear.side_effect = OSError("read-only file system")
+    res = banish.install_definition(store=store, now=5, host="h", port=3306, user="u", password="p")
+    conn.commit.assert_called_once()
+    store.clear.assert_called_once()
+    assert res.status == "installed" and "could not record the install time" in res.message
+
+
 def _teach(cur_rows, store, inspect=None):
     with patch("app.services.banish.mysql.connector.connect") as mock_connect:
         conn, cur = _conn(mock_connect)
@@ -320,6 +359,33 @@ def test_teach_validations(tmp_path):
         _teach([(0, "Sariel"), None, None], store)
     res, conn, cur = _teach([(0, "Sariel"), _spell_row(), _cond_row(), (1,)], store)
     assert res.status == "noop" and "already" in res.message and "INSERT" not in _executed(cur)
+
+
+def test_teach_refuses_an_outdated_definition_without_writing(tmp_path):
+    store = banish.BanishStateStore(tmp_path)
+    with patch("app.services.banish.mysql.connector.connect") as mock_connect:
+        conn, cur = _conn(mock_connect)
+        cur.fetchone.side_effect = [(0, "Sariel"), _spell_row(AttributesEx7=8), _cond_row()]
+        with pytest.raises(ValueError, match="Install the Banish definition first"):
+            banish.teach(guid=101, store=store, inspect=lambda: MagicMock(status="running", started_at=None),
+                         host="h", port=3306, user="u", password="p")
+        assert "INSERT" not in _executed(cur) and "character_spell" not in _executed(cur)
+        conn.commit.assert_not_called()
+
+
+def test_teach_and_forget_look_the_character_up_among_real_accounts_only(tmp_path):
+    store = banish.BanishStateStore(tmp_path); store.save(1793610000)
+    _, _, cur = _teach([(0, "Sariel"), _spell_row(), _cond_row(), None], store)
+    lookup = str(cur.execute.call_args_list[0].args[0])
+    assert "acore_characters.characters" in lookup
+    assert "a.username NOT LIKE 'RNDBOT%%'" in lookup and "a.username <> 'ahbot'" in lookup
+    with patch("app.services.banish.mysql.connector.connect") as mock_connect:
+        conn, cur = _conn(mock_connect)
+        cur.fetchone.side_effect = [(0, "Sariel")]; cur.rowcount = 1
+        banish.forget(guid=101, host="h", port=3306, user="u", password="p")
+        lookup = str(cur.execute.call_args_list[0].args[0])
+        assert "acore_characters.characters" in lookup
+        assert "a.username NOT LIKE 'RNDBOT%%'" in lookup and "a.username <> 'ahbot'" in lookup
 
 
 @patch("app.services.banish.mysql.connector.connect")

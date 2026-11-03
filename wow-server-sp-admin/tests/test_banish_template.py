@@ -129,3 +129,14 @@ def test_character_section_buttons_start_disabled(monkeypatch):
     for btn in ("banish-teach-btn", "banish-forget-btn"):
         assert re.search(r'<button[^>]*id="%s"[^>]*\sdisabled[\s>]' % btn, html), btn
     assert 'id="banish-account"' in html and 'id="banish-char-list"' in html and 'id="banish-result"' in html
+
+
+def test_card_wording_describes_the_original_spell_plainly(monkeypatch):
+    html = _render(monkeypatch)
+    # The remove note: the fallback spell is a dangerous unlimited banish, not a harmless one.
+    assert "harmless" not in html
+    assert "client's original test spell instead: an unlimited stun/banish usable on any target" in html
+    assert "<code>.unaura 35182</code>" in html
+    # The Teach confirmation note shown while the worldserver has not loaded the definition.
+    assert "do not cast Banish until it has been restarted" in html
+    assert "an unlimited banish on whatever it hits" in html

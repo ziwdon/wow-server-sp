@@ -27,7 +27,8 @@ container's ``StartedAt`` it tells ``active`` from ``restart_required``.
 Removal order, for whoever removes the definition later: have every character
 forget the spell first (``character_spell``), then delete the two rows —
 otherwise a character that still knows 35182 falls back to the client's
-harmless original test spell on the next boot and the owner thinks it broke.
+original test spell on the next boot: an unlimited stun/banish usable on any
+target, players and bots included (a GM clears it with ``.unaura 35182``).
 
 The SQL builders return parameterised statements; the functions after the state
 store run them (read-compare-write, one transaction, rolled back on any error).
@@ -267,8 +268,9 @@ def teach_warning(worldserver: str) -> str | None:
     if worldserver == "active":
         return None
     return (
-        "The running worldserver has not loaded the definition yet — "
-        "restart it (Dashboard → Restart) before using the spell."
+        "The running worldserver has not loaded the definition yet — do not cast Banish "
+        "until it has been restarted (Dashboard → Restart): until then it is the client's "
+        "original test spell, an unlimited banish on whatever it hits."
     )
 
 
@@ -306,6 +308,10 @@ class BanishStateStore:
         payload = {"version": _STATE_FORMAT_VERSION, "installed_at": int(installed_at)}
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(tmp, self.path)
+
+    def clear(self) -> None:
+        """Delete the stamp (already gone is fine), so the install time reads as unknown."""
+        self.path.unlink(missing_ok=True)
 
 
 def store_from_env() -> BanishStateStore:
@@ -506,8 +512,13 @@ def install_definition(
     try:
         store.save(now)
     except Exception:
-        # The rows are committed; losing the stamp only leaves the worldserver state "unknown".
+        # The rows are committed; losing the stamp only leaves the worldserver state "unknown" --
+        # unless an older stamp survives: it predates this write and would read "active".
         log.warning("banish: could not write %s", store.path, exc_info=True)
+        try:
+            store.clear()
+        except Exception:
+            log.warning("banish: could not remove the stale %s", store.path, exc_info=True)
         message += " (could not record the install time)"
     return ActionResult("installed", message)
 

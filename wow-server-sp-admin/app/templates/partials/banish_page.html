@@ -56,7 +56,8 @@
             <li>Restart the worldserver (Dashboard → Restart).</li>
           </ol>
           <p>Keep this order: a character that still knows 35182 once the rows are gone gets the
-            client's harmless original test spell instead.</p>
+            client's original test spell instead: an unlimited stun/banish usable on any target,
+            players and bots included (a GM clears it with <code>.unaura 35182</code>).</p>
         </details>
         {% endif %}
       </div>
@@ -357,7 +358,7 @@
       const notes = ['The character must stay logged out until this completes.',
                      'The spell appears in the Blizzard tab at the next login.'];
       if (status.worldserver !== 'active') {
-        notes.push('The running worldserver has not loaded the definition yet — restart it before using the spell.');
+        notes.push('The running worldserver has not loaded the definition yet — do not cast Banish until it has been restarted: until then it is the client\'s original test spell, an unlimited banish on whatever it hits.');
       }
       runAction({
         url: '/api/banish/teach',
