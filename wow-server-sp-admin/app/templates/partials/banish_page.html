@@ -1,0 +1,416 @@
+<div id="banish-inner">
+  {% if error %}
+  <div class="banner error">Could not load Banish data: {{ error }}</div>
+  {% endif %}
+  <script type="application/json" id="banish-char-data">{{ rows_json | safe }}</script>
+  <script type="application/json" id="banish-status-data">{{ status_json | safe }}</script>
+
+  <div class="panel banish-card">
+    <div class="panel-header"><span class="panel-title">Banish</span></div>
+    <div class="panel-body">
+      <div class="banish-intro">
+        <p>A one-shot spell for raid bosses that need a full raid to kill. On this small server most
+          25- and 40-player encounters cannot be completed as designed, so a chosen character can learn
+          Banish and end the fight in one hit.</p>
+        <p>Banish instantly kills the targeted hostile or neutral NPC and rewards it as a normal kill:
+          loot, kill credit and achievements for the caster and group. It cannot target players, bots or friendly NPCs,
+          costs nothing, casts instantly and has only the global cooldown. Once taught it appears in the
+          spellbook's Blizzard tab as “Banish” from the next login.</p>
+      </div>
+
+      <div class="banish-status">
+        {% if status.support == 'no_spell_dbc_table' %}
+        <div class="banner error">This AzerothCore build has no spell_dbc table; the Banish boss killer is unavailable.</div>
+        {% elif status.support == 'db_error' %}
+        <div class="banner error">Could not read the Banish definition: {{ status.message }}</div>
+        {% else %}
+        <dl class="banish-status-lines">
+          <div class="banish-status-line">
+            <dt>Definition</dt>
+            {% if status.definition == 'missing' %}<dd class="banish-tone-muted">Not installed</dd>
+            {% elif status.definition == 'installed' %}<dd class="banish-tone-ok">Installed (v{{ status.version }})</dd>
+            {% else %}<dd class="banish-tone-warn">Installed but differs from v{{ status.version }} — update it</dd>
+            {% endif %}
+          </div>
+          {% if status.definition != 'missing' %}
+          <div class="banish-status-line">
+            <dt>Worldserver</dt>
+            {% if status.worldserver == 'active' %}<dd class="banish-tone-ok">Running with the definition loaded</dd>
+            {% elif status.worldserver == 'restart_required' %}<dd class="banish-tone-warn">Restart required — the worldserver started before the definition was installed (Dashboard → Restart)</dd>
+            {% elif status.worldserver == 'unknown' %}<dd class="banish-tone-warn">Unknown — restart the worldserver if the spell does not one-shot</dd>
+            {% else %}<dd class="banish-tone-muted">Not running</dd>
+            {% endif %}
+          </div>
+          {% endif %}
+        </dl>
+        <button type="button" class="btn btn-apply banish-install-btn" id="banish-install-btn">{% if status.definition == 'missing' %}Install definition{% elif status.definition == 'outdated' %}Update definition{% else %}Reinstall definition{% endif %}</button>
+        <div id="banish-install-result" class="banner hidden" role="status"></div>
+        <details id="banish-remove-note" class="banish-remove-note">
+          <summary>How to remove</summary>
+          <ol>
+            <li>Forget Banish from every character that knows it (below), or in MySQL:
+              <code>DELETE FROM acore_characters.character_spell WHERE spell = 35182;</code></li>
+            <li>Delete the definition rows:
+              <code>DELETE FROM acore_world.spell_dbc WHERE ID = 35182;</code> and
+              <code>DELETE FROM acore_world.conditions WHERE SourceTypeOrReferenceId = 17 AND SourceEntry = 35182;</code></li>
+            <li>Restart the worldserver (Dashboard → Restart).</li>
+          </ol>
+          <p>Keep this order: a character that still knows 35182 once the rows are gone gets the
+            client's original test spell instead: an unlimited stun/banish usable on any target,
+            players and bots included (a GM clears it with <code>.unaura 35182</code>).</p>
+        </details>
+        {% endif %}
+      </div>
+
+      {% if rows %}
+      <div class="prog-layout banish-layout">
+        <div class="left-col">
+          <div>
+            <label class="field-label" for="banish-account">Account</label>
+            <select id="banish-account" class="prog-account-select">
+              <option value="">— select account —</option>
+            </select>
+          </div>
+          <div>
+            <span class="field-label" id="banish-char-label">Character</span>
+            <div class="char-list-box" id="banish-char-list" role="group" aria-labelledby="banish-char-label">
+              <div class="char-list-hint">Select an account above</div>
+            </div>
+          </div>
+          <div id="banish-result" class="banner hidden" role="status"></div>
+          <div class="banish-actions">
+            {% if status.support != 'no_spell_dbc_table' %}
+            <button type="button" class="btn btn-apply" id="banish-teach-btn" disabled>Teach Banish</button>
+            {% endif %}
+            <button type="button" class="btn btn-muted" id="banish-forget-btn" disabled>Forget Banish</button>
+          </div>
+        </div>
+
+        <div class="right-col banish-howto">
+          <span class="field-label">In game</span>
+          <ol class="banish-steps">
+            <li>Log in with the character.</li>
+            <li>Open the spellbook, choose the Blizzard tab and drag Banish to an action bar.</li>
+            <li>Target the boss and cast Banish: it dies at once and drops its loot.</li>
+            <li>“Invalid target” means a player, a bot or a friendly NPC; “Spell is not ready yet.” is the global cooldown.</li>
+          </ol>
+        </div>
+      </div>
+      {% elif not error %}
+      <p class="empty-state">No real-player characters found.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div id="banish-confirm-overlay" class="prog-confirm-overlay hidden" aria-hidden="true">
+    <div class="prog-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="banish-confirm-title"
+         aria-describedby="banish-confirm-body banish-confirm-notes" tabindex="-1">
+      <h3 class="prog-confirm-title" id="banish-confirm-title">Confirm</h3>
+      <p class="prog-confirm-body" id="banish-confirm-body"></p>
+      <ul class="prog-confirm-notes" id="banish-confirm-notes"></ul>
+      <div class="prog-confirm-actions">
+        <button type="button" class="btn btn-muted prog-confirm-cancel-btn" id="banish-confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-apply prog-confirm-yes-btn" id="banish-confirm-yes">Yes, proceed</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const charDataEl = document.getElementById('banish-char-data');
+  const statusDataEl = document.getElementById('banish-status-data');
+  if (!charDataEl || !statusDataEl) return;
+  const wrapper = document.getElementById('banish-data');
+  const inner = document.getElementById('banish-inner');
+  const esc = function(value) {
+    return String(value ?? '').replace(/[&<>"']/g, function(ch) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+    });
+  };
+  const parseBlob = function(el, fallback) {
+    try { return JSON.parse(el.textContent || '') || fallback; } catch (e) { return fallback; }
+  };
+  const chars = parseBlob(charDataEl, []);
+  const status = parseBlob(statusDataEl, {});
+  const OK_STATUSES = ['installed', 'taught', 'forgotten'];
+  const NOTICE_STATUSES = ['unchanged', 'noop'];
+  const TONES = ['ok', 'warning', 'error'];
+  let selectedChar = null;
+  let confirmationOpen = false;
+  let busy = false;
+
+  // After an action the card re-renders itself (status and "knows" marks); the copy of this
+  // script that ran the action leaves the account, character and result here for this one.
+  let restore = null;
+  if (wrapper && wrapper.dataset.banishRestore) {
+    try { restore = JSON.parse(wrapper.dataset.banishRestore); } catch (e) { restore = null; }
+    delete wrapper.dataset.banishRestore;
+  }
+
+  const accountSel = document.getElementById('banish-account');
+  const charList = document.getElementById('banish-char-list');
+  const resultEl = document.getElementById('banish-result');
+  const installBtn = document.getElementById('banish-install-btn');
+  const installResultEl = document.getElementById('banish-install-result');
+  const teachBtn = document.getElementById('banish-teach-btn');
+  const forgetBtn = document.getElementById('banish-forget-btn');
+
+  function setBanner(el, text, tone) {
+    if (!el) return;
+    if (!text) { el.textContent = ''; el.className = 'banner hidden'; return; }
+    el.textContent = text;
+    el.className = 'banner ' + (TONES.indexOf(tone) >= 0 ? tone : 'ok');
+  }
+
+  function updateButtons() {
+    if (installBtn) installBtn.disabled = busy;
+    if (teachBtn) {
+      teachBtn.disabled = busy || !(selectedChar && !selectedChar.online
+        && status.definition === 'installed' && !selectedChar.knows);
+    }
+    if (forgetBtn) forgetBtn.disabled = busy || !(selectedChar && !selectedChar.online && selectedChar.knows);
+  }
+
+  // Why Teach / Forget stay disabled for the selected character, when the marks do not say it.
+  function selectionHint() {
+    if (!selectedChar) return '';
+    if (selectedChar.online) return 'Character must log out before Banish can be taught or removed.';
+    if (teachBtn && status.support === 'ok' && !selectedChar.knows && status.definition !== 'installed') {
+      return (status.definition === 'outdated' ? 'Update' : 'Install')
+        + ' the Banish definition (above) before teaching it.';
+    }
+    return '';
+  }
+
+  function renderChars(account) {
+    charList.innerHTML = '';
+    selectedChar = null;
+    setBanner(resultEl, '');
+    updateButtons();
+    const filtered = chars.filter(function(c) { return c.account === account; })
+      .sort(function(a, b) { return b.level - a.level || a.name.localeCompare(b.name); });
+    if (!filtered.length) {
+      charList.innerHTML = '<div class="char-list-hint">No characters</div>';
+      return;
+    }
+    filtered.forEach(function(c) {
+      const row = document.createElement('div');
+      row.className = 'char-row' + (c.online ? ' online' : '');
+      row.setAttribute('role', 'button');
+      row.setAttribute('aria-pressed', 'false');
+      row.tabIndex = 0;
+      row.dataset.guid = String(c.guid);
+      const marks = (c.online ? ' · <span class="banish-mark-online">online</span>' : '')
+        + (c.knows ? ' · <span class="banish-mark-knows">knows Banish</span>' : '');
+      row.innerHTML = '<span class="char-row-name">' + esc(c.name) + '</span>'
+        + '<span class="char-row-meta">Lvl ' + esc(c.level) + marks + '</span>';
+      row.addEventListener('click', function() { selectChar(c, row); });
+      row.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
+      });
+      charList.appendChild(row);
+    });
+  }
+
+  function selectChar(c, rowEl) {
+    selectedChar = c;
+    charList.querySelectorAll('.char-row').forEach(function(r) {
+      r.classList.remove('selected');
+      r.setAttribute('aria-pressed', 'false');
+    });
+    rowEl.classList.add('selected');
+    rowEl.setAttribute('aria-pressed', 'true');
+    setBanner(resultEl, selectionHint(), 'warning');
+    updateButtons();
+  }
+
+  if (accountSel && charList) {
+    const accounts = [...new Set(chars.map(function(c) { return c.account; }))].sort();
+    accounts.forEach(function(a) {
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = a;
+      accountSel.appendChild(opt);
+    });
+    accountSel.addEventListener('change', function() {
+      if (accountSel.value) renderChars(accountSel.value);
+    });
+  }
+
+  function showConfirm(title, bodyText, notes, yesLabel) {
+    return new Promise(function(resolve) {
+      const overlay = document.getElementById('banish-confirm-overlay');
+      const dialog = overlay && overlay.querySelector('.prog-confirm-dialog');
+      const titleEl = document.getElementById('banish-confirm-title');
+      const body = document.getElementById('banish-confirm-body');
+      const notesEl = document.getElementById('banish-confirm-notes');
+      const yesBtn = document.getElementById('banish-confirm-yes');
+      const cancelBtn = document.getElementById('banish-confirm-cancel');
+      if (!overlay || !dialog || !titleEl || !body || !notesEl || !yesBtn || !cancelBtn) { resolve(false); return; }
+      titleEl.textContent = title;
+      body.textContent = bodyText;
+      notesEl.innerHTML = '';
+      notes.forEach(function(note) {
+        const li = document.createElement('li');
+        li.textContent = note;
+        notesEl.appendChild(li);
+      });
+      yesBtn.textContent = yesLabel;
+      overlay.classList.remove('hidden');
+      overlay.setAttribute('aria-hidden', 'false');
+      yesBtn.focus();
+      function cleanup(result) {
+        overlay.classList.add('hidden');
+        overlay.setAttribute('aria-hidden', 'true');
+        yesBtn.removeEventListener('click', onYes);
+        cancelBtn.removeEventListener('click', onCancel);
+        overlay.removeEventListener('click', onOverlay);
+        document.removeEventListener('keydown', onKey);
+        resolve(result);
+      }
+      function onYes() { cleanup(true); }
+      function onCancel() { cleanup(false); }
+      function onOverlay(e) { if (e.target === overlay) cleanup(false); }
+      function trapFocus(e) {
+        const f = dialog.querySelectorAll('button:not([disabled])');
+        const first = f[0], last = f[f.length - 1];
+        if (!first || !last) { e.preventDefault(); dialog.focus(); return; }
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+        if (e.key === 'Tab') trapFocus(e);
+      }
+      yesBtn.addEventListener('click', onYes);
+      cancelBtn.addEventListener('click', onCancel);
+      overlay.addEventListener('click', onOverlay);
+      document.addEventListener('keydown', onKey);
+    });
+  }
+
+  // One confirmed POST; on any answer the server accepted, the card re-fetches itself.
+  async function runAction(action) {
+    if (busy || confirmationOpen) return;
+    confirmationOpen = true;
+    busy = true;
+    updateButtons();
+    const confirmed = await showConfirm(action.title, action.body, action.notes, action.yes);
+    confirmationOpen = false;
+    if (!confirmed) { busy = false; updateButtons(); action.trigger.focus(); return; }
+    try {
+      const init = {method: 'POST'};
+      if (action.payload) { init.headers = {'Content-Type': 'application/json'}; init.body = action.payload; }
+      const response = await fetch(action.url, init);
+      let data = {};
+      try { data = await response.json(); } catch (e) { data = {}; }
+      let text = data.message || (typeof data.detail === 'string' ? data.detail : '')
+        || ('Request failed (HTTP ' + response.status + ')');
+      let tone = 'error';
+      if (response.ok && OK_STATUSES.indexOf(data.status) >= 0) tone = 'ok';
+      else if (response.ok && NOTICE_STATUSES.indexOf(data.status) >= 0) tone = 'warning';
+      if (tone !== 'error' && data.warning) { tone = 'warning'; text += ' ' + data.warning; }
+      setBanner(action.banner, text, tone);
+      if (response.ok) {
+        if (wrapper) {
+          wrapper.dataset.banishRestore = JSON.stringify({
+            account: accountSel ? accountSel.value : '',
+            guid: selectedChar ? selectedChar.guid : null,
+            banner: action.banner === installResultEl ? 'install' : 'result',
+            text: text, tone: tone, focus: action.trigger.id
+          });
+        }
+        try {
+          await htmx.ajax('GET', '/api/banish/panel', {target: '#banish-data', swap: 'innerHTML'});
+        } catch (e) {
+          // The result above stays; base.html's toast reports the failed refresh.
+        }
+      }
+    } catch (e) {
+      setBanner(action.banner, 'Request failed: ' + e.message, 'error');
+    } finally {
+      // Still in the page: the card was not re-rendered, so nobody else takes the hand-over.
+      if (wrapper && inner && inner.isConnected) delete wrapper.dataset.banishRestore;
+      busy = false;
+      updateButtons();
+    }
+  }
+
+  if (installBtn) {
+    installBtn.addEventListener('click', function() {
+      runAction({
+        url: '/api/banish/install',
+        payload: null,
+        title: 'Install Banish definition',
+        body: 'Write the Banish boss-killer definition (v' + (status.version || 1) + ') into the world database?',
+        notes: ['The worldserver must be restarted afterwards (Dashboard → Restart).',
+                'Nothing changes if the definition is already installed.'],
+        yes: 'Yes, install it',
+        trigger: installBtn,
+        banner: installResultEl
+      });
+    });
+  }
+
+  if (teachBtn) {
+    teachBtn.addEventListener('click', function() {
+      if (!selectedChar) return;
+      const notes = ['The character must stay logged out until this completes.',
+                     'The spell appears in the Blizzard tab at the next login.'];
+      if (status.worldserver !== 'active') {
+        notes.push('The running worldserver has not loaded the definition yet — do not cast Banish until it has been restarted: until then it is the client\'s original test spell, an unlimited banish on whatever it hits.');
+      }
+      runAction({
+        url: '/api/banish/teach',
+        payload: JSON.stringify({guid: selectedChar.guid}),
+        title: 'Teach Banish',
+        body: 'Teach Banish to ' + selectedChar.name + '?',
+        notes: notes,
+        yes: 'Yes, teach it',
+        trigger: teachBtn,
+        banner: resultEl
+      });
+    });
+  }
+
+  if (forgetBtn) {
+    forgetBtn.addEventListener('click', function() {
+      if (!selectedChar) return;
+      runAction({
+        url: '/api/banish/forget',
+        payload: JSON.stringify({guid: selectedChar.guid}),
+        title: 'Forget Banish',
+        body: 'Remove Banish from ' + selectedChar.name + '?',
+        notes: ['Takes effect at the next login.'],
+        yes: 'Yes, remove it',
+        trigger: forgetBtn,
+        banner: resultEl
+      });
+    });
+  }
+
+  updateButtons();
+
+  // Applied once htmx has settled the swap: settling puts each id'd element's server-rendered
+  // class back (the banners would be hidden again if this ran while the script executes).
+  function applyRestore() {
+    let selectedRow = null;
+    if (restore.account && accountSel && charList
+        && Array.prototype.some.call(accountSel.options, function(o) { return o.value === restore.account; })) {
+      accountSel.value = restore.account;
+      renderChars(restore.account);
+      const c = chars.find(function(x) { return x.account === restore.account && x.guid === restore.guid; });
+      selectedRow = Array.prototype.find.call(charList.querySelectorAll('.char-row'), function(r) {
+        return r.dataset.guid === String(restore.guid);
+      }) || null;
+      if (c && selectedRow) selectChar(c, selectedRow);
+    }
+    const target = restore.banner === 'install' ? (installResultEl || resultEl) : (resultEl || installResultEl);
+    setBanner(target, restore.text, restore.tone);
+    const focusEl = restore.focus ? document.getElementById(restore.focus) : null;
+    if (focusEl && !focusEl.disabled) focusEl.focus();
+    else if (selectedRow) selectedRow.focus();
+  }
+  if (restore && wrapper) wrapper.addEventListener('htmx:afterSettle', applyRestore, {once: true});
+})();
+</script>

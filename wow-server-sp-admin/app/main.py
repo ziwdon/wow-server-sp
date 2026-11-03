@@ -27,6 +27,7 @@ import re
 import uuid
 
 from app.services import backups as backups_svc
+from app.services import banish as banish_svc
 from app.services import app_events
 from app.services import armory as armory_svc
 from app.services import armory_assets
@@ -1693,6 +1694,10 @@ class RaidUnlockPayload(BaseModel):
     raid_key: str
 
 
+class BanishCharacterPayload(BaseModel):
+    guid: int
+
+
 @app.get("/progression", response_class=HTMLResponse)
 async def progression_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -1802,6 +1807,96 @@ async def api_raid_unlock_apply(payload: RaidUnlockPayload) -> dict:
         "item_name": result.item_name,
         "eta": result.eta_epoch,
     }
+
+
+def _script_json(value: object) -> str:
+    """``json.dumps`` for a ``<script type="application/json">`` block.
+
+    ``<``, ``>`` and ``&`` become ``\\u003c``, ``\\u003e`` and ``\\u0026`` (still valid JSON),
+    so a ``</script>`` inside a value cannot end the block: ``status.message`` carries
+    exception text.
+    """
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+@app.get("/api/banish/panel", response_class=HTMLResponse)
+async def api_banish_panel(request: Request) -> HTMLResponse:
+    rows = ()
+    err = None
+    try:
+        rows = await asyncio.to_thread(banish_svc.collect_characters, **db_credentials())
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+    status = await asyncio.to_thread(
+        banish_svc.collect_status, store=banish_svc.store_from_env(), **db_credentials()
+    )
+    rows_json = _script_json([
+        {"guid": r.guid, "account": r.account, "name": r.name,
+         "level": r.level, "online": r.online, "knows": r.knows}
+        for r in rows
+    ])
+    return templates.TemplateResponse(
+        request,
+        "partials/banish_page.html",
+        {
+            "rows": rows,
+            "rows_json": rows_json,
+            "status": status,
+            "status_json": _script_json(asdict(status)),
+            "error": err,
+        },
+    )
+
+
+async def _run_banish_action(call) -> dict:
+    """Run one Banish mutation under the shared mutation lock and shape its JSON answer.
+
+    Validation failures (``ValueError``) and an unsupported core (``SpellDbcUnsupported``)
+    are the operator's to fix: 400. Anything else (a MySQL error after the service's
+    rollback) is a 500 carrying the message.
+    """
+    if not runner.try_acquire_mutation():
+        raise HTTPException(status_code=409, detail="another destructive action is already running")
+    try:
+        result = await _await_thread_completion(call)
+    except (ValueError, banish_svc.SpellDbcUnsupported) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        log.exception("banish: action failed")
+        raise HTTPException(status_code=500, detail=f"Banish action failed: {e}")
+    finally:
+        runner.release_mutation()
+    return {"status": result.status, "message": result.message, "warning": result.warning}
+
+
+@app.post("/api/banish/install")
+async def api_banish_install() -> dict:
+    return await _run_banish_action(lambda: banish_svc.install_definition(
+        store=banish_svc.store_from_env(),
+        **db_credentials(),
+    ))
+
+
+@app.post("/api/banish/teach")
+async def api_banish_teach(payload: BanishCharacterPayload) -> dict:
+    return await _run_banish_action(lambda: banish_svc.teach(
+        guid=payload.guid,
+        store=banish_svc.store_from_env(),
+        **db_credentials(),
+    ))
+
+
+@app.post("/api/banish/forget")
+async def api_banish_forget(payload: BanishCharacterPayload) -> dict:
+    return await _run_banish_action(lambda: banish_svc.forget(
+        guid=payload.guid,
+        **db_credentials(),
+    ))
 
 
 @app.get("/settings", response_class=HTMLResponse)

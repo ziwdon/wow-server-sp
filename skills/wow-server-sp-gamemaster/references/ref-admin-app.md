@@ -104,6 +104,29 @@ The Progression page (`/progression`) lets you advance individual characters thr
 - Progression is **forward-only** — the service rejects downgrade requests server-side as well as in the UI
 - The internal key `"vanilla"` is displayed as **"Classic"** throughout the UI; the database and service always use `"vanilla"`
 
+### Banish (boss killer)
+
+A third card on the Progression page. **Banish** is a one-shot spell for raid bosses that need a full raid to kill: on this small server most 25- and 40-player encounters cannot be completed as designed, so a chosen character learns Banish and ends the fight with one cast. It is a server-side redefinition of spell 35182, the client's own internal "Banish" test spell, so no client patch is needed. In game it keeps the client's name, icon and tooltip ("Banishes the target."); only the server's behaviour differs.
+
+**Set-up (three steps, once):**
+1. **Install definition** (card button, confirmation dialog). The admin writes one `acore_world.spell_dbc` row and one `acore_world.conditions` row in a single transaction. Pressing it again on an unchanged, active definition changes nothing. If the rows were edited by hand the status reads "Installed but differs from v1" and the button becomes **Update definition**.
+2. **Restart the worldserver** (Dashboard → Restart). `spell_dbc` is read at boot only, so until the restart the spell does not do what it should. The card's Worldserver line says "Restart required" until the worldserver has started after the install; "Unknown" means the install time was not recorded (for example after restoring onto a fresh machine) and is harmless: restart once if the spell does not one-shot.
+3. **Teach to a logged-out character**: pick the account, pick the character, press **Teach Banish**. Characters of real accounts only (bots and the AH bot are not listed); the character must be offline, because the spell is a `character_spell` row read at login. The card marks characters that already **know Banish**, and **Forget Banish** removes the row again. Teach is disabled until the definition shows "Installed (v1)"; if the worldserver has not loaded it yet, the dialog and result carry a "do not cast Banish until it has been restarted" warning (until then a cast is the client's original test spell, an unlimited banish) but still go through.
+
+**In game:** log in, open the spellbook, choose the **Blizzard** tab and drag Banish to an action bar. Target the boss and cast it: the boss dies at once. It rewards as a normal kill, with loot, kill credit and achievements for the caster and the group (unlike the GM `.die` command, which gives none). The spell is instant, free, 100 yd, ignores line of sight, and cannot miss or be resisted.
+- **"Invalid target"**: the target is a player, a bot or a friendly NPC. Banish only works on hostile or neutral NPCs and can never hit a player.
+- **"Spell is not ready yet."**: the global cooldown (1.5 s) is enforced by the server only, so the action button does not grey out.
+- It cannot kill a boss whose script keeps it at 1 HP until a phase event, or one flagged unattackable by a stuck script.
+
+**Removal** (no button, by design). Do it in this order:
+1. Forget Banish from every character that knows it (Forget button, or `DELETE FROM acore_characters.character_spell WHERE spell = 35182;`).
+2. Delete the two definition rows: `DELETE FROM acore_world.spell_dbc WHERE ID = 35182;` and `DELETE FROM acore_world.conditions WHERE SourceTypeOrReferenceId = 17 AND SourceEntry = 35182;`
+3. Restart the worldserver.
+
+The order matters: the client's `Spell.dbc` still contains 35182, so the server never deletes the character rows itself, and a character that still knows the spell once the rows are gone gets the client's original test spell instead: an unlimited stun/banish usable on any target, players and bots included (a GM clears it with `.unaura 35182` on the target). The same collapsed "How to remove" note is on the card. Spell 35182 is reserved for this feature; do not use it for anything else.
+
+The install time is kept in `/opt/stacks/azerothcore-admin/data/banish.json`, which is not included in backup archives. The taught spells themselves live in `acore_characters` and are backed up and restored with it.
+
 ## Armory Page
 
 The Armory tab (`/armory`, one character at `/armory/<guid>`) is a read-only character sheet. Search by name (at least 2 letters; humans first, then bots tagged `bot`), or click any character name on the Players page.
@@ -209,6 +232,7 @@ Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that co
 | `/opt/stacks/azerothcore-admin/snapshots/` | `admin.yml.bak.<ts>` snapshots (7-day retention) |
 | `/opt/stacks/azerothcore-admin/data/cloud/` | Cloud Backup: `config.json`, `state.json`, `log.jsonl` and `secrets/` (the encrypted Proton session; mode 700). Never included in backup archives |
 | `/opt/stacks/azerothcore-admin/data/armory/` | Armory: `armory.json` (3D viewer On/Off), `displayid-map.json` (item → Wowhead model id) and `cache/` (Wowhead model files, icons and the pinned viewer script; max 300 MB). Re-fetchable; never included in backup archives |
+| `/opt/stacks/azerothcore-admin/data/banish.json` | Banish: the time the definition was last installed (decides "Restart required" vs "Running with the definition loaded"). Never included in backup archives |
 | `/opt/stacks/azerothcore-admin/data/customization/` | Customization: `config.json` (header name, logo type and sha256) and `logo.<ext>`. Never included in backup archives |
 | `/opt/stacks/azerothcore/docker-compose.admin.yml` | Admin-written Compose overlay |
 | `/opt/stacks/azerothcore/backups/` | Consolidated backup archives (daily, manual, prerestore, preclear, preupgrade, prerollback) |
