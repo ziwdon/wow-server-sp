@@ -1,3 +1,5 @@
+import json
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -367,7 +369,31 @@ def test_panel_route_reports_db_error_banner(monkeypatch):
     monkeypatch.setattr("app.main.banish_svc.collect_status", lambda **kw: _status(
         support="db_error", definition="missing", worldserver="unknown", installed_at=None, message="db down"))
     r = TestClient(app).get("/api/banish/panel")
-    assert r.status_code == 200 and "db down" in r.text
+    assert r.status_code == 200
+    # The load-error banner itself (the status JSON and the status banner also carry "db down").
+    assert '<div class="banner error">Could not load Banish data: db down</div>' in r.text
+    assert '<script type="application/json" id="banish-char-data">[]</script>' in r.text
+
+
+def _json_blobs(html: str) -> dict:
+    return dict(re.findall(r'<script type="application/json" id="(banish-[a-z]+-data)">(.*?)</script>', html, re.S))
+
+
+def test_panel_route_escapes_script_breakers_in_the_json_blobs(monkeypatch):
+    evil = 'x</script><img src=x onerror=alert(1)>&amp;'
+    monkeypatch.setattr("app.main.db_credentials", lambda: CREDS)
+    monkeypatch.setattr("app.main.banish_svc.collect_characters",
+                        lambda **kw: (banish.BanishCharacterRow(101, "CARLOS", evil, 60, False, False),))
+    monkeypatch.setattr("app.main.banish_svc.collect_status", lambda **kw: _status(
+        support="db_error", definition="missing", worldserver="unknown", installed_at=None, message=evil))
+    r = TestClient(app).get("/api/banish/panel")
+    assert r.status_code == 200
+    assert "</script><img" not in r.text and "<img src=x" not in r.text
+    blobs = _json_blobs(r.text)
+    assert "\\u003c/script\\u003e" in blobs["banish-status-data"] and "\\u0026amp;" in blobs["banish-status-data"]
+    # Still valid JSON that decodes to the original text.
+    assert json.loads(blobs["banish-char-data"])[0]["name"] == evil
+    assert json.loads(blobs["banish-status-data"])["message"] == evil
 
 
 def test_install_route_happy_path(monkeypatch):

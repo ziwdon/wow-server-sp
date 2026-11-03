@@ -1364,10 +1364,81 @@ pre.logview {
 }
 .raid-tile .raid-label { font-weight: 600; }
 
+/* Banish card */
+.banish-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 80ch;
+  margin: 0.25rem 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--text-warm);
+}
+.banish-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #17140f;
+}
+.banish-card .banner { margin: 0; }
+.banish-status .banner,
+.banish-status .banish-remove-note { align-self: stretch; }
+.banish-card .banner.warning { background: var(--yellow-bg); border: 1px solid #6a5a1a; color: var(--yellow); }
+.banish-status-lines { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.88rem; }
+.banish-status-line { display: flex; gap: 1rem; }
+.banish-status-line dt { flex: 0 0 6.5rem; color: var(--muted); }
+.banish-tone-ok { color: var(--green); }
+.banish-tone-warn { color: var(--orange); }
+.banish-tone-muted { color: var(--muted); }
+.banish-install-btn { width: auto; }
+.banish-remove-note { font-size: 0.85rem; color: var(--muted); }
+.banish-remove-note summary { cursor: pointer; color: var(--text-warm); }
+.banish-remove-note ol {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.5rem 0 0.4rem;
+  padding-left: 1.25rem;
+}
+.banish-remove-note code {
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--log-bg);
+  padding: 0 0.25rem;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+.banish-actions { display: flex; gap: 0.75rem; }
+.banish-actions .btn { flex: 1 1 0; width: auto; }
+.banish-actions .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.banish-mark-online { color: #c97f7f; }
+.banish-mark-knows { color: var(--gold); }
+.prog-layout .right-col.banish-howto { align-items: flex-start; justify-content: flex-start; gap: 0.5rem; }
+.banish-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-width: 60ch;
+  padding-left: 1.25rem;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--text-warm);
+}
+
 @media (max-width: 768px) {
   .prog-layout {
     grid-template-columns: 1fr;
   }
+  .banish-install-btn { width: 100%; }
+  .banish-status-line { flex-direction: column; gap: 0.1rem; }
+  .banish-status-line dt { flex-basis: auto; }
+  .banish-card .char-row { flex-wrap: wrap; gap: 0.15rem 0.75rem; }
   .exp-picker-horiz {
     flex-wrap: wrap;
     justify-content: center;

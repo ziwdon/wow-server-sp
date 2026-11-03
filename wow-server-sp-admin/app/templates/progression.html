@@ -13,5 +13,11 @@
        hx-swap="innerHTML">
     <p class="loading">Loading raid unlock data...</p>
   </div>
+  <div id="banish-data"
+       hx-get="/api/banish/panel"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading Banish data...</p>
+  </div>
 </div>
 {% endblock %}

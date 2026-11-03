@@ -1809,6 +1809,21 @@ async def api_raid_unlock_apply(payload: RaidUnlockPayload) -> dict:
     }
 
 
+def _script_json(value: object) -> str:
+    """``json.dumps`` for a ``<script type="application/json">`` block.
+
+    ``<``, ``>`` and ``&`` become ``\\u003c``, ``\\u003e`` and ``\\u0026`` (still valid JSON),
+    so a ``</script>`` inside a value cannot end the block: ``status.message`` carries
+    exception text.
+    """
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 @app.get("/api/banish/panel", response_class=HTMLResponse)
 async def api_banish_panel(request: Request) -> HTMLResponse:
     rows = ()
@@ -1820,7 +1835,7 @@ async def api_banish_panel(request: Request) -> HTMLResponse:
     status = await asyncio.to_thread(
         banish_svc.collect_status, store=banish_svc.store_from_env(), **db_credentials()
     )
-    rows_json = json.dumps([
+    rows_json = _script_json([
         {"guid": r.guid, "account": r.account, "name": r.name,
          "level": r.level, "online": r.online, "knows": r.knows}
         for r in rows
@@ -1832,7 +1847,7 @@ async def api_banish_panel(request: Request) -> HTMLResponse:
             "rows": rows,
             "rows_json": rows_json,
             "status": status,
-            "status_json": json.dumps(asdict(status)),
+            "status_json": _script_json(asdict(status)),
             "error": err,
         },
     )
