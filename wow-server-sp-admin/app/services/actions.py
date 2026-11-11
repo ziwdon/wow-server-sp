@@ -978,10 +978,14 @@ def run_start(*, on_progress: ProgressCb) -> ActionResult:
     ac_stack = Path(os.environ.get("AC_STACK_DIR", "/ac"))
     compose_args, extra_env = _ac_compose_base_args(ac_stack)
 
-    on_progress("compose_up", "docker compose up -d ac-worldserver ac-database")
+    # The boot unit starts only the database and the login server; the world
+    # server starts here. Naming all three also brings back a database or
+    # login server that is down (compose skips the ones already running).
+    services = ["ac-database", "ac-authserver", "ac-worldserver"]
+    on_progress("compose_up", f"docker compose up -d {' '.join(services)}")
     try:
         result = subprocess.run(
-            [*compose_args, "up", "-d", "ac-worldserver", "ac-database"],
+            [*compose_args, "up", "-d", *services],
             capture_output=True, text=True, timeout=300,
             env={**os.environ, **extra_env},
         )

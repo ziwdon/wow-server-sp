@@ -491,7 +491,7 @@ def test_root_systemd_heredoc_contains_daemon_restart_and_graceful_stop_contract
     assert "PartOf=docker.service" in rendered
     assert "ExecStop=/usr/bin/docker compose down --timeout 60" in rendered
     assert "TimeoutStopSec=75" in rendered
-    assert "--scale phpmyadmin=0 --scale ac-eluna-ts-dev=0" in rendered
+    assert "ExecStart=/usr/bin/docker compose up -d --no-build ac-database ac-authserver\n" in rendered
     assert "REPLACE_WITH" not in rendered
 
 

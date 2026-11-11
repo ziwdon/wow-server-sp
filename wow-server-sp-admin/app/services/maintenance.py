@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.actions import ActionResult, run_restart, run_start, run_stop
+from app.services.docker_client import inspect_worldserver
 from app.services.runner import runner as default_runner
 
 UTC = dt.timezone.utc
@@ -257,6 +258,10 @@ def _result_status(result: ActionResult | Any) -> str:
 ActionFunc = Callable[..., ActionResult]
 
 
+def _worldserver_status() -> str:
+    return inspect_worldserver().status
+
+
 class MaintenanceScheduler:
     def __init__(
         self,
@@ -266,10 +271,12 @@ class MaintenanceScheduler:
         run_restart: ActionFunc = run_restart,
         run_stop: ActionFunc = run_stop,
         run_start: ActionFunc = run_start,
+        worldserver_status: Callable[[], str] = _worldserver_status,
         interval_seconds: int = 30,
     ) -> None:
         self.store = store
         self.runner = runner
+        self._worldserver_status = worldserver_status
         self._actions = {
             "restart": run_restart,
             "stop": run_stop,
@@ -371,8 +378,39 @@ class MaintenanceScheduler:
             if record is None:
                 return
 
+    def _restart_target_status(self) -> str | None:
+        """None when the world server is running; otherwise its state.
+
+        The world server does not start at boot, so a stopped one is the
+        owner's choice: a scheduled restart must never be what starts it.
+        An unreadable state counts as not running (never start blindly).
+        Runs inside the runner's single-flight lock, so no other action can
+        start or stop the server between this check and the restart.
+        """
+        try:
+            status = self._worldserver_status()
+        except Exception:  # noqa: BLE001
+            log.warning("could not read the world server state", exc_info=True)
+            status = "unknown"
+        return None if status == "running" else status
+
     def _build_runner_func(self, job: DueJob):
         def _run(on_progress):
+            if job.action == "restart":
+                status = self._restart_target_status()
+                if status is not None:
+                    on_progress("inspect", f"world server is {status}; scheduled restart skipped")
+                    self._append_log(MaintenanceLogEntry(
+                        timestamp_utc=_display_stamp(dt.datetime.now(UTC)),
+                        job=job.name,
+                        action=job.action,
+                        status="idle",
+                        message=(
+                            f"World server was not running ({status}); "
+                            "scheduled restart skipped."
+                        ),
+                    ))
+                    return ActionResult.ALREADY
             try:
                 result = self._actions[job.action](on_progress=on_progress)
             except Exception as e:  # noqa: BLE001

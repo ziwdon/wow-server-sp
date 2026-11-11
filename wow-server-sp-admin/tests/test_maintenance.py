@@ -312,6 +312,7 @@ def test_runner_wrapper_logs_final_action_result(tmp_path):
         store,
         runner=runner,
         run_restart=restart,
+        worldserver_status=lambda: "running",
     )
     run = scheduler._build_runner_func(  # noqa: SLF001 - pins wrapper behavior
         DueJob("restart", "restart"),
@@ -323,6 +324,81 @@ def test_runner_wrapper_logs_final_action_result(tmp_path):
     logs = store.read_log()
     assert logs[0].status == "ok"
     assert logs[0].message == "scheduled action finished: ok"
+
+
+def test_scheduled_restart_skips_a_stopped_worldserver(tmp_path):
+    """The world server no longer starts at boot; a scheduled restart must
+    never be the thing that starts it."""
+    store = MaintenanceStore(tmp_path)
+    restart = Mock(return_value=ActionResult.OK)
+    progress = []
+    scheduler = MaintenanceScheduler(
+        store,
+        runner=Mock(),
+        run_restart=restart,
+        worldserver_status=lambda: "exited",
+    )
+    run = scheduler._build_runner_func(  # noqa: SLF001 - pins wrapper behavior
+        DueJob("restart", "restart"),
+    )
+
+    result = run(lambda step, message: progress.append((step, message)))
+
+    restart.assert_not_called()
+    assert result == ActionResult.ALREADY
+    assert progress == [("inspect", "world server is exited; scheduled restart skipped")]
+    logs = store.read_log()
+    assert [(e.job, e.action, e.status) for e in logs] == [("restart", "restart", "idle")]
+    assert logs[0].message == "World server was not running (exited); scheduled restart skipped."
+
+
+def test_scheduled_restart_skips_when_worldserver_state_is_unreadable(tmp_path):
+    store = MaintenanceStore(tmp_path)
+    restart = Mock(return_value=ActionResult.OK)
+
+    def unreadable():
+        raise RuntimeError("docker socket gone")
+
+    scheduler = MaintenanceScheduler(
+        store, runner=Mock(), run_restart=restart, worldserver_status=unreadable,
+    )
+    run = scheduler._build_runner_func(  # noqa: SLF001 - pins wrapper behavior
+        DueJob("restart", "restart"),
+    )
+
+    assert run(lambda *_: None) == ActionResult.ALREADY
+    restart.assert_not_called()
+    assert store.read_log()[0].status == "idle"
+    assert "(unknown)" in store.read_log()[0].message
+
+
+def test_default_worldserver_status_reads_the_container_state(monkeypatch):
+    from app.services import maintenance
+    from app.services.docker_client import ContainerInfo
+
+    monkeypatch.setattr(
+        maintenance, "inspect_worldserver",
+        lambda: ContainerInfo(status="missing", started_at=None, exit_code=None, image=None),
+    )
+
+    assert maintenance._worldserver_status() == "missing"  # noqa: SLF001
+
+
+def test_scheduled_window_start_still_starts_a_stopped_worldserver(tmp_path):
+    """Only the restart job checks the state; the window's start is an
+    explicit request to bring the server up."""
+    store = MaintenanceStore(tmp_path)
+    start = Mock(return_value=ActionResult.OK)
+    scheduler = MaintenanceScheduler(
+        store, runner=Mock(), run_start=start, worldserver_status=lambda: "exited",
+    )
+    run = scheduler._build_runner_func(  # noqa: SLF001 - pins wrapper behavior
+        DueJob("window_start", "start"),
+    )
+
+    assert run(lambda *_: None) == ActionResult.OK
+    start.assert_called_once()
+    assert store.read_log()[0].status == "ok"
 
 
 def test_tick_skips_and_logs_when_another_action_is_running(tmp_path):
@@ -377,6 +453,7 @@ async def test_same_hour_jobs_run_sequentially(tmp_path):
         store, runner=runner,
         run_restart=lambda **_kwargs: (order.append("restart"), ActionResult.OK)[1],
         run_stop=lambda **_kwargs: (order.append("stop"), ActionResult.OK)[1],
+        worldserver_status=lambda: "running",
     )
     scheduler.tick(dt.datetime(2026, 6, 12, 4, 0, tzinfo=UTC))
     await asyncio.gather(*scheduler._pending_jobs)  # noqa: SLF001 - lifecycle contract

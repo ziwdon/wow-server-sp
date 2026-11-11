@@ -895,10 +895,10 @@ fi
 # ============================================================================
 # Check 20 — phpmyadmin / ac-eluna-ts-dev are not running
 # Install Phase 4 brings the stack up with `--scale ${svc}=0` for each of
-# these that exists in the effective compose config, and Phase 8 bakes the
-# same flags into the systemd unit's ExecStart. A user who runs `docker
-# compose up -d` by hand without the flags would silently get phpmyadmin
-# bound to its default port. We check current state (no running container)
+# these that exists in the effective compose config; Phase 8's systemd unit
+# and the admin's Start name the services they start, so they never start
+# them. A user who runs `docker compose up -d` by hand without the flags
+# would silently get phpmyadmin bound to its default port. We check current state (no running container)
 # rather than scale=0 specifically, since either stopped or scaled-to-0
 # is acceptable.
 # ============================================================================
@@ -909,7 +909,7 @@ for svc in phpmyadmin ac-eluna-ts-dev; do
         if [ "$svc_running" -eq 0 ]; then
             ok "$svc is not running (scaled to 0 or stopped)"
         else
-            fail "$svc has ${svc_running} running container(s); install scales it to 0"
+            fail "$svc has ${svc_running} running container(s); the install never starts it"
         fi
     fi
 done

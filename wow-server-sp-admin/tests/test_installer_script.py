@@ -311,6 +311,16 @@ class InstallerScriptTest(unittest.TestCase):
         for line in exec_start_pre:
             self.assertNotIn("${", line)
 
+    def test_systemd_unit_retries_a_failed_boot_start(self):
+        """A slow Tailscale at boot fails the IP wait; without a retry the
+        admin (now the only way to start the world server) stays down."""
+        source = INSTALLER.read_text()
+        unit = source.split("<<'UNIT' >/dev/null\n", 1)[1].split("\nUNIT\n", 1)[0]
+        lines = unit.splitlines()
+
+        self.assertIn("Restart=on-failure", lines)
+        self.assertIn("RestartSec=10s", lines)
+
     def test_systemd_lan_wait_never_blocks_start_when_lan_ip_missing(self):
         source = INSTALLER.read_text()
         unit = source.split("<<'UNIT' >/dev/null\n", 1)[1].split("\nUNIT\n", 1)[0]

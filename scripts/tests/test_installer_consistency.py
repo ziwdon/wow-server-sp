@@ -97,6 +97,77 @@ def test_systemd_stack_unit_gives_worldserver_a_save_grace_period():
     assert "TimeoutStopSec=75" in unit
 
 
+def _stack_unit() -> str:
+    systemd_unit = re.search(
+        r"sudo tee /etc/systemd/system/azerothcore\.service <<'EOF' >/dev/null\n(.*?)\nEOF",
+        INSTALL,
+        re.S,
+    )
+    assert systemd_unit, "azerothcore.service heredoc not found"
+    return systemd_unit.group(1)
+
+
+def test_systemd_stack_unit_starts_only_database_and_login_server():
+    """The world server starts only from the admin app's Start button."""
+    starts = [line for line in _stack_unit().splitlines() if line.startswith("ExecStart=")]
+    assert starts == ["ExecStart=/usr/bin/docker compose up -d --no-build ac-database ac-authserver"]
+
+
+def _override_heredoc() -> str:
+    match = re.search(r"cat > docker-compose\.override\.yml <<'EOF'\n(.*?)\nEOF\n", INSTALL, re.S)
+    assert match, "override heredoc not found"
+    return match.group(1)
+
+
+def test_override_heredoc_turns_off_worldserver_auto_restart():
+    """Docker must not start the world server by itself, not even after a
+    power cut (unless-stopped would)."""
+    block = re.search(r"^  ac-worldserver:\n(.*?)(?=^  \S|\Z)", _override_heredoc(), re.S | re.M)
+    assert block, "ac-worldserver block not found in override heredoc"
+    assert '    restart: "no"' in block.group(1).splitlines()
+    assert _override_heredoc().count("restart:") == 1
+
+
+def _phase_2_6_restart_probe() -> str:
+    phase = INSTALL[INSTALL.index("# PHASE 2.6"):INSTALL.index("# PHASE 3 ")]
+    lines = [line for line in phase.splitlines() if line.lstrip().startswith('ws_restart="$(awk')]
+    assert len(lines) == 1, "Phase 2.6 must read ac-worldserver's effective restart policy once"
+    return lines[0].strip()
+
+
+@pytest.mark.parametrize(
+    ("effective", "expected"),
+    [
+        ('services:\n  ac-database:\n    restart: unless-stopped\n  ac-worldserver:\n'
+         '    image: x\n    restart: "no"\n  ac-zzz:\n    restart: always\n', "no"),
+        ('services:\n  ac-database:\n    restart: "no"\n  ac-worldserver:\n'
+         '    image: x\n    restart: unless-stopped\n', "unless-stopped"),
+        ('services:\n  ac-worldserver:\n    image: x\n  ac-zzz:\n    restart: "no"\n', ""),
+        # Compose v5 renders the YAML-reserved word in single quotes.
+        ("services:\n  ac-worldserver:\n    restart: 'no'\n", "no"),
+    ],
+)
+def test_phase_2_6_reads_the_worldservers_own_effective_restart_policy(tmp_path, effective, expected):
+    import subprocess
+
+    config = tmp_path / "effective.yml"
+    config.write_text(effective)
+    script = f'COMPOSE_EFFECTIVE={config}\n{_phase_2_6_restart_probe()}\nprintf "%s" "$ws_restart"\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    assert result.stdout == expected
+
+
+def test_phase_2_6_fails_unless_worldserver_restart_is_no():
+    phase = INSTALL[INSTALL.index("# PHASE 2.6"):INSTALL.index("# PHASE 3 ")]
+    assert 'if [ "$ws_restart" != "no" ]; then' in phase
+
+
+def test_installer_tells_the_owner_the_world_server_does_not_start_at_boot():
+    final = INSTALL[INSTALL.index("# Finalisation"):]
+    assert "The world server does not start at boot" in final
+    assert "docker compose up -d ac-worldserver" in final
+
+
 def test_intentional_shellcheck_cases_are_narrowly_suppressed_and_documented():
     claude = (SCRIPTS.parent / "CLAUDE.md").read_text()
 

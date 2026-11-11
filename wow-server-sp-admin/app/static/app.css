@@ -1031,6 +1031,7 @@ pre.logview {
 .maintenance-log-ok .maintenance-log-status,
 .maintenance-log-already .maintenance-log-status { color: var(--green); }
 .maintenance-log-started .maintenance-log-status { color: var(--blue); }
+.maintenance-log-idle .maintenance-log-status { color: var(--text-muted); }
 .maintenance-log-skipped .maintenance-log-status,
 .maintenance-log-timeout .maintenance-log-status,
 .maintenance-log-error .maintenance-log-status { color: var(--red); }

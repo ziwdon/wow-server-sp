@@ -271,9 +271,11 @@ docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e \
 Run these in order — stop at the first failure and investigate before continuing:
 
 ```bash
-# 1. Confirm all three containers are up
+# 1. Confirm the database and login server are up
 docker ps --format "table {{.Names}}\t{{.Status}}" | grep ac-
-# Expected: ac-worldserver, ac-authserver, ac-database — all Up
+# Expected after a boot: ac-authserver, ac-database Up. ac-worldserver stays
+# down by design (also after a power cut) until Start in the admin app — press
+# Start before steps 3-4
 
 # 2. Check MySQL recovered cleanly
 docker logs ac-database 2>&1 | grep -E "InnoDB|ERROR|crash|recover" | tail -30
@@ -294,17 +296,19 @@ docker exec -i ac-database mysql -uroot -p"$DOCKER_DB_ROOT_PASSWORD" \
 # All rows must return status: OK
 ```
 
-InnoDB is crash-safe — actual corruption is rare. The main risk is a few seconds of in-flight character saves lost (data loss, not corruption). If containers are not up, start them: `cd /opt/stacks/azerothcore && docker compose up -d`
+InnoDB is crash-safe — actual corruption is rare. The main risk is a few seconds of in-flight character saves lost (data loss, not corruption). If containers are not up, press **Start** in the admin app (it also brings up a database or login server that is down), or `cd /opt/stacks/azerothcore && docker compose up -d ac-database ac-authserver ac-worldserver`
 
 ### Containers not running
+An `ac-worldserver` that is down after a reboot, power cut or Docker restart is **by design**: the boot unit (`azerothcore.service`) starts only `ac-database` and `ac-authserver`, and the world server has `restart: "no"`. Start it from the admin app (Dashboard → Start). Anything else missing:
 ```bash
 docker ps | grep ac-
-# If missing, start them:
+# If missing, start them (or press Start in the admin app):
 cd /opt/stacks/azerothcore
-docker compose up -d
+docker compose up -d ac-database ac-authserver ac-worldserver
 ```
 
 ### Worldserver crashed / restarting loop
+The world server does not restart itself after a crash (`restart: "no"`); it stays down until Start. Read why first:
 ```bash
 docker logs ac-worldserver | tail -100
 # Look for panics, assertions, or DB errors

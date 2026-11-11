@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 
@@ -42,6 +43,24 @@ def test_maintenance_page_renders_utc_controls(tmp_path, monkeypatch):
     assert 'name="restart_hour_utc"' in resp.text
     assert 'name="window_stop_hour_utc"' in resp.text
     assert 'name="window_start_hour_utc"' in resp.text
+
+
+def test_scheduled_restart_card_says_a_stopped_server_stays_stopped(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    resp = client.get("/maintenance")
+
+    assert "Skipped when the world server is not running" in resp.text
+
+
+def test_idle_maintenance_log_status_is_neutral_not_red():
+    css = (Path(__file__).resolve().parents[1] / "app/static/app.css").read_text()
+
+    rule = re.search(r"\.maintenance-log-idle \.maintenance-log-status\s*\{([^}]*)\}", css)
+    assert rule, "no .maintenance-log-idle rule"
+    assert "var(--text-muted)" in rule.group(1)
+    red_group = re.search(r"([^}]*)\{ color: var\(--red\); \}", css[css.index(".maintenance-log-skipped"):])
+    assert "maintenance-log-idle" not in red_group.group(1)
 
 
 def test_maintenance_nav_is_between_settings_and_backups(tmp_path, monkeypatch):

@@ -71,7 +71,7 @@ State is saved in `~/.azerothcore-install-state`. Each phase can be resumed indi
 | `6.1.4` | Write GUID(s) into `configs/modules/mod_ahbot.conf` |
 | `6.1.5` | Worldserver restart + AH verify |
 | `7` | Backup script + cron |
-| `8` | Systemd auto-start (conditional) |
+| `8` | Systemd auto-start (conditional): the database + login server at boot. The world server never starts at boot (`restart: "no"`): start it with the admin app's Start button or `docker compose up -d ac-worldserver` |
 
 > There is **no** `pause-1` phase. The first manual pause (Tailscale auth) runs inline inside phase `0.4`.
 
