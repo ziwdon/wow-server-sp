@@ -792,11 +792,11 @@ def run_stop(
       t=0   announce + notify ("shutting down in 30s")
       t=20  announce + notify ("final 10 seconds")
       t=29  saveall (explicit save while AC is still healthy)
-      t=30  detach, then `docker stop --time 60` (SIGTERM → AC's clean
+      t=30  detach, then `docker stop -t 60` (SIGTERM → AC's clean
             shutdown handler → World::StopNow(SHUTDOWN_EXIT_CODE) →
             final implicit saveall → exit code 0; Docker marks the
             container as user-stopped so `restart: unless-stopped`
-            backs off). The `--time 60` window gives AC's final save
+            backs off). The 60 s timeout gives AC's final save
             headroom under load — on a quiet world it completes in
             5-15 s, but with ~2500 bot characters the save can stretch
             to 30-45 s; 60 s avoids a Docker-initiated SIGKILL while
@@ -847,10 +847,10 @@ def run_stop(
         log.warning("console warning phase failed; proceeding with docker stop: %s", e)
         on_progress("attach", f"console warning phase failed ({e}); proceeding with docker stop")
 
-    on_progress("docker_stop", "docker stop --time 60 ac-worldserver")
+    on_progress("docker_stop", "docker stop -t 60 ac-worldserver")
     try:
         subprocess.run(
-            ["docker", "stop", "--time", "60", WORLDSERVER],
+            ["docker", "stop", "-t", "60", WORLDSERVER],
             check=False, timeout=DOCKER_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
@@ -1019,10 +1019,10 @@ def run_restart(
 
 
 def run_force_stop(*, on_progress: ProgressCb) -> ActionResult:
-    on_progress("force_stop", "docker stop --time 60 ac-worldserver")
+    on_progress("force_stop", "docker stop -t 60 ac-worldserver")
     try:
         result = subprocess.run(
-            ["docker", "stop", "--time", "60", WORLDSERVER],
+            ["docker", "stop", "-t", "60", WORLDSERVER],
             capture_output=True, text=True, timeout=DOCKER_TIMEOUT,
         )
     except subprocess.TimeoutExpired:

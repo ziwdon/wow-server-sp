@@ -390,7 +390,7 @@ stop_worldserver_for_restore() {
     esac
 
     log "Stopping ${WORLD_CONTAINER} (up to ${STOP_TIMEOUT_SECONDS}s)..."
-    if ! docker stop --time "${STOP_TIMEOUT_SECONDS}" "${WORLD_CONTAINER}" >/dev/null; then
+    if ! docker stop -t "${STOP_TIMEOUT_SECONDS}" "${WORLD_CONTAINER}" >/dev/null; then
         status="$(worldserver_status || true)"
         case "$status" in
             missing|created|dead|exited)

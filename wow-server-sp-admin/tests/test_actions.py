@@ -43,14 +43,14 @@ def test_stop_runs_console_commands_then_docker_stop(
     # No 'server shutdown N' in the sequence — by design.
     assert not any("server shutdown" in s for s in sent)
 
-    # docker stop is called with --time 60 (bumped from 30 to give AC's
-    # final saveall headroom under bot-heavy load).
+    # docker stop gets a 60 s timeout (bumped from 30 to give AC's final
+    # saveall headroom under bot-heavy load). `-t` is the short name of
+    # `--timeout` on current Docker and of the deprecated `--time` on old.
     docker_stop_calls = [
         c for c in mock_run.call_args_list if "stop" in c.args[0]
     ]
     assert docker_stop_calls, "docker stop must be called"
-    assert "--time" in docker_stop_calls[0].args[0]
-    assert "60" in docker_stop_calls[0].args[0]
+    assert docker_stop_calls[0].args[0] == ["docker", "stop", "-t", "60", "ac-worldserver"]
 
     assert "docker_stop" in progress
     assert "wait_exit" in progress
@@ -402,6 +402,7 @@ def test_force_stop_escalates_to_kill(mock_wait, mock_run):
 
     mock_run.side_effect = [MagicMock(returncode=1, stderr="nope"), MagicMock(returncode=0)]
     assert run_force_stop(on_progress=lambda *_: None) == ActionResult.OK
+    assert mock_run.call_args_list[0].args[0] == ["docker", "stop", "-t", "60", "ac-worldserver"]
     assert mock_run.call_args_list[1].args[0] == ["docker", "kill", "ac-worldserver"]
 
 

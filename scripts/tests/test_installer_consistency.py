@@ -168,6 +168,21 @@ def test_installer_tells_the_owner_the_world_server_does_not_start_at_boot():
     assert "docker compose up -d ac-worldserver" in final
 
 
+def test_no_script_uses_the_deprecated_docker_stop_time_flag():
+    """Docker 28+ deprecates `docker stop --time` (warns, may be dropped);
+    `-t` works on every version."""
+    scripts = sorted(SCRIPTS.glob("*.sh")) + sorted((SCRIPTS / "lib").glob("*.sh"))
+    admin_scripts = SCRIPTS.parent / "wow-server-sp-admin/scripts"
+    scripts += sorted(admin_scripts.glob("*.sh")) if admin_scripts.is_dir() else []
+    offenders = [
+        f"{path.name}:{n}"
+        for path in scripts
+        for n, line in enumerate(path.read_text().splitlines(), 1)
+        if re.search(r"\bstop\b.*--time\b(?!out)", line)
+    ]
+    assert offenders == []
+
+
 def test_intentional_shellcheck_cases_are_narrowly_suppressed_and_documented():
     claude = (SCRIPTS.parent / "CLAUDE.md").read_text()
 
