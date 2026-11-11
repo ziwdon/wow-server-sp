@@ -520,7 +520,7 @@ def test_dr_restore_accepts_an_already_exited_worldserver(tmp_path, monkeypatch)
     r = _run(stack, archive, bind, logf)
 
     assert r.returncode == 0, r.stderr
-    assert "stop --time" not in logf.read_text()
+    assert "stop -t" not in logf.read_text()
 
 
 def test_dr_restore_confirms_worldserver_stopped_before_mutation(tmp_path, monkeypatch):
@@ -536,8 +536,8 @@ def test_dr_restore_confirms_worldserver_stopped_before_mutation(tmp_path, monke
 
     assert r.returncode == 0, r.stderr
     calls = logf.read_text()
-    assert "stop --time 60 ac-worldserver" in calls
-    assert calls.index("stop --time 60 ac-worldserver") < calls.index("DROP DATABASE IF EXISTS")
+    assert "stop -t 60 ac-worldserver" in calls
+    assert calls.index("stop -t 60 ac-worldserver") < calls.index("DROP DATABASE IF EXISTS")
     assert "compose up -d --force-recreate --no-deps ac-worldserver" in calls
     assert "start ac-worldserver" not in calls
 
@@ -607,7 +607,7 @@ def test_dr_restore_rejects_incompatible_manifest_before_stop_or_mutation(
     assert expected_error in r.stderr
     assert "from: fresh" in (stack / "docker-compose.override.yml").read_text()
     calls = logf.read_text() if logf.exists() else ""
-    assert "stop --time" not in calls
+    assert "stop -t" not in calls
     assert "SELECT address" not in calls
     assert "DROP DATABASE IF EXISTS" not in calls
 
@@ -681,7 +681,7 @@ def test_dr_restore_rejects_v2_stream_with_noncanonical_database_sections_before
     assert "from: fresh" in (stack / "docker-compose.override.yml").read_text()
     calls = logf.read_text() if logf.exists() else ""
     assert "SELECT address" not in calls
-    assert "stop --time" not in calls
+    assert "stop -t" not in calls
     assert "DROP DATABASE IF EXISTS" not in calls
 
 

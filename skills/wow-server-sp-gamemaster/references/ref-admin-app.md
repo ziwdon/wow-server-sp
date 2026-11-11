@@ -209,7 +209,7 @@ Optional panel on the **Backups** tab (**Cloud backup · Proton Drive**) that co
 
 **Server restart path uses PTY attachment**, not `subprocess.PIPE`. The worldserver container has `Tty=true`; attaching via a pipe fails immediately. The admin opens a pseudo-terminal for command injection.
 
-**Stop mechanism uses `docker stop --time 60`** (not `server shutdown N`). AC's SIGTERM handler collapses any in-progress `server shutdown N` countdown. The 60-second grace period accounts for bot-heavy saveall (30-45s) before Docker sends SIGKILL.
+**Stop mechanism uses `docker stop -t 60`** (not `server shutdown N`). AC's SIGTERM handler collapses any in-progress `server shutdown N` countdown. The 60-second grace period accounts for bot-heavy saveall (30-45s) before Docker sends SIGKILL.
 
 **SSE activity log at `/api/action/stream`** is exempt from GZip compression (some browsers silently drop gzip-encoded SSE events).
 
