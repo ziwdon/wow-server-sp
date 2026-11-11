@@ -43,6 +43,7 @@ from app.services import logs as logs_svc
 from app.services import maintenance as maintenance_svc
 from app.services import players as players_svc
 from app.services import presence as presence_svc
+from app.services import server_display
 from app.services import progression as progression_svc
 from app.services import raid_unlock as raid_unlock_svc
 from app.services import wow_reference as wow_ref
@@ -288,11 +289,14 @@ async def api_keys() -> list[dict]:
 @app.get("/api/status", response_class=HTMLResponse)
 async def api_status(request: Request) -> HTMLResponse:
     info = await asyncio.to_thread(docker_client.inspect_worldserver)
+    status_label, status_tone = server_display.status_display(info.status, info.exit_code)
     return templates.TemplateResponse(
         request,
         "partials/status.html",
         {
             "status": info.status,
+            "status_label": status_label,
+            "status_tone": status_tone,
             "started_at_human": _format_started_at(info.started_at),
             "exit_code": info.exit_code,
         },
@@ -427,6 +431,30 @@ async def api_players(request: Request) -> HTMLResponse:
     )
 
 
+WORLD_LOG_FILES = ("Server.log", "Playerbots.log", "Errors.log")
+
+
+async def _last_session_written(logs_dir: Path) -> str | None:
+    """When the world server is not running: the time its logs were last written.
+
+    All three files are truncated only when the world server next starts, and
+    it no longer starts at boot, so while it is down they hold the previous
+    session. None while it runs, when Docker cannot be asked, or with no logs.
+    """
+    try:
+        info = await asyncio.to_thread(docker_client.inspect_worldserver)
+    except Exception:
+        return None
+    if info.status not in server_display.NOT_STARTED | server_display.STOPPED:
+        return None
+    written = await asyncio.to_thread(
+        logs_svc.last_written, [logs_dir / name for name in WORLD_LOG_FILES]
+    )
+    if written is None:
+        return None
+    return dt.datetime.fromtimestamp(written, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 @app.get("/api/logs", response_class=HTMLResponse)
 async def api_logs(request: Request) -> HTMLResponse:
     ac = Path(os.environ.get("AC_STACK_DIR", "/ac"))
@@ -452,6 +480,7 @@ async def api_logs(request: Request) -> HTMLResponse:
         request,
         "partials/logs.html",
         {
+            "last_session_written": await _last_session_written(logs_dir),
             "errors": known_errors_svc.summarize_errors_log(logs_dir / "Errors.log"),
             "errors_rows": [(line, known_errors_svc.match_known(line)) for line in errors_lines],
             "server_lines": logs_svc.tail_filtered(logs_dir / "Server.log", n=40),

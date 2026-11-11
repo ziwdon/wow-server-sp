@@ -2,6 +2,9 @@
   <span class="panel-title">Logs</span>
   <button class="btn btn-sm" onclick="refreshLogsPreservingTab()">Refresh</button>
 </div>
+{% if last_session_written %}
+<div class="log-stale-notice" role="note">World server is not running. These logs are from its last session, last written {{ last_session_written }}. They clear on the next Start.</div>
+{% endif %}
 <div class="log-tabs" role="tablist" aria-label="Log sources">
   <button id="server-log-tab" class="log-tab active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="server-log" onclick="switchLog(this, 'server-log')">Server.log</button>
   <button id="playerbots-log-tab" class="log-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="playerbots-log" onclick="switchLog(this, 'playerbots-log')">Playerbots.log</button>
