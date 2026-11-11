@@ -1999,7 +1999,7 @@ else
     prompt_yn "Install and enable UFW firewall?" n
     INSTALL_UFW="$PROMPT_RESULT"
 
-    prompt_yn "Enable systemd auto-start on boot?" y
+    prompt_yn "Enable systemd auto-start on boot (database + login server; the world server starts from the admin app)?" y
     ENABLE_SYSTEMD="$PROMPT_RESULT"
 
     if [ "$ADOPT" = true ]; then
@@ -2877,6 +2877,11 @@ services:
       - ./configs/mysql/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
 
   ac-worldserver:
+    # Starts only on request (the admin app's Start button, or
+    # `docker compose up -d ac-worldserver`): Phase 8's boot unit brings up the
+    # database + login server, and upstream's `unless-stopped` would let Docker
+    # start the world server by itself after a power cut or crash.
+    restart: "no"
     ports:
       # Direct-LAN play (optional LAN_IP prompt). The Tailscale bind comes from
       # .env DOCKER_WORLD_EXTERNAL_PORT; this adds a second host bind. The
@@ -3228,6 +3233,15 @@ if should_run_phase "2.6"; then
             fail=1
         fi
     done
+
+    # ac-worldserver's own restart policy (its service block only; the other
+    # services keep upstream's unless-stopped). Compose renders it as 'no' or
+    # "no" depending on the version: strip both quotes (\047 = ').
+    ws_restart="$(awk '/^  ac-worldserver:$/ {s = 1; next} s && /^  [^ ]/ {exit} s && /^    restart:/ {sub(/^    restart:[[:space:]]*/, ""); gsub(/["\047]/, ""); print; exit}' "$COMPOSE_EFFECTIVE")"
+    if [ "$ws_restart" != "no" ]; then
+        echo "INVALID restart policy for ac-worldserver: '${ws_restart:-<unset>}' (expected \"no\"; it starts only from the admin app's Start)"
+        fail=1
+    fi
 
     if [ "${fail}" -ne 0 ]; then
         echo "ERROR: Effective compose config is missing expected entries."
@@ -4061,6 +4075,7 @@ fi
 
 # ============================================================================
 # PHASE 8 — Systemd auto-start (conditional)
+# Starts the database + login server at boot, never the world server.
 # Heredoc is fixed content; only REPLACE_WITH_YOUR_USERNAME gets sed-substituted below.
 # ============================================================================
 if should_run_phase "8"; then
@@ -4073,24 +4088,9 @@ if should_run_phase "8"; then
         sudo systemctl is-enabled docker || true
         sudo systemctl is-enabled tailscaled || true
 
-        # Detect which "extras" services exist in the effective compose config
-        # right now, and bake their --scale=0 args into the unit's ExecStart.
-        # We don't redetect at boot because the compose file is part of the
-        # cloned repo and effectively immutable on this host.
-        SYSTEMD_SCALE_FRAGMENT=""
-        EFFECTIVE_SERVICES="$(cd "$STACK_DIR" && docker compose config --services 2>/dev/null || echo "")"
-        for svc in phpmyadmin ac-eluna-ts-dev; do
-            if echo "$EFFECTIVE_SERVICES" | grep -qx "$svc"; then
-                SYSTEMD_SCALE_FRAGMENT="${SYSTEMD_SCALE_FRAGMENT} --scale ${svc}=0"
-            fi
-        done
-        if [ -n "$SYSTEMD_SCALE_FRAGMENT" ]; then
-            echo "Systemd unit will scale these services to 0:${SYSTEMD_SCALE_FRAGMENT}"
-        fi
-
         sudo tee /etc/systemd/system/azerothcore.service <<'EOF' >/dev/null
 [Unit]
-Description=AzerothCore + Playerbots Docker Stack
+Description=AzerothCore database + login server (the world server starts from the admin app)
 Requires=docker.service tailscaled.service
 # Propagate a Docker daemon restart to this dependent Compose stack. With the
 # After= ordering below, compose is stopped while Docker is still available,
@@ -4111,7 +4111,11 @@ WorkingDirectory=/opt/stacks/azerothcore
 ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore/.env; TS_IP="${DOCKER_AUTH_EXTERNAL_PORT%%:*}"; if [ -z "$TS_IP" ]; then echo "ERROR: DOCKER_AUTH_EXTERNAL_PORT is empty or missing in /opt/stacks/azerothcore/.env"; exit 1; fi; for i in {1..60}; do tailscale ip -4 2>/dev/null | grep -Fxq "$TS_IP" && exit 0; ip -4 -o addr show dev tailscale0 2>/dev/null | grep -Eq "inet ${TS_IP//./\\.}/[0-9]+" && exit 0; echo "Waiting for Tailscale IP $TS_IP..."; sleep 2; done; echo "ERROR: Tailscale IP $TS_IP is not assigned locally"; echo "tailscale ip -4:"; tailscale ip -4 2>/dev/null || true; echo "tailscale0 IPv4 addresses:"; ip -4 -o addr show dev tailscale0 2>/dev/null || true; exit 1'
 ExecStartPre=/bin/bash -lc 'LAN=$(grep -oE "[0-9.]+:3724:3724" /opt/stacks/azerothcore/docker-compose.override.yml 2>/dev/null | head -n1 | cut -d: -f1); if [ -z "$LAN" ] || [ "$LAN" = 127.0.0.1 ]; then exit 0; fi; for i in {1..15}; do ip -4 -o addr show | grep -Fq " $LAN/" && exit 0; echo "Waiting for LAN IP $LAN..."; sleep 2; done; echo "WARNING: LAN IP $LAN not assigned; starting anyway (needs net.ipv4.ip_nonlocal_bind=1)"; exit 0'
 
-ExecStart=/usr/bin/docker compose up -d --no-build REPLACE_WITH_SCALE_FRAGMENT
+# Only the database (admin pages, nightly backup) and the login server: the
+# world server starts on request (admin Start, which also brings these two up
+# when they are down). Naming the services also keeps phpmyadmin and
+# ac-eluna-ts-dev down. Stopping still takes the world server down cleanly.
+ExecStart=/usr/bin/docker compose up -d --no-build ac-database ac-authserver
 ExecStop=/usr/bin/docker compose down --timeout 60
 TimeoutStartSec=300
 # Worldserver's saveall can take 30-45 seconds under a large bot load. Give
@@ -4130,9 +4134,6 @@ WantedBy=multi-user.target
 EOF
 
         sudo sed -i "s/REPLACE_WITH_YOUR_USERNAME/$(whoami)/" /etc/systemd/system/azerothcore.service
-        # Bake in the scale fragment we detected above. The trailing space on the
-        # placeholder ensures clean substitution whether the fragment is empty or not.
-        sudo sed -i "s| REPLACE_WITH_SCALE_FRAGMENT|${SYSTEMD_SCALE_FRAGMENT}|" /etc/systemd/system/azerothcore.service
 
         sudo systemctl daemon-reload
         sudo systemctl enable azerothcore
@@ -4170,6 +4171,10 @@ echo "  - Playerbots:   installer-managed tuning is in docker-compose.override.y
 echo "                  only edit playerbots.conf for options not overridden by env."
 echo "  - MySQL tuning: edit ${STACK_DIR}/configs/mysql/custom.cnf, then"
 echo "                  'docker compose restart ac-database'."
+echo ""
+echo "Boot:            The world server does not start at boot (only the database"
+echo "                  and login server do). Start it with the admin app's Start"
+echo "                  button, or: cd ${STACK_DIR} && docker compose up -d ac-worldserver"
 echo ""
 echo "Verify with:     ./verify-azerothcore.sh"
 echo ""

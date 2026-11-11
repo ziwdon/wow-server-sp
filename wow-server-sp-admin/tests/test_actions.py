@@ -241,7 +241,7 @@ def test_start_uses_translated_compose_command_and_absolute_env_override(
             "docker", "compose", "--project-name", "custom-azerothcore",
             "--project-directory", "/var/lib/azerothcore",
             "-f", "/ac/docker-compose.yml", "--env-file", "/ac/.env",
-            "up", "-d", "ac-worldserver", "ac-database",
+            "up", "-d", "ac-database", "ac-authserver", "ac-worldserver",
         ],
     )
     assert mock_run.call_args.kwargs["env"]["DOCKER_AC_ENV_FILE"] == "/ac/conf/dist/env.ac"
@@ -266,7 +266,7 @@ def test_start_returns_error_when_translated_compose_up_fails(
     progress: list[tuple[str, str]] = []
 
     assert run_start(on_progress=lambda step, message: progress.append((step, message))) == ActionResult.ERROR
-    assert progress == [("compose_up", "docker compose up -d ac-worldserver ac-database"),
+    assert progress == [("compose_up", "docker compose up -d ac-database ac-authserver ac-worldserver"),
                         ("compose_up", "compose up FAILED: invalid compose file")]
 
 

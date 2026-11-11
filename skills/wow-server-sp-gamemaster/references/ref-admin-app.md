@@ -44,6 +44,7 @@ Four tabs: Server.log, Playerbots.log, Errors.log, App Events.
 - **App Events** — the admin app's own warnings/errors since its last restart
 
 ### Actions (Dashboard)
+- **Start** — brings up the database, login server and world server (whichever are down) and waits for `World Initialized`. The world server does **not** start at boot and does **not** restart itself after a crash, a power cut or a Docker restart (`restart: "no"`): pressing Start is the way it comes up. The boot unit starts only the database and login server; the admin app itself starts at boot and retries until Tailscale is up
 - **Restart** — graceful restart (announce → saveall → stop → wait → start)
 - **Stop** — graceful stop with configurable countdown
 - **Backup** — triggers a manual backup through the same bundled `backup.sh` used by nightly cron
@@ -156,7 +157,7 @@ The Armory tab (`/armory`, one character at `/armory/<guid>`) is a read-only cha
 
 - **Bot Control** — `Reset bots` (sends `playerbot rndbot init`: every random bot **currently logged in** keeps its name/race/class but is re-rolled to a fresh level within `RandomBotMinLevel`/`MaxLevel`, new talents and gear, and teleported to a level-appropriate zone; offline bots are untouched, no accounts or characters are deleted) and `Clear bots` (destructive: stops the server, safety backup, deletes every RNDBOT account and its characters, restarts; pool regenerates on next boot).
 - **Player Announcements** — one checkbox, saves immediately. The admin always polls `acore_characters.characters.online` every 15 s for real accounts (not `RNDBOT%`/`ahbot`) to track who is in (this feeds the Players tab and the dashboard "Online" card); when the checkbox is on it also sends `announce Player <Account> (<Character>) is online.` / `… has gone offline.` over the worldserver console (account name title-cased; the character is omitted only when two characters appeared in the same poll). Presence is tracked **per account**: the first character to come online is the human, so alt-bots summoned from your own account are never announced; "offline" needs two consecutive empty polls, so a quick character swap is silent. Nothing is announced around admin Stop/Restart or worldserver boots (state reseeds silently). Config: `azerothcore-admin/data/presence.json`; API: `GET/POST /api/presence`.
-- **Scheduled Restart** / **Stop / Start Window** — daily UTC-hour jobs run by the in-app scheduler (`maintenance.json`); the log below shows the last 20 runs.
+- **Scheduled Restart** / **Stop / Start Window** — daily UTC-hour jobs run by the in-app scheduler (`maintenance.json`); the log below shows the last 20 runs. The scheduled restart only restarts a **running** world server: when it is stopped (for example not started since the machine booted) the job is skipped and logged as `IDLE`, so it never starts a server you left off. The window's start hour does start it (that is its purpose).
 
 ## Customization Page
 

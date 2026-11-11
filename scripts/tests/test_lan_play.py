@@ -161,7 +161,7 @@ def test_existing_override_lan_ip_reads_the_authserver_lan_line(tmp_path, overri
 def test_adopt_mode_never_prompts_for_a_new_lan_ip():
     # Adopt skips Phase 2.5, so a prompted LAN IP would reach the realmlist
     # (Phase 5) without any listener. It must come from the existing override.
-    block = INSTALL.split('    prompt_yn "Enable systemd auto-start on boot?" y\n', 1)[1].split("    save_config\n", 1)[0]
+    block = INSTALL.split('    ENABLE_SYSTEMD="$PROMPT_RESULT"\n', 1)[1].split("    save_config\n", 1)[0]
     adopt, _, fresh = block.partition("    else\n")
     assert 'if [ "$ADOPT" = true ]; then' in adopt
     assert 'LAN_IP="$(existing_override_lan_ip)"' in adopt

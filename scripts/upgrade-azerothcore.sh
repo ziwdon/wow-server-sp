@@ -1266,8 +1266,9 @@ compare_counts() {
     done
 }
 
-# refuse_realm_started_since_stop — azerothcore.service starts the stack at
-# boot: a realm (or db-import) up between the stop step and BOOT_STARTED, or
+# refuse_realm_started_since_stop — azerothcore.service starts the login
+# server (and with it db-import) at boot, the admin's Start the whole realm:
+# a realm (or db-import) up between the stop step and BOOT_STARTED, or
 # started since the stop step and stopped again, means a host reboot or a hand
 # start ran the half-switched stack. The databases may have changed; never
 # stop it and go on. Anything but exited/created/missing counts as up (a

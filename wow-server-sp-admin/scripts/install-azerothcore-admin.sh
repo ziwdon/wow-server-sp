@@ -284,6 +284,10 @@ ExecStartPre=/bin/bash -lc 'source /opt/stacks/azerothcore-admin/.env; [ -z "$LA
 ExecStart=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env up -d
 ExecStop=/usr/bin/docker compose --env-file /opt/stacks/azerothcore-admin/.env down
 TimeoutStartSec=300
+# The admin is how the world server gets started, so a boot where Tailscale
+# is slower than the IP wait must not leave it down: retry until it comes up.
+Restart=on-failure
+RestartSec=10s
 User=REPLACE_WITH_YOUR_USERNAME
 
 [Install]
