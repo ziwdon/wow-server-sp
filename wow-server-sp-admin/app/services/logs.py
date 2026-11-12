@@ -81,3 +81,14 @@ def tail_filtered(
     lines = _decode_tail(chunks, starts_at_line_boundary)
     keep = [line for line in lines if not _is_benign(line)]
     return keep[-n:]
+
+
+def last_written(paths: list[Path]) -> float | None:
+    """Newest mtime among the files that exist, or None when none does."""
+    times = []
+    for path in paths:
+        try:
+            times.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(times) if times else None

@@ -1,6 +1,6 @@
 <div class="stat-card">
   <div class="stat-label">Server Status</div>
-  <div class="stat-value status-{{ status }}">{{ status|upper }}</div>
+  <div class="stat-value status-{{ status_tone }}">{{ status_label }}</div>
   {% if started_at_human != "—" %}
   <div class="stat-sub">Started: {{ started_at_human }}</div>
   {% endif %}

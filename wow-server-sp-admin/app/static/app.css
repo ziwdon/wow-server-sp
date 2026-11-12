@@ -86,8 +86,9 @@ nav.topnav {
   letter-spacing: 0.04em;
 }
 .status-pill.status-running { background: #0e1f0e; border: 1px solid #2a5a1a; color: var(--green); }
-.status-pill.status-exited,
-.status-pill.status-missing { background: #1f0e0e; border: 1px solid #5a1a1a; color: var(--red); }
+.status-pill.status-failed { background: #1f0e0e; border: 1px solid #5a1a1a; color: var(--red); }
+/* Not running is normal (no autostart at boot): neutral, not an alarm. */
+.status-pill.status-stopped { background: var(--sidebar-bg); border: 1px solid var(--border); color: var(--text-muted); }
 
 /* ── Main ── */
 main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -130,8 +131,8 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .stat-value { font-size: 1.05rem; font-weight: 600; color: var(--text); }
 .stat-sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.2rem; }
 .stat-value.status-running { color: var(--green); }
-.stat-value.status-exited,
-.stat-value.status-missing { color: var(--red); }
+.stat-value.status-failed { color: var(--red); }
+.stat-value.status-stopped { color: var(--text-muted); }
 
 /* ── Action bar ── */
 .action-bar { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
@@ -236,6 +237,13 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .log-tab.active { color: var(--gold-bright); border-bottom-color: var(--gold); }
 .log-tab-dirty { color: var(--red); }
 .log-tab-dirty.active { border-bottom-color: var(--red); color: var(--red); }
+.log-stale-notice {
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--yellow-bg);
+  color: var(--text-warm);
+  font-size: 0.8rem;
+}
 .log-errors-bar {
   padding: 0.4rem 1rem;
   border-bottom: 1px solid var(--border);
